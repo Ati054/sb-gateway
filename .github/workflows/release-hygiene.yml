@@ -25,7 +25,8 @@ jobs:
           cache: npm
       - run: sh scripts/verify-public-tree.sh
       - run: go build ./cmd/...
+      - run: go test ./cmd/... ./internal/... ./tests/tools
       - run: npm ci --ignore-scripts
       - run: npm run lint
-      - run: npm run build
+      - run: npm test
       - run: npm run build:static

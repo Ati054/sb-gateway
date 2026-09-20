@@ -26,8 +26,8 @@ type XrayCandidateArtifacts struct {
 
 // xrayConnectionBufferKiB overrides Xray's unusually small 4 KiB ARM64
 // default. 128 KiB materially reduces copy/wakeup pressure on sustained
-// transparent traffic while keeping the worst-case memory cost bounded on a
-// 384 MiB RouterOS container.
+// transparent traffic while keeping the worst-case memory cost bounded by the
+// RouterOS container's 256 MiB hard limit.
 const xrayConnectionBufferKiB = 128
 
 func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandidateOptions) (XrayCandidateArtifacts, error) {

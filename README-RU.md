@@ -142,9 +142,9 @@ RouterOS.
 однократный bootstrap через **WebFig Terminal**; SSH/WinBox и постоянная работа
 в CLI не нужны.
 
-1. Скачайте `sb-gateway-1.6.17-routeros-bundle.zip` со страницы GitHub Release
+1. Скачайте `sb-gateway-1.6.18-routeros-bundle.zip` со страницы GitHub Release
    и проверьте SHA-256 архива. Внутри находятся контейнер
-   `sb-gateway-1.6.17-linux-arm64.tar`, его checksum и manifest, а также каталог
+   `sb-gateway-1.6.18-linux-arm64.tar`, его checksum и manifest, а также каталог
    `routeros/`. На компьютере отдельно проверьте SHA-256 внутреннего `.tar`.
 2. Подключите USB 3.0 SSD и компьютер администратора кабелем к доверенной
    management LAN. Не выполняйте bootstrap через Wi‑Fi или удалённый VPN.
@@ -290,6 +290,12 @@ make test
 make ui-check
 make image-bundle
 ```
+
+Публичные исходники содержат очищенные Go- и browser-регрессии. Приватная
+топология стенда, учётные данные, hardware-harness и внутренние evidence в них
+не публикуются. Зелёный CI подтверждает эти функциональные регрессии вместе со
+сборкой, но не заменяет проверку на целевом MikroTik и внешних узлах
+администратора.
 
 На Windows тот же release bundle собирается командой
 `.\scripts\build-routeros-bundle.ps1`. Нужен Docker или Podman. Упаковщик

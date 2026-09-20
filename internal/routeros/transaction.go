@@ -3,8 +3,40 @@ package routeros
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
+
+type TransactionFailureState string
+
+const (
+	TransactionRolledBack       TransactionFailureState = "rolled_back"
+	TransactionRecoveryPending  TransactionFailureState = "recovery_pending"
+	TransactionStateUnconfirmed TransactionFailureState = "state_unconfirmed"
+)
+
+type TransactionFailure struct {
+	State TransactionFailureState
+	Err   error
+}
+
+func (failure *TransactionFailure) Error() string {
+	return fmt.Sprintf("RouterOS transaction %s: %v", failure.State, failure.Err)
+}
+
+func (failure *TransactionFailure) Unwrap() error { return failure.Err }
+
+func TransactionFailureStateOf(err error) (TransactionFailureState, bool) {
+	var failure *TransactionFailure
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+	return failure.State, true
+}
+
+func transactionFailure(state TransactionFailureState, values ...error) error {
+	return &TransactionFailure{State: state, Err: errors.Join(values...)}
+}
 
 type transactionREST interface {
 	PrepareDirectDelta(context.Context, string, string) (string, error)
@@ -129,7 +161,7 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 	if options.BeforeApply != nil {
 		if err := options.BeforeApply(ctx); err != nil {
 			rollbackErr := transaction.rollbackPrepared(result.RollbackScript, scheduler, imports, options.SettleTimeout)
-			return result, errors.Join(errors.New("RouterOS pre-apply runtime guard failed"), err, rollbackErr)
+			return result, guardedFailure("RouterOS pre-apply runtime guard failed", err, rollbackErr)
 		}
 	}
 	if options.SchedulerGuardOnly {
@@ -146,7 +178,7 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 		settleErr := transaction.rest.WaitSafeModeSettled(settleContext, options.SettleTimeout)
 		cancel()
 		if settleErr != nil {
-			return result, errors.Join(err, settleErr)
+			return result, transactionFailure(TransactionRecoveryPending, err, settleErr)
 		}
 		result.GuardMode = "rollback_scheduler_fallback"
 		return transaction.applyWithSchedulerGuard(ctx, result, scheduler, options, imports)
@@ -155,27 +187,34 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 	result.HistoryCapReached = session.HistoryCapReached()
 	if err := options.HealthCheck(ctx); err != nil {
 		cleanupErr := transaction.cleanupAfterAbort(scheduler, result.RollbackScript, session, options.SettleTimeout, imports)
-		return result, errors.Join(errors.New("RouterOS candidate failed post-apply health check"), err, cleanupErr)
+		return result, guardedFailure("RouterOS candidate failed post-apply health check", err, cleanupErr)
 	}
 	if err := session.Commit(ctx, options.SettleTimeout); err != nil {
 		// Commit uncertainty keeps the independent scheduler armed.
-		return result, err
+		return result, transactionFailure(TransactionRecoveryPending, err)
 	}
 	cleanupContext, cancel := context.WithTimeout(context.Background(), options.SettleTimeout)
 	defer cancel()
 	if err := transaction.rest.WaitSafeModeSettled(cleanupContext, options.SettleTimeout); err != nil {
-		return result, err
+		return result, transactionFailure(TransactionRecoveryPending, err)
+	}
+	if err := transaction.rest.DisarmRollback(cleanupContext, scheduler); err != nil {
+		rollbackErr := transaction.restoreWhileGuardArmed(result.RollbackScript, options.SettleTimeout)
+		state := TransactionRolledBack
+		if rollbackErr != nil {
+			state = TransactionRecoveryPending
+		}
+		return result, transactionFailure(state, errors.New("RouterOS rollback guard could not be disarmed"), err, rollbackErr)
 	}
 	if options.Finalize != nil {
 		if err := options.Finalize(cleanupContext); err != nil {
-			rollbackContext, cancelRollback := context.WithTimeout(context.Background(), options.SettleTimeout)
-			defer cancelRollback()
-			rollbackErr := transaction.rollbackCommitted(rollbackContext, result.RollbackScript, scheduler, imports, options.SettleTimeout)
-			return result, errors.Join(errors.New("RouterOS candidate finalization failed"), err, rollbackErr)
+			rollbackErr := transaction.restoreAfterGuardDisarmed(result.RollbackScript, imports, options.SettleTimeout)
+			state := TransactionRolledBack
+			if rollbackErr != nil {
+				state = TransactionStateUnconfirmed
+			}
+			return result, transactionFailure(state, errors.New("RouterOS candidate finalization failed"), err, rollbackErr)
 		}
-	}
-	if err := transaction.rest.DisarmRollback(cleanupContext, scheduler); err != nil {
-		return result, err
 	}
 	if len(imports) > 0 {
 		if err := transaction.cleanup(cleanupContext, imports...); err != nil {
@@ -191,22 +230,31 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 func (transaction *Transaction) applyWithSchedulerGuard(ctx context.Context, result TransactionResult, scheduler string, options TransactionOptions, imports []string) (TransactionResult, error) {
 	if err := transaction.run(ctx, result.ApplyScript); err != nil {
 		rollbackErr := transaction.rollbackPrepared(result.RollbackScript, scheduler, imports, options.SettleTimeout)
-		return result, errors.Join(errors.New("RouterOS guarded candidate failed"), err, rollbackErr)
+		return result, guardedFailure("RouterOS guarded candidate failed", err, rollbackErr)
 	}
 	if err := options.HealthCheck(ctx); err != nil {
 		rollbackErr := transaction.rollbackPrepared(result.RollbackScript, scheduler, imports, options.SettleTimeout)
-		return result, errors.Join(errors.New("RouterOS candidate failed post-apply health check"), err, rollbackErr)
+		return result, guardedFailure("RouterOS candidate failed post-apply health check", err, rollbackErr)
 	}
 	cleanupContext, cancel := context.WithTimeout(context.Background(), options.SettleTimeout)
 	defer cancel()
+	if err := transaction.rest.DisarmRollback(cleanupContext, scheduler); err != nil {
+		rollbackErr := transaction.restoreWhileGuardArmed(result.RollbackScript, options.SettleTimeout)
+		state := TransactionRolledBack
+		if rollbackErr != nil {
+			state = TransactionRecoveryPending
+		}
+		return result, transactionFailure(state, errors.New("RouterOS rollback guard could not be disarmed"), err, rollbackErr)
+	}
 	if options.Finalize != nil {
 		if err := options.Finalize(cleanupContext); err != nil {
-			rollbackErr := transaction.rollbackCommitted(cleanupContext, result.RollbackScript, scheduler, imports, options.SettleTimeout)
-			return result, errors.Join(errors.New("RouterOS candidate finalization failed"), err, rollbackErr)
+			rollbackErr := transaction.restoreAfterGuardDisarmed(result.RollbackScript, imports, options.SettleTimeout)
+			state := TransactionRolledBack
+			if rollbackErr != nil {
+				state = TransactionStateUnconfirmed
+			}
+			return result, transactionFailure(state, errors.New("RouterOS candidate finalization failed"), err, rollbackErr)
 		}
-	}
-	if err := transaction.rest.DisarmRollback(cleanupContext, scheduler); err != nil {
-		return result, err
 	}
 	if len(imports) > 0 {
 		if err := transaction.cleanup(cleanupContext, imports...); err != nil {
@@ -222,6 +270,14 @@ func (transaction *Transaction) rollbackPrepared(rollbackName, scheduler string,
 	return transaction.rollbackCommitted(rollbackContext, rollbackName, scheduler, imports, settleTimeout)
 }
 
+func guardedFailure(message string, cause, rollbackErr error) error {
+	state := TransactionRolledBack
+	if rollbackErr != nil {
+		state = TransactionRecoveryPending
+	}
+	return transactionFailure(state, errors.New(message), cause, rollbackErr)
+}
+
 func (transaction *Transaction) rollbackCommitted(ctx context.Context, rollbackName, scheduler string, imports []string, settleTimeout time.Duration) error {
 	if err := transaction.run(ctx, rollbackName); err != nil {
 		// The independent scheduler stays armed when immediate rollback is
@@ -232,6 +288,37 @@ func (transaction *Transaction) rollbackCommitted(ctx context.Context, rollbackN
 		return err
 	}
 	if err := transaction.rest.DisarmRollback(ctx, scheduler); err != nil {
+		return err
+	}
+	if len(imports) > 0 {
+		return transaction.cleanup(ctx, imports...)
+	}
+	return nil
+}
+
+// restoreWhileGuardArmed returns RouterOS to the previous candidate without
+// touching the scheduler that failed to disarm. The one-shot scheduler remains
+// an idempotent second attempt if the immediate recovery is interrupted.
+func (transaction *Transaction) restoreWhileGuardArmed(rollbackName string, settleTimeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
+	defer cancel()
+	if err := transaction.run(ctx, rollbackName); err != nil {
+		return err
+	}
+	return transaction.rest.WaitSafeModeSettled(ctx, settleTimeout)
+}
+
+// restoreAfterGuardDisarmed handles the narrow window in which RouterOS is
+// committed but the local application commit point could not be published.
+// There is no armed fallback in this path, so a failed immediate restore is
+// explicitly reported as unconfirmed.
+func (transaction *Transaction) restoreAfterGuardDisarmed(rollbackName string, imports []string, settleTimeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
+	defer cancel()
+	if err := transaction.run(ctx, rollbackName); err != nil {
+		return err
+	}
+	if err := transaction.rest.WaitSafeModeSettled(ctx, settleTimeout); err != nil {
 		return err
 	}
 	if len(imports) > 0 {

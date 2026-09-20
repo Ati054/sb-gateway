@@ -62,18 +62,34 @@ try {
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllLines((Join-Path $sourceRoot "CHANGELOG.md"), $publicChangelog, $utf8NoBom)
+    Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs/releases') -File | Where-Object {
+        $_.Name -ne "$version.md"
+    } | Remove-Item -Force
 
-    $forbiddenRoots = @('.agents', '.codex', '.lab', '.openai', 'tests', 'AGENTS.md', 'CODEX_HANDOFF.md', 'IMPLEMENTATION_REPORT.md', 'QUATTRO_SERVERS_AUDIT.md')
+    $forbiddenRoots = @(
+        '.agents', '.codex', '.lab', '.openai', 'AGENTS.md', 'CODEX_HANDOFF.md',
+        'IMPLEMENTATION_REPORT.md', 'QUATTRO_SERVERS_AUDIT.md',
+        'docs/ACCEPTANCE-TESTS.md', 'docs/research', 'templates/xray.smoke.json'
+    )
     foreach ($relative in $forbiddenRoots) {
-        if (Test-Path -LiteralPath (Join-Path $sourceRoot $relative)) {
-            throw "Forbidden public path exported: $relative"
+        $target = Join-Path $sourceRoot $relative
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -LiteralPath $target -Recurse -Force
         }
     }
+    foreach ($relative in @(
+        'tests/lab-stress-harness.test.mjs',
+        'tests/password-persistence.test.mjs',
+        'tests/ruleset-domain-audit.test.mjs'
+    )) {
+        $target = Join-Path $sourceRoot $relative
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+    }
     $forbiddenFiles = @(Get-ChildItem -LiteralPath $sourceRoot -File -Recurse | Where-Object {
-        $_.Name -match '_test\.go$|\.(test|spec)\.(mjs|js|ts|tsx)$|^\.env|\.(pem|key|p12|pfx)$'
+        $_.Name -match '^\.env|\.(pem|key|p12|pfx)$'
     })
     if ($forbiddenFiles.Count -ne 0) {
-        throw "Forbidden development or credential-like files entered the public source export."
+        throw "Credential-like files entered the public source export."
     }
 
     Compress-Archive -Path (Join-Path $sourceRoot '*') -DestinationPath $archivePath

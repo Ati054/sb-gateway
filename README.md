@@ -1,6 +1,6 @@
 # SB Gateway for MikroTik RouterOS 7
 
-SB Gateway 1.6.17 is a bilingual Web-managed traffic-policy gateway packaged as
+SB Gateway 1.6.18 is a bilingual Web-managed traffic-policy gateway packaged as
 one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.9
 only; sing-box is not shipped and there is no core switch in the UI.
 
@@ -46,7 +46,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.17-routeros-bundle.zip` from the GitHub release and
+Download `sb-gateway-1.6.18-routeros-bundle.zip` from the GitHub release and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 
@@ -242,14 +242,18 @@ temporary veth are removed so exactly one SB Gateway container remains.
 ```sh
 make validate
 go build ./cmd/...
+go test ./cmd/... ./internal/... ./tests/tools
 npm ci --ignore-scripts
 npm run lint
-npm run build
+npm test
 npm run build:static
 ```
 
-Build checks do not replace validation on the target MikroTik and the
-administrator's external nodes.
+The public source includes sanitized Go and browser regression tests. Private
+lab topology, credentials, hardware harnesses, and internal evidence are not
+part of that suite. Passing CI therefore verifies the published functional
+regressions as well as compilation, but does not replace validation on the
+target MikroTik and the administrator's external nodes.
 
 ## Documentation
 
