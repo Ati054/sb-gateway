@@ -435,7 +435,13 @@ function errorMessage(error: unknown, locale: Locale = currentUiLocale()): strin
     const code = asText(issue?.code, error.code);
     const path = asText(issue?.path, "");
     const translated =
-      error.code === "storage_root_required"
+      error.code === "apply_rolled_back"
+        ? "Новая конфигурация отклонена, предыдущая конфигурация восстановлена."
+      : error.code === "apply_recovery_pending"
+        ? "Применение не завершено. Аварийный откат RouterOS остаётся активным, восстановление ожидается. Проверьте статус перед повтором."
+      : error.code === "apply_state_unconfirmed"
+        ? "Итог применения не подтверждён. Перед повтором проверьте состояние RouterOS и контейнера."
+      : error.code === "storage_root_required"
         ? "Сначала укажите в Настройки → Контейнер и хранилище → Каталог проекта на внешнем SSD. Архив не загружался."
       : error.code === "invalid_image_filename"
         ? "Выберите один архив .tar с простым именем файла."
@@ -4726,9 +4732,12 @@ function Routing({
             : outbound.startsWith("wg-egress-") ? `wireguard:${outbound.slice("wg-egress-".length)}` : outbound),
         ];
         const chosenIds = orderedCandidateNodeIds(displayOrder, routingNodes, configuredWireguardExits, configuredReverseVlessExits);
+        const chosenCandidateIds = chosenIds.map((nodeId) => nodeId
+          .replace(/^reverse:/, "reverse-vless-")
+          .replace(/^wireguard:/, "wg-egress-"));
         const runtimeStats = new Map(nodeStats.map((node) => [node.id, node]));
         const queueNodes = routeCandidateIds(health, dailyStats,
-          chosenIds.map((nodeId) => nodeId.replace(/^reverse:/, "reverse-vless-").replace(/^wireguard:/, "wg-egress-")),
+          chosenCandidateIds,
         ).map((nodeId) => {
           const live = runtimeStats.get(nodeId);
           const metadata = routingNodesById.get(nodeId);
@@ -4749,6 +4758,8 @@ function Routing({
         return {
           name: itemName(policy),
           key: id,
+          mode: normalizePolicySelectionMode(policy.mode),
+          priorityOrder: chosenCandidateIds,
           route: selectionOrder.length
             ? !routingNodesLoaded
               ? [tr("Проверяю выбранные узлы…")]
@@ -5039,7 +5050,7 @@ function Routing({
               <table>
                 <thead>
                   <tr>
-                    <th>#</th>
+                    <th>{quality.policy?.mode === "priority" ? tr("Приоритет") : tr("Рейтинг")}</th>
                     <th>{tr("Маршрут и узел")}</th>
                     <th>{tr("Доступность / потери")}</th>
                     <th>{tr("Медиана")}</th>

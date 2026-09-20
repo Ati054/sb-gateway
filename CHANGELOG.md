@@ -1,112 +1,81 @@
 # Changelog
 
-## 1.6.17
+## 1.6.18
 
 ## Русский
 
 ### Описание
 
-SB Gateway — локальный шлюз и панель управления для MikroTik RouterOS 7. Он
-работает в одном ARM64-контейнере, направляет выбранный трафик локальных и
-удалённых клиентов через управляемые выходы и сохраняет существующую сетевую
-конфигурацию MikroTik.
+Версия 1.6.18 исправляет завершение защищённого Apply и приводит таблицу
+качества узлов к порядку маршрутного листа.
 
-Версия 1.6.17 — первая публичная версия и начало поддерживаемой публичной
-истории проекта.
+### Изменения
 
-### Основные возможности
+- Control plane снимает RouterOS rollback-scheduler до публикации `active.json`
+  и runtime LKG. Ошибка снятия guard блокирует Finalize, запускает сохранённый
+  rollback и оставляет scheduler повторной страховкой.
+- API и панель различают подтверждённый откат, ожидаемое восстановление и
+  неподтверждённое состояние. Панель не предлагает повторный Apply, пока итог
+  операции требует проверки.
+- `active.json` служит единственной точкой фиксации. Ошибка записи производных
+  LKG/metadata запускает последующее восстановление документов без отката
+  работающего Xray.
+- Таблица **Качество узлов** показывает приоритетный маршрут в настроенном
+  порядке. Режим URLTest сохраняет сортировку по измеренному качеству.
+- Публичные исходники содержат очищенные Go- и browser-регрессии. Release CI
+  запускает их вместе со сборкой и проверкой публичной границы.
 
-- Маршрутные листы для отдельного устройства, всей LAN/Wi-Fi и удалённых
-  клиентов с собственным порядком основных и резервных выходов.
-- VLESS, REALITY, WebSocket, gRPC, HTTPUpgrade, XHTTP и Hysteria 2; выбранные
-  WireGuard-интерфейсы MikroTik и Reverse VLESS могут использоваться как
-  управляемые выходы.
-- Kernel TPROXY, раздельная DNS-политика и сервисные правила без глобальной
-  замены default route MikroTik.
-- Подписки, стабильная идентификация узлов, фоновые проверки резервов, быстрый
-  переход на известный исправный выход и защита от лишних переключений при
-  общей деградации WAN или DNS.
-- Безопасное применение конфигурации с preflight-проверками, резервной копией,
-  RouterOS Safe Mode и автоматическим откатом.
-- Веб-интерфейс для настройки, мониторинга, журналов, резервных копий,
-  сертификатов и обновления контейнера с проверкой SHA-256 и видимым состоянием
-  выполнения.
+### Установка и обновление
 
-### Установка
+Для чистой установки используйте `sb-gateway-1.6.18-routeros-bundle.zip` и
+[инструкцию](../INSTALL-RU.md).
 
-Для чистой установки используйте
-`sb-gateway-1.6.17-routeros-bundle.zip` и инструкцию
-[INSTALL-RU.md](../INSTALL-RU.md).
-
-Для замены образа загрузите `sb-gateway-1.6.17-linux-arm64.tar` в разделе
+Для обновления работающей установки загрузите
+`sb-gateway-1.6.18-linux-arm64.tar` в разделе
 **Эксплуатация → Обновление контейнера**. Панель проверит архитектуру, версию и
-SHA-256 до остановки действующего контейнера, сохранит предыдущий образ для
-отката и вернёт управляемый трафик после подтверждения готовности.
-
-### Требования и совместимость
-
-- Первая поддерживаемая публичная версия: `1.6.17`.
-- Платформа: `linux/arm64`.
-- RouterOS 7 с совпадающей версией пакета `container`.
-- Xray-core `26.9.9`.
+SHA-256 до остановки текущего контейнера.
 
 ### Проверка релиза
 
-Перед публикацией сборка проходит unit/UI-тесты, проверку публичной границы,
-ARM64-сборку, RouterOS dry-run всех установочных скриптов и полный цикл
-обновления, отката, запуска и маршрутизации на изолированном виртуальном
-MikroTik CHR. Контрольные суммы публикуются вместе с артефактами.
+Перед публикацией команда проекта выполняет Go- и browser-тесты, ESLint,
+production-сборку интерфейса, проверку публичного дерева, ARM64-сборку,
+RouterOS dry-run и цикл обновления на изолированном MikroTik CHR.
 
 ## English
 
 ### Overview
 
-SB Gateway is a local gateway and management panel for MikroTik RouterOS 7. It
-runs in a single ARM64 container, routes selected traffic from local and remote
-clients through managed egress paths, and preserves the existing MikroTik
-network configuration.
+Version 1.6.18 fixes the protected Apply finalization path and aligns the node
+quality table with route-list priority.
 
-Version 1.6.17 is the first public release and the start of the supported public
-project history.
+### Changes
 
-### Key capabilities
+- The control plane disarms the RouterOS rollback scheduler before publishing
+  `active.json` and the runtime LKG. A disarm failure blocks Finalize, runs the
+  saved rollback, and keeps the scheduler as a second recovery attempt.
+- The API and Web UI distinguish a completed rollback, pending recovery, and
+  an unconfirmed final state. The UI withholds retry guidance until the
+  operation state has been checked.
+- `active.json` is the sole application commit point. A derivative LKG or
+  metadata write failure schedules document repair without reverting the live
+  Xray configuration.
+- The **Node quality** table follows configured order for priority routes.
+  URLTest routes retain quality-based ranking.
+- Public source archives include sanitized Go and browser regressions. Release
+  CI runs them with build and public-boundary checks.
 
-- Route lists for an individual device, the entire LAN/Wi-Fi, and remote
-  clients, each with an ordered set of primary and reserve egress paths.
-- VLESS, REALITY, WebSocket, gRPC, HTTPUpgrade, XHTTP, and Hysteria 2; selected
-  MikroTik WireGuard interfaces and Reverse VLESS can be used as managed egress
-  paths.
-- Kernel TPROXY, policy-specific DNS, and service rules without replacing the
-  MikroTik default route globally.
-- Subscriptions, stable node identity, background reserve health checks, fast
-  selection of a known healthy egress, and anti-flap protection during shared
-  WAN or DNS degradation.
-- Safe configuration apply with preflight checks, backup, RouterOS Safe Mode,
-  and automatic rollback.
-- A web interface for configuration, monitoring, logs, backups, certificates,
-  and container updates with SHA-256 validation and visible operation status.
+### Installation and update
 
-### Installation
+For a clean installation, use `sb-gateway-1.6.18-routeros-bundle.zip` and the
+[installation guide](../INSTALL.md).
 
-For a clean installation, use
-`sb-gateway-1.6.17-routeros-bundle.zip` and follow
-[INSTALL.md](../INSTALL.md).
-
-To replace the image, upload `sb-gateway-1.6.17-linux-arm64.tar` from
-**Operations → Container update**. The panel validates architecture, version,
-and SHA-256 before stopping the active container, retains the previous image
-for rollback, and restores managed traffic after readiness is confirmed.
-
-### Requirements and compatibility
-
-- First supported public version: `1.6.17`.
-- Platform: `linux/arm64`.
-- RouterOS 7 with the matching `container` package.
-- Xray-core `26.9.9`.
+To update an existing installation, upload
+`sb-gateway-1.6.18-linux-arm64.tar` under
+**Operations → Container update**. The panel checks architecture, version, and
+SHA-256 before it stops the current container.
 
 ### Release verification
 
-Before publication, the build passes unit and UI tests, public-boundary checks,
-an ARM64 build, RouterOS dry-runs of every installation script, and a complete
-update, rollback, startup, and routing cycle on an isolated virtual MikroTik
-CHR. Checksums are published with the artifacts.
+Before publication, the project runs Go and browser tests, ESLint, the
+production UI build, public-tree verification, the ARM64 build, RouterOS
+dry-run checks, and an update cycle on an isolated MikroTik CHR.

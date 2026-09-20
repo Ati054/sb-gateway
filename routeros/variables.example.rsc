@@ -6,7 +6,7 @@
 # Files.  Set SB_IMAGE_SOURCE="registry" only when an OCI registry is
 # deliberately used; the RouterOS version/channel is unrelated to this choice.
 :global "SB_IMAGE_SOURCE" "file"
-:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.17-linux-arm64.tar"
+:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.18-linux-arm64.tar"
 :global "SB_IMAGE" ""
 :global "SB_BRIDGE" "bridge-sb"
 :global "SB_VETH" "veth-sb"
@@ -23,7 +23,7 @@
 
 # These paths must resolve to an external USB SSD, never internal flash/NAND.
 :global "SB_STORAGE_ROOT" "usb1/sb-gateway"
-:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.17"
+:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.18"
 :global "SB_CONFIG_DIR" "usb1/sb-gateway/config"
 :global "SB_DATA_DIR" "usb1/sb-gateway/data"
 :global "SB_LOGS_DIR" "usb1/sb-gateway/logs"

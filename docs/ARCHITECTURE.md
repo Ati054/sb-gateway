@@ -1,6 +1,6 @@
 # Архитектура SB Gateway
 
-Документ соответствует SB Gateway 1.6.17, серверному Xray-core 26.9.9 и runtime renderer
+Документ соответствует SB Gateway 1.6.18, серверному Xray-core 26.9.9 и runtime renderer
 schema 38.
 
 ## Границы системы
@@ -656,8 +656,8 @@ RouterOS 7.24 выделен по фактически обнаруженной 
 автоматический `supout.rif`. На этой ветке control plane не провоцирует сбой и
 передаёт владение транзакцией уже вооружённому RouterOS-local scheduler. Точный
 apply script запускается через REST, затем выполняются те же runtime и
-RouterOS health-check, atomic active/LKG commit и снятие scheduler. При ошибке
-до commit сохранённый rollback запускается немедленно; если REST потерян,
+RouterOS health-check, снятие scheduler и только затем atomic active/LKG commit.
+При ошибке до commit сохранённый rollback запускается немедленно; если REST потерян,
 scheduler остаётся вооружённым. HTTP write-deadline только для Apply/Rollback
 равен шести минутам: он длиннее пятиминутной операции, но не ослабляет короткие
 таймауты остальных API. Неожиданный разрыв SSH Safe Mode на других
@@ -673,11 +673,16 @@ Mode, ждёт исчезновения floating history и снимает sched
 неопределённости scheduler остаётся вооружённым. Транзакция не создаёт фоновых
 goroutine и не держит candidate cache после возврата.
 
-После выхода из Safe Mode scheduler остаётся вооружённым до финального commit
-runtime LKG и active pointer. Если этот commit не удался, Go запускает точный
-rollback script уже зафиксированной RouterOS generation, ждёт settle и только
-затем снимает scheduler. При недоступном RouterOS scheduler и нужный ему import
-сохраняются для независимого отката.
+После выхода из Safe Mode scheduler снимается **до** финального commit runtime
+LKG и active pointer. Если снять его не удалось, финализация приложения не
+запускается: Go немедленно выполняет точный rollback script, а scheduler и
+нужный ему import остаются для независимой повторной попытки. Если scheduler
+уже снят, но публикация application commit point не удалась, Go возвращает
+RouterOS к прежней generation немедленно; неудача этого восстановления явно
+помечается как неподтверждённое состояние. `active.json` является единственной
+точкой фиксации приложения. Ошибка последующей записи производных LKG/metadata
+не откатывает уже опубликованный runtime: документы восстанавливаются из
+`active.json` при reconciliation.
 
 Та же транзакция поддерживает полный generated RSC до 2 МиБ. Apply и rollback
 проверяются на точный заголовок, полный упорядоченный набор managed sections и
@@ -1311,16 +1316,21 @@ generation/active/LKG/draft pointers; при любом сомнении вып�
    полный inventory не нужен.
 9. Только после успешных проверок интерактивный Safe Mode, если он использован,
    фиксируется Ctrl-X, его SSH-сессия закрывается и ожидается исчезновение
-   `floating-undo`. Затем снимается scheduler. В scheduler-only режиме он
-   снимается непосредственно после тех же health-check и active/LKG commit.
-   Ошибка до подтверждения немедленно запускает rollback; при неопределённой
-   связи независимый scheduler остаётся вооружённым и возвращает RouterOS к LKG.
-10. Active/LKG фиксируются до успешного ответа. Создание локального
+   `floating-undo`. Затем снимается scheduler; в scheduler-only режиме он
+   снимается непосредственно после тех же health-check. Только после
+   подтверждённого снятия guard публикуются application active pointer и
+   runtime LKG. Ошибка снятия не вызывает Finalize: немедленный rollback идёт
+   при всё ещё вооружённом scheduler. Ошибка последующего application commit
+   также вызывает немедленное восстановление RouterOS, но уже возвращается как
+   неподтверждённая, если восстановить прежнее состояние не удалось.
+10. `active.json` фиксируется до успешного ответа и является commit point;
+    производные LKG/metadata восстанавливаются из него и не могут обратить
+    опубликованное состояние назад. Создание локального
     зашифрованного `.sbgw`, его зеркалирование в RouterOS Files и удаление старых
     project-owned backup выполняет persisted maintenance; быстрые
     последовательные Apply объединяются в архив последней active generation.
     Их задержка не удерживает Apply. В audit успешного или неуспешного Apply
-   сохраняются `critical_path_ms`, `stage_timings_ms`,
+    сохраняются `critical_path_ms`, `stage_timings_ms`,
     `runtime_changed_files`, `routeros_apply_kind`,
     `routeros_apply_transport` и
     `routeros_delta_sections` без секретов.
