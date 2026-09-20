@@ -89,7 +89,7 @@ function upstreamFailureMessage(status: number): string | undefined {
 export function isUncertainOperationError(error: unknown): error is GatewayApiError {
   return (
     error instanceof GatewayApiError &&
-    (["timeout", "unreachable", "upstream_unavailable"].includes(error.code) ||
+    (["timeout", "unreachable", "upstream_unavailable", "apply_recovery_pending", "apply_state_unconfirmed"].includes(error.code) ||
       (error.status >= 502 && error.status <= 504))
   );
 }

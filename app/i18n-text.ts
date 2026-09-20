@@ -1,4 +1,7 @@
 export const englishText: Record<string, string> = {
+  "Новая конфигурация отклонена, предыдущая конфигурация восстановлена.": "The new configuration was rejected and the previous configuration was restored.",
+  "Применение не завершено. Аварийный откат RouterOS остаётся активным, восстановление ожидается. Проверьте статус перед повтором.": "Apply did not complete. The RouterOS rollback guard remains active and recovery is pending. Check status before retrying.",
+  "Итог применения не подтверждён. Перед повтором проверьте состояние RouterOS и контейнера.": "The final Apply state is unconfirmed. Check RouterOS and container status before retrying.",
   "TLS-профиль публичного входа": "Public inbound TLS profile",
   "TLS-профиль клиентской подписки": "Client subscription TLS profile",
   "TLS-профиль транспорта": "Transport TLS profile",
@@ -168,6 +171,8 @@ export const englishText: Record<string, string> = {
   "в резерве": "in reserve",
   "Активный узел": "Active node",
   "Качество узлов": "Node quality",
+  "Приоритет": "Priority",
+  "Рейтинг": "Rank",
   "Показано": "Shown",
   "Период статистики": "Statistics period",
   "Маршрут и узел": "Route and node",
