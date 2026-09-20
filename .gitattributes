@@ -1,0 +1,27 @@
+# WSL/Linux entrypoints must retain LF shebangs on Windows checkouts.
+*.sh text eol=lf
+
+# A public source snapshot is created only from tracked release files. Internal
+# lab automation, private-agent metadata and development tests never enter it.
+.agents export-ignore
+.agents/** export-ignore
+.codex export-ignore
+.codex/** export-ignore
+.openai export-ignore
+.openai/** export-ignore
+.lab export-ignore
+.lab/** export-ignore
+tests export-ignore
+tests/** export-ignore
+**/*_test.go export-ignore
+**/*.test.mjs export-ignore
+**/*.spec.mjs export-ignore
+AGENTS.md export-ignore
+CODEX_HANDOFF.md export-ignore
+IMPLEMENTATION_REPORT.md export-ignore
+QUATTRO_SERVERS_AUDIT.md export-ignore
+docs/ACCEPTANCE-TESTS.md export-ignore
+docs/research export-ignore
+docs/research/** export-ignore
+docs/releases/** export-ignore
+docs/releases/1.6.17.md -export-ignore

@@ -1,0 +1,31 @@
+name: Release hygiene
+
+on:
+  push:
+    branches: [main, public]
+  pull_request:
+    branches: [main, public]
+
+permissions:
+  contents: read
+
+jobs:
+  public-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: sh scripts/verify-public-tree.sh
+      - run: go build ./cmd/...
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run build:static
