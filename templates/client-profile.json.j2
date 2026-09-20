@@ -1,0 +1,32 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [{{ client_tun_address | tojson }}],
+      "auto_route": true,
+      "strict_route": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "sb-gateway",
+      "server": {{ hostname | tojson }},
+      "server_port": {{ port | default(443) }},
+      "uuid": {{ uuid | tojson }},
+      "tls": {
+        "enabled": true,
+        "server_name": {{ hostname | tojson }}
+      },
+      "transport": {{ transport | tojson }}
+    }
+  ],
+  "route": {
+    "final": "sb-gateway",
+    "auto_detect_interface": true
+  }
+}

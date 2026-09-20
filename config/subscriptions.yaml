@@ -1,0 +1,36 @@
+schema_version: 1
+
+subscriptions:
+  - id: provider-main
+    enabled: false
+    format: auto
+    url_secret_ref: subscriptions/provider-main.url
+    update_interval: 6h
+    max_download_bytes: 8388608
+    download_timeout: 30s
+    allowed_countries:
+      - DE
+      - NL
+      - FI
+    allow_unknown_country: false
+    location_overrides: {}
+
+static_nodes: []
+
+normalization:
+  reject_invalid_uuid: true
+  reject_invalid_port: true
+  deduplicate: true
+  stable_tags: true
+  unknown_country_code: ZZ
+  allow_unsupported_transport: false
+  location_detection:
+    - manual_override
+    - metadata
+    - explicit_uri_parameter
+
+update:
+  validate_with_xray: true
+  atomic_replace: true
+  keep_last_known_good: true
+  skip_restart_when_unchanged: true

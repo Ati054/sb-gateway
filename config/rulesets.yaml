@@ -1,0 +1,64 @@
+schema_version: 1
+
+rule_sets:
+  service-youtube:
+    enabled: true
+    type: local
+    format: source
+    path: /opt/sb-gateway/rulesets/youtube.json
+    checksum_manifest: /opt/sb-gateway/rulesets/checksums.json
+    manual_override_path: /config/rulesets/youtube.override.json
+    keep_last_known_good: true
+
+  service-telegram:
+    enabled: true
+    type: local
+    format: source
+    path: /opt/sb-gateway/rulesets/telegram.json
+    checksum_manifest: /opt/sb-gateway/rulesets/checksums.json
+    manual_override_path: /config/rulesets/telegram.override.json
+    keep_last_known_good: true
+
+  service-chatgpt:
+    enabled: false
+    type: local
+    format: source
+    path: /config/rulesets/chatgpt.json
+
+  service-discord:
+    enabled: false
+    type: local
+    format: source
+    path: /config/rulesets/discord.json
+
+  service-netflix:
+    enabled: false
+    type: local
+    format: source
+    path: /config/rulesets/netflix.json
+
+update:
+  record_sha256: true
+  validate_source_format: true
+  format: source
+  atomic_replace: true
+  keep_last_known_good: true
+  update_status: /state/control-plane/rulesets-update.json
+  interval_hours: 24
+  source_host_allowlist:
+    - raw.githubusercontent.com
+
+service_packs:
+  - ozon
+  - youtube
+  - telegram
+  - whatsapp
+  - discord
+  - instagram
+  - facebook
+  - tiktok
+  - netflix
+  - spotify
+  - openai
+  - github
+  - steam
