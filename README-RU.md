@@ -248,9 +248,12 @@ name или API secret в обычные формы. Поля секретов �
 - HTTPUpgrade и прямой Reality-вход выключены.
 - IPv6 блокируется только для управляемых клиентов (`block_managed`), а не во
   всей сети.
-- Удалённые VLESS-профили получают dual-stack TUN. Их публичный IPv6 идёт
-  только через назначенный VLESS-лист (`remote_ipv6_mode: proxy_only`); при
-  IPv4-only WAN прямой выход IPv6 не используется.
+- Управляемый LAN-трафик маршрутизатора проходит только через kernel TPROXY;
+  userspace TUN/gVisor в контейнере не используется. Экспортируемый full-tunnel
+  профиль удалённого телефона или ПК создаёт системный VPN-интерфейс уже на
+  самом клиенте. Его публичный IPv6 идёт только через назначенный VLESS-лист
+  (`remote_ipv6_mode: proxy_only`); при IPv4-only WAN прямой выход IPv6 не
+  используется.
 - Control API и Xray gRPC API слушают только loopback контейнера.
 - Management UI разрешён только management CIDR и не публикуется через
   Cloudflare.
