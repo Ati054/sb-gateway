@@ -354,28 +354,36 @@ type commitMetadata struct {
 // commitActive publishes the already durable generation. active.json is the
 // commit point; LKG and metadata can be reconstructed from it after a crash.
 func (repository *stateRepository) commitActive(metadata commitMetadata) error {
+	_, err := repository.commitActiveDetailed(metadata)
+	return err
+}
+
+// commitActiveDetailed reports whether active.json, the only commit point, was
+// durably published even if a derivative LKG or metadata write then failed.
+// Callers must not roll runtime state back after a published commit point.
+func (repository *stateRepository) commitActiveDetailed(metadata commitMetadata) (bool, error) {
 	if !safeRevision(metadata.Revision) {
-		return errors.New("active revision is invalid")
+		return false, errors.New("active revision is invalid")
 	}
 	if metadata.PreviousRevision != "" && !safeRevision(metadata.PreviousRevision) {
-		return errors.New("previous revision is invalid")
+		return false, errors.New("previous revision is invalid")
 	}
 	if metadata.RuntimeRevision != "" && !safeRevision(metadata.RuntimeRevision) {
-		return errors.New("runtime revision is invalid")
+		return false, errors.New("runtime revision is invalid")
 	}
 	if metadata.PreviousRuntimeRevision != "" && !safeRevision(metadata.PreviousRuntimeRevision) {
-		return errors.New("previous runtime revision is invalid")
+		return false, errors.New("previous runtime revision is invalid")
 	}
 	for _, revision := range []string{metadata.NodeSnapshotRevision, metadata.PreviousNodeSnapshotRevision} {
 		if revision != "" && !safeRevision(revision) {
-			return errors.New("node snapshot revision is invalid")
+			return false, errors.New("node snapshot revision is invalid")
 		}
 	}
 	if metadata.Actor == "" || len(metadata.Actor) > 128 {
-		return errors.New("commit actor is invalid")
+		return false, errors.New("commit actor is invalid")
 	}
 	if _, err := repository.loadGeneration(metadata.Revision); err != nil {
-		return err
+		return false, err
 	}
 	committedAt := metadata.CommittedAt.UTC()
 	if committedAt.IsZero() {
@@ -394,12 +402,16 @@ func (repository *stateRepository) commitActive(metadata commitMetadata) error {
 		"committed_at":                    committedAt.Format(time.RFC3339Nano),
 	}
 	if err := repository.writeJSON(filepath.Join(repository.root, "active.json"), pointer); err != nil {
-		return err
+		publishedRevision, confirmErr := repository.activeRevision()
+		return publishedRevision == metadata.Revision, errors.Join(err, confirmErr)
 	}
 	if err := repository.writeJSON(filepath.Join(repository.root, "last-known-good.json"), pointer); err != nil {
-		return err
+		return true, err
 	}
-	return repository.writeJSON(filepath.Join(repository.root, "apply-metadata.json"), pointer)
+	if err := repository.writeJSON(filepath.Join(repository.root, "apply-metadata.json"), pointer); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // reconcileCommitPointers repairs the two derivative documents only from the

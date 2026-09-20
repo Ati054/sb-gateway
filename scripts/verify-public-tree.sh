@@ -10,7 +10,7 @@ if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null || true)" != "true" ]; t
 fi
 
 for path in \
-  .agents .codex .lab .openai tests AGENTS.md CODEX_HANDOFF.md \
+  .agents .codex .lab .openai AGENTS.md CODEX_HANDOFF.md \
   IMPLEMENTATION_REPORT.md QUATTRO_SERVERS_AUDIT.md \
   docs/ACCEPTANCE-TESTS.md docs/research templates/xray.smoke.json; do
   if git ls-files --error-unmatch "$path" >/dev/null 2>&1 \
@@ -20,10 +20,21 @@ for path in \
   fi
 done
 
-if git ls-files | grep -E '(^|/)([^/]+_test\.go|[^/]+\.(test|spec)\.(mjs|js|ts|tsx))$' >/dev/null; then
-  printf '%s\n' "development test file is tracked in the public tree" >&2
+if ! git ls-files | grep -E '(^|/)[^/]+_test\.go$' >/dev/null \
+  || ! git ls-files | grep -E '^tests/[^/]+\.test\.mjs$' >/dev/null; then
+  printf '%s\n' "public regression tests are missing" >&2
   exit 1
 fi
+
+for path in \
+  tests/lab-stress-harness.test.mjs \
+  tests/password-persistence.test.mjs \
+  tests/ruleset-domain-audit.test.mjs; do
+  if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+    printf '%s\n' "private-lab test entered the public tree: $path" >&2
+    exit 1
+  fi
+done
 
 package_version="$(sed -nE 's/^[[:space:]]*"version":[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)",?[[:space:]]*$/\1/p' package.json | head -n 1)"
 if [ -z "$package_version" ]; then
@@ -78,9 +89,9 @@ fi
 
 if git rev-list --objects HEAD \
   | cut -d' ' -f2- \
-  | grep -E '(^|/)(\.lab|\.agents|tests)(/|$)|(^|/)[^/]+_test\.go$|(^|/)[^/]+\.(test|spec)\.(mjs|js|ts|tsx)$' \
+  | grep -E '(^|/)(\.lab|\.agents|\.codex|\.openai)(/|$)' \
   >/dev/null; then
-  printf '%s\n' "forbidden development material exists in public Git history" >&2
+  printf '%s\n' "private project material exists in public Git history" >&2
   exit 1
 fi
 

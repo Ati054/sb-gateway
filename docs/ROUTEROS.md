@@ -1,6 +1,6 @@
 # RouterOS 7
 
-Документ соответствует SB Gateway 1.6.17 и capability-based поддержке ARM64
+Документ соответствует SB Gateway 1.6.18 и capability-based поддержке ARM64
 RouterOS 7. Preflight проверяет требуемые возможности вместо точного номера
 версии RouterOS.
 

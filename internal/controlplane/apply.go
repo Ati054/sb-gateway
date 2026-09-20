@@ -23,6 +23,53 @@ type applyValidationError struct{ result configValidation }
 
 func (failure applyValidationError) Error() string { return "configuration validation failed" }
 
+type applyFailureState string
+
+const (
+	applyRolledBack       applyFailureState = "rolled_back"
+	applyRecoveryPending  applyFailureState = "recovery_pending"
+	applyStateUnconfirmed applyFailureState = "state_unconfirmed"
+)
+
+type applyFailureError struct {
+	state applyFailureState
+	err   error
+}
+
+func (failure *applyFailureError) Error() string { return failure.err.Error() }
+func (failure *applyFailureError) Unwrap() error { return failure.err }
+
+func classifyApplyFailure(primary, runtimeRollback error) error {
+	state := applyRolledBack
+	if routerState, ok := routeros.TransactionFailureStateOf(primary); ok {
+		switch routerState {
+		case routeros.TransactionRecoveryPending:
+			state = applyRecoveryPending
+		case routeros.TransactionStateUnconfirmed:
+			state = applyStateUnconfirmed
+		}
+	}
+	if runtimeRollback != nil {
+		state = applyStateUnconfirmed
+	}
+	return &applyFailureError{state: state, err: errors.Join(primary, runtimeRollback)}
+}
+
+func applyFailureResponse(err error) (string, string) {
+	var failure *applyFailureError
+	if !errors.As(err, &failure) {
+		return "apply_state_unconfirmed", "Apply ended without a confirmed final state. Check RouterOS and container status before retrying."
+	}
+	switch failure.state {
+	case applyRolledBack:
+		return "apply_rolled_back", "The candidate was rejected and the previous configuration was restored."
+	case applyRecoveryPending:
+		return "apply_recovery_pending", "Apply did not complete. The RouterOS rollback guard remains armed and restoration is pending; check status before retrying."
+	default:
+		return "apply_state_unconfirmed", "Apply ended without a confirmed final state. Check RouterOS and container status before retrying."
+	}
+}
+
 type routerOSApplyFunc func(
 	context.Context,
 	map[string]any,
@@ -92,8 +139,11 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 		// internal cause locally. errors.Join otherwise makes validation,
 		// restart, probe, and rollback failures indistinguishable in the audit.
 		log.Printf("control-plane: apply failed request_id=%v: %v", request.Context().Value(requestIDKey{}), err)
-		server.audit(request, actor, "apply", "failed", map[string]any{"error_type": fmt.Sprintf("%T", err)})
-		server.writeErrorResponse(response, request, status, "apply_failed", "The candidate failed validation or health checks; the previous generation remains active.")
+		code, message := applyFailureResponse(err)
+		server.audit(request, actor, "apply", "failed", map[string]any{
+			"error_type": fmt.Sprintf("%T", err), "failure_state": code,
+		})
+		server.writeErrorResponse(response, request, status, code, message)
 		return
 	}
 	server.audit(request, actor, "apply", fmt.Sprint(result["operation"]), map[string]any{
@@ -176,6 +226,12 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			return nil, http.StatusInternalServerError, err
 		}
 	}
+	// Persist the candidate's operational node set before either RouterOS or
+	// Xray changes. It is inert until active.json publishes stagedRevision and
+	// therefore cannot create a split commit during Finalize.
+	if err := server.saveSubscriptionSnapshot(stagedRevision, desiredNodes); err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
 
 	var receipt runtimeconfig.ActivationReceipt
 	var activated bool
@@ -208,18 +264,22 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		return err
 	}
 	commit := func(backup any) error {
-		if err := server.saveSubscriptionSnapshot(stagedRevision, desiredNodes); err != nil {
-			return err
-		}
-		if err := server.repository.commitActive(commitMetadata{
+		published, commitErr := server.repository.commitActiveDetailed(commitMetadata{
 			RouterOSSource: desiredRouterOS,
 			Revision:       stagedRevision, PreviousRevision: activeRevision,
 			RuntimeRevision: candidate.Revision, PreviousRuntimeRevision: previousRuntimeRevision,
 			BackupRef: backup, Actor: actor, CommittedAt: server.now(),
-		}); err != nil {
-			return err
+		})
+		if !published {
+			return commitErr
 		}
 		stateCommitted = true
+		if commitErr != nil {
+			// active.json is authoritative. Derivative pointers are repaired by
+			// reconcileCommitPointers; rolling Xray back here would split state.
+			runtimeCleanupPending = true
+			log.Printf("control-plane: active commit published; derivative pointer repair pending: %v", commitErr)
+		}
 		if err := server.runtime.commit(candidate); err != nil {
 			runtimeCleanupPending = true
 		}
@@ -239,14 +299,14 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		applyKind, sections, cleanupPending = output.Kind, output.Sections, output.Result.CleanupPending
 		guardMode = output.Result.GuardMode
 		if applyErr != nil {
-			return nil, http.StatusConflict, errors.Join(applyErr, rollbackRuntime())
+			return nil, http.StatusConflict, classifyApplyFailure(applyErr, rollbackRuntime())
 		}
 	} else {
 		if err := activate(ctx); err != nil {
-			return nil, http.StatusConflict, errors.Join(err, rollbackRuntime())
+			return nil, http.StatusConflict, classifyApplyFailure(err, rollbackRuntime())
 		}
 		if err := commit(backup); err != nil {
-			return nil, http.StatusInternalServerError, errors.Join(err, rollbackRuntime())
+			return nil, http.StatusInternalServerError, classifyApplyFailure(err, rollbackRuntime())
 		}
 	}
 	if _, err := server.repository.saveDraft(config); err != nil {

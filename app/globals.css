@@ -8600,7 +8600,7 @@ td small {
   background: #fff;
 }
 
-.screen-routing .quality-dashboard .policy-quality-table-wrap th:nth-child(1) { width: 36px; }
+.screen-routing .quality-dashboard .policy-quality-table-wrap th:nth-child(1) { width: 78px; }
 .screen-routing .quality-dashboard .policy-quality-table-wrap th:nth-child(2) { width: auto; }
 .screen-routing .quality-dashboard .policy-quality-table-wrap th:nth-child(3) { width: 160px; }
 .screen-routing .quality-dashboard .policy-quality-table-wrap th:nth-child(4) { width: 86px; }
