@@ -1,0 +1,343 @@
+# Рабочий seed безопасен: сущности выключены, пока мастер не завершён.
+schema_version: 1
+
+system:
+  name: sb-gateway
+  deployment_ready: false
+  architecture: arm64
+  primary_interface: web
+  cli_mode: recovery-only
+  object_comment_prefix: SB-GATEWAY
+  xray_version: "26.7.28"
+  logging:
+    xray_level: warning
+    xray_debug_timeout_minutes: 15
+  management:
+    api_listen: 127.0.0.1:8080
+    https_listen: ""
+    routeros_panel_port: 17443
+    allowed_source_cidrs: []
+    allowed_ingress_interfaces: []
+    tls_certificate: /config/certs/origin.pem
+    tls_private_key: /config/certs/origin.key
+    htpasswd_secret_ref: management.htpasswd
+    api_token_secret_ref: management-api-token
+  networking:
+    bridge_name: ""
+    veth_name: ""
+    routeros_gateway: ""
+    container_address: ""
+    container_dns: ""
+    tun_address: ""
+    tun_mtu: 1400
+    addresses_confirmed: false
+    tcp_mss_clamp: auto
+    routing_table: to-sb-gateway
+    connection_mark: sb-managed
+    preserve_client_source_ip: true
+    ipv6_mode: block_managed
+    remote_ipv6_mode: proxy_only
+
+routeros:
+  detected_version: null
+  channel: null
+  channel_policy: informational
+  architecture: arm64
+  base_url: null
+  username_secret_ref: routeros/username
+  password_secret_ref: routeros/password
+  preserve_channel: true
+  automatic_update: false
+  apply_gate: capabilities-only
+  required_capabilities:
+    - routeros_major_7
+    - arm64
+    - container_package
+    - container_envs
+    - container_mounts
+    - container_start_on_boot
+    - container_auto_restart
+    - policy_routing
+    - firewall_mangle
+    - watchdog_scheduler
+  capabilities: {}
+  # Populated by the required plain /export import; examples are not trusted.
+  router_addresses: []
+  import_review:
+    source_fingerprint: null
+    imported_at: null
+    networks: []
+    management_ingress_suggestions: []
+    management_network_suggestions: []
+    posture_warnings: []
+    topology_suggestions: {}
+  last_tested_reference:
+    version: "7.21.5"
+    channel: long-term
+    release_date: "2026-07-06"
+    verified_date: "2026-07-29"
+
+watchdog:
+  interval_seconds: 5
+  failure_threshold: 3
+  recovery_threshold: 3
+  recovery_cooldown_seconds: 0
+  max_restarts_per_hour: 6
+
+service_packs: []
+
+local_clients: []
+
+remote_users:
+  - id: phone-main
+    enabled: false
+    uuid_secret_ref: users/phone-main.uuid
+    role: trusted-full
+    policy_id: europe-priority
+    client_tun_address: ""
+    transports:
+      - websocket
+      - grpc
+    fail_mode: closed
+    allow_direct_fallback: false
+    direct_domains: []
+    direct_services: []
+  - id: laptop-main
+    enabled: false
+    uuid_secret_ref: users/laptop-main.uuid
+    role: trusted-full
+    policy_id: finland-auto
+    client_tun_address: ""
+    transports:
+      - websocket
+      - grpc
+    fail_mode: closed
+    allow_direct_fallback: false
+    direct_domains: []
+    direct_services: []
+
+reverse_vless_exits: []
+
+networks: []
+
+policies:
+  - id: local-phone-selective
+    kind: local-selective
+    mode: select
+    outbounds:
+      - germany-auto
+      - europe-priority
+    service_routes:
+      youtube: germany-auto
+      telegram: europe-priority
+    final: direct
+    container_outage: direct
+  - id: local-wireguard-selective
+    kind: local-selective
+    mode: select
+    outbounds:
+      - finland-auto
+    service_routes:
+      youtube: finland-auto
+      telegram: finland-auto
+    final: direct
+    container_outage: direct
+  - id: local-full-tunnel-example
+    kind: local-selective
+    mode: select
+    enabled: false
+    outbounds:
+      - europe-cities
+    service_routes: {}
+    final: europe-cities
+    direct_services:
+      - ozon
+    direct_domains: []
+    container_outage: lan_only
+  - id: germany-auto
+    kind: outbound
+    mode: urltest
+    outbounds: []
+    countries:
+      - DE
+    on_all_unavailable: block
+  - id: finland-auto
+    kind: outbound
+    mode: urltest
+    outbounds: []
+    countries:
+      - FI
+    on_all_unavailable: block
+  - id: europe-priority
+    kind: outbound
+    mode: fallback
+    outbounds:
+      - germany-auto
+      - finland-auto
+    countries:
+      - DE
+      - NL
+      - FI
+    failure_threshold: 3
+    recovery_threshold: 3
+    switch_cooldown_seconds: 300
+    on_all_unavailable: block
+  - id: europe-cities
+    kind: outbound
+    mode: city_priority
+    outbounds: []
+    cities:
+      - Frankfurt
+      - Amsterdam
+      - Helsinki
+    quality_window: 5
+    max_packet_loss_percent: 40
+    max_latency_ms: 2000
+    switch_improvement_percent: 25
+    switch_improvement_ms: 50
+    failure_threshold: 3
+    recovery_threshold: 3
+    switch_cooldown_seconds: 300
+    return_to_primary: true
+    interrupt_exist_connections: false
+    on_all_unavailable: block
+
+subscriptions:
+  - id: provider-main
+    enabled: false
+    format: auto
+    url_secret_ref: subscriptions/provider-main.url
+    refresh_minutes: 360
+    update_interval_seconds: 21600
+    max_download_bytes: 8388608
+    download_timeout_seconds: 30
+    allowed_countries:
+      - DE
+      - NL
+      - FI
+    allowed_locations: []
+    allow_unknown_country: false
+    location_overrides: {}
+
+transports:
+  - id: websocket
+    kind: ws
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: true
+    recommended: true
+    hostname: ws.example.com
+    path_secret_ref: ws-path
+    backend: 127.0.0.1:11001
+  - id: grpc
+    kind: grpc
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: true
+    recommended: false
+    hostname: grpc.example.com
+    service_name_secret_ref: grpc-service
+    backend: 127.0.0.1:11002
+  - id: httpupgrade
+    kind: httpupgrade
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: false
+    recommended: false
+    hostname: hu.example.com
+    path_secret_ref: httpupgrade-path
+    backend: 127.0.0.1:11003
+  - id: xhttp
+    kind: xhttp
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: false
+    recommended: false
+    hostname: xhttp.example.com
+    mode: packet-up
+    x_padding_bytes: 100-1000
+    path_secret_ref: xhttp-path
+    backend: 127.0.0.1:11004
+  - id: direct-reality
+    kind: reality
+    enabled: false
+    recommended: false
+    hostname: direct.example.com
+    listen_port: 2443
+    handshake_server: www.microsoft.com
+    handshake_port: 443
+    server_name: www.microsoft.com
+    public_key: ""
+    fingerprint: chrome
+    wan_destination_address: ""
+    require_public_address: true
+  - id: grpc-reality
+    kind: reality-grpc
+    enabled: false
+    recommended: false
+    hostname: grpc-reality.example.com
+    listen_port: 2444
+    handshake_server: www.microsoft.com
+    handshake_port: 443
+    server_name: www.microsoft.com
+    public_key: ""
+    fingerprint: chrome
+    wan_destination_address: ""
+    require_public_address: true
+  - id: hysteria2
+    kind: hysteria2
+    enabled: false
+    recommended: false
+    hostname: hy2.example.com
+    listen_port: 443
+    up_mbps: 100
+    down_mbps: 100
+    ignore_client_bandwidth: false
+    obfs_enabled: false
+    wan_destination_address: ""
+    require_public_address: true
+
+ingress:
+  public_listen_port: 443
+  status_hostname: status.example.com
+  subscription_hostname: status.example.com
+  subscription_endpoint_enabled: true
+  subscription_origin_server_name: origin.example.com
+  subscription_listen_port: 443
+  subscription_cdn_provider: cloudflare
+  subscription_tls_profile_id: cdn-default
+  origin_certificate: /config/certs/origin.pem
+  origin_private_key: /config/certs/origin.key
+  require_cloudflare_source_ranges: true
+
+dns:
+  internal_server: ""
+  address_confirmed: false
+  internal_zones: []
+  local_public_mode: direct
+  remote_public_mode: assigned-policy
+  hijack_managed_clients: true
+  strict_dns: true
+  force_tcp_for_proxy_services: false
+
+security:
+  allow_router_management: false
+
+updates:
+  automatic_routeros_update: false
+  preserve_routeros_channel: true
+  capability_preflight: true
+  version_equality_gate: false
+  atomic: true
+  validate_candidate: true
+  verify_sha256: true
+  keep_last_known_good: true
+
+storage:
+  require_external_storage: true
+  config: /config
+  data: /data
+  logs: /logs
+  state: /state
+  log_max_size: 10MiB
+  log_keep_files: 5

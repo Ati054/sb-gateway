@@ -1,0 +1,44 @@
+schema_version: 1
+
+# UUID создаются в Web UI и хранятся только в /config/secrets/users.
+remote_users:
+  - name: phone-main
+    id: phone-main
+    enabled: false
+    uuid_secret_ref: users/phone-main.uuid
+    role: trusted-full
+    policy_id: europe-priority
+    client_tun_address: ""
+    transports:
+      - websocket
+      - grpc
+    internal_access: all
+    fail_mode: closed
+    allow_direct_fallback: false
+
+  - name: laptop-main
+    id: laptop-main
+    enabled: false
+    uuid_secret_ref: users/laptop-main.uuid
+    role: trusted-full
+    policy_id: finland-auto
+    client_tun_address: ""
+    transports:
+      - websocket
+      - grpc
+    internal_access: all
+    fail_mode: closed
+    allow_direct_fallback: false
+
+roles:
+  trusted-full:
+    internal_access: all-listed
+    public_internet: assigned-policy
+  trusted-limited:
+    internal_access: explicit-cidr-and-port
+    public_internet: assigned-policy
+  internet-only:
+    internal_access: deny
+    public_internet: assigned-policy
+  disabled:
+    authentication: deny

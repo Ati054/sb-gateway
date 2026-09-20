@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-29T00:00:00Z",
+  "algorithm": "sha256",
+  "files": {
+    "youtube.json": "d7b373ceb82ed53a35ec9cfda98184d8c75ea3a23169db641fb7f5603c4b207d",
+    "telegram.json": "6d4b6de88464fda58e9f14b5b15218aab23257c695ed7d23a433d4a1d433cb43"
+  },
+  "notes": {
+    "youtube": "Доменные правила; широкие общие CIDR Google намеренно не включены.",
+    "telegram": "Домены и официальные диапазоны https://core.telegram.org/resources/cidr.txt; обновление выполняется атомарно через Web UI."
+  }
+}

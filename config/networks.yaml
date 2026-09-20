@@ -1,0 +1,8 @@
+schema_version: 1
+
+# Safe split-reference seed. The Web UI populates only values confirmed from
+# the operator's current RouterOS export; no example subnet is active here.
+internal_networks: []
+router_management_addresses: []
+management_clients: []
+local_clients: []

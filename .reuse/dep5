@@ -1,0 +1,7 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: SB Gateway
+Upstream-Contact: Ati054 <ati054@tutamail.com>
+
+Files: *
+Copyright: 2026 Ati054 <ati054@tutamail.com>
+License: AGPL-3.0-or-later
