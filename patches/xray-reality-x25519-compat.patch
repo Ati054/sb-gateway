@@ -1,0 +1,10 @@
+diff --git a/tls.go b/tls.go
+--- a/tls.go
++++ b/tls.go
+@@ -233,2 +233,4 @@
+-			if peerPub2 == nil {
+-				break // reject outdated/strange Client Hello that doesn't have X25519MLKEM768 before optional X25519
++			// Preserve REALITY interoperability with established uTLS fingerprints
++			// such as QQ that offer the classical X25519 key share only.
++			if peerPub2 == nil && peerPub == nil {
++				break

@@ -1,0 +1,19 @@
+{
+  "log": {
+    "level": {{ log_level | default("warn") | tojson }},
+    "timestamp": true
+  },
+  "dns": {{ dns_config | tojson }},
+  "inbounds": {{ inbounds | tojson }},
+  "outbounds": {{ outbounds | tojson }},
+  "route": {
+    "rules": {{ route_rules | tojson }},
+    "rule_set": {{ rule_sets | default([]) | tojson }},
+    "final": "block",
+    "default_domain_resolver": {
+      "server": "direct-public-dns",
+      "strategy": "prefer_ipv4"
+    },
+    "auto_detect_interface": true
+  }
+}

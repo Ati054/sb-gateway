@@ -1,0 +1,329 @@
+{
+  "dns": {
+    "address_confirmed": false,
+    "direct_resolver": {
+      "protocol": "doh",
+      "provider": "yandex"
+    },
+    "force_tcp_for_proxy_services": false,
+    "hijack_managed_clients": true,
+    "internal_server": "",
+    "internal_zones": [],
+    "local_public_mode": "direct",
+    "remote_public_mode": "assigned-policy",
+    "strict_dns": true,
+    "vpn_resolver": {
+      "protocol": "doh",
+      "provider": "cloudflare"
+    }
+  },
+  "ingress": {
+    "certificate_secret_ref": "",
+    "private_key_secret_ref": "",
+    "public_listen_port": 443,
+    "require_cloudflare_source_ranges": true,
+    "status_hostname": "",
+    "status_listen_port": 443,
+    "subscription_cdn_provider": "cloudflare",
+    "subscription_deployment_id": "",
+    "subscription_endpoint_enabled": true,
+    "subscription_endpoint_mode": "separate",
+    "subscription_cdn_hostname": "",
+    "subscription_hostname": "",
+    "subscription_listen_port": 443,
+    "subscription_public_port": 443,
+    "subscription_origin_header_name": "X-SB-Origin",
+    "subscription_origin_header_secret_ref": "",
+    "subscription_origin_protection_mode": "auto-cidr",
+    "subscription_origin_server_name": "",
+    "subscription_primary_endpoint": "cdn",
+    "subscription_tls_profile_id": "cdn-default",
+    "subscription_transport_id": "",
+    "tls_profile_id": "cdn-default"
+  },
+  "local_clients": [],
+  "networks": [],
+  "policies": [],
+  "public_exposure": {
+    "shared_tcp_443": false,
+    "connection_guard": {
+      "burst": 80,
+      "enabled": true,
+      "new_connection_rate": 40,
+      "quarantine_seconds": 600
+    },
+    "subscription": {
+      "display_name": "SB Gateway",
+      "happ_provider_id": ""
+    }
+  },
+  "remote_users": [],
+  "reverse_vless_exits": [],
+  "routeros": {
+    "architecture": "arm64",
+    "backup_password_secret_ref": "routeros/backup-password",
+    "base_url": null,
+    "capabilities": {},
+    "channel": null,
+    "detected_version": null,
+    "import_review": {
+      "imported_at": null,
+      "management_ingress_suggestions": [],
+      "management_network_suggestions": [],
+      "networks": [],
+      "posture_warnings": [],
+      "source_fingerprint": null,
+      "topology_suggestions": {}
+    },
+    "live_network_bindings": [],
+    "password_secret_ref": "routeros/password",
+    "preserve_channel": true,
+    "required_capabilities": [
+      "routeros_major_7",
+      "arm64",
+      "container_package",
+      "container_envs",
+      "container_mounts",
+      "container_start_on_boot",
+      "container_auto_restart",
+      "policy_routing",
+      "firewall_mangle",
+      "watchdog_scheduler"
+    ],
+    "router_addresses": [],
+    "ssh_port": 22,
+    "username_secret_ref": "routeros/username"
+  },
+  "schema_version": 1,
+  "security": {
+    "allow_router_management": false
+  },
+  "service_packs": [],
+  "storage": {
+    "ownership_manifest": "/state/ownership-manifest.json",
+    "root": ""
+  },
+  "subscription_reserves": [],
+  "subscriptions": [],
+  "system": {
+    "deployment_ready": false,
+    "last_tested_routeros_baseline": "7.21.5",
+    "logging": {
+      "xray_debug_timeout_minutes": 15,
+      "xray_level": "warning"
+    },
+    "management": {
+      "allowed_ingress_interfaces": [],
+      "allowed_source_cidrs": [],
+      "routeros_panel_port": 17443
+    },
+    "name": "sb-gateway",
+    "networking": {
+      "addresses_confirmed": false,
+      "bridge_name": "",
+      "container_address": "",
+      "container_dns": "",
+      "ipv6_mode": "block_managed",
+      "remote_ipv6_mode": "proxy_only",
+      "routeros_gateway": "",
+      "routing_table": "to-sb-gateway",
+      "tun_address": "",
+      "tun_mtu": 1400,
+      "veth_name": "",
+      "wireguard_egress_enabled": false,
+      "wireguard_egress_exits": []
+    },
+    "object_comment_prefix": "SB-GATEWAY"
+  },
+  "tls_profiles": [
+    {
+      "certificate_metadata": {},
+      "certificate_source": "manual",
+      "certificate_secret_ref": "",
+      "display_name": "CDN TLS \u00b7 \u043e\u0441\u043d\u043e\u0432\u043d\u043e\u0439",
+      "enabled": true,
+      "id": "cdn-default",
+      "private_key_secret_ref": ""
+    }
+  ],
+  "transports": [
+    {
+      "cdn_provider": "cloudflare",
+      "enabled": true,
+      "id": "websocket",
+      "kind": "ws",
+      "listen_port": 443,
+      "recommended": true,
+      "tls_profile_id": "cdn-default"
+    },
+    {
+      "cdn_provider": "cloudflare",
+      "enabled": true,
+      "id": "grpc",
+      "kind": "grpc",
+      "listen_port": 443,
+      "recommended": false,
+      "tls_profile_id": "cdn-default"
+    },
+    {
+      "cdn_provider": "cloudflare",
+      "enabled": false,
+      "id": "httpupgrade",
+      "kind": "httpupgrade",
+      "listen_port": 443,
+      "recommended": false,
+      "tls_profile_id": "cdn-default"
+    },
+    {
+      "cdn_provider": "cloudflare",
+      "enabled": false,
+      "id": "xhttp",
+      "kind": "xhttp",
+      "listen_port": 443,
+      "mode": "packet-up",
+      "recommended": false,
+      "seq_key": "_seq",
+      "seq_placement": "query",
+      "server_max_header_bytes": 16384,
+      "session_id_key": "_sid",
+      "session_id_placement": "cookie",
+      "tls_profile_id": "cdn-default",
+      "uplink_chunk_size": "2048-3072",
+      "uplink_data_key": "X-Data",
+      "uplink_data_placement": "auto",
+      "uplink_http_method": "POST",
+      "vless_encryption_authentication": "mlkem768",
+      "vless_encryption_enabled": true,
+      "x_padding_bytes": "100-1000",
+      "x_padding_header": "X-Padding",
+      "x_padding_key": "_v",
+      "x_padding_method": "tokenish",
+      "x_padding_obfs_mode": true,
+      "x_padding_placement": "query"
+    },
+    {
+      "enabled": false,
+      "fingerprint": "chrome",
+      "handshake_port": 443,
+      "handshake_server": "",
+      "id": "direct-reality",
+      "hostname_mode": "auto",
+      "kind": "reality",
+      "listen_port": 2443,
+      "public_key": "",
+      "recommended": false,
+      "server_name": "",
+      "wan_destination_address": ""
+    },
+    {
+      "enabled": false,
+      "grpc_health_check_timeout": 20,
+      "grpc_idle_timeout": 60,
+      "grpc_permit_without_stream": true,
+      "hostname": "",
+      "hostname_mode": "auto",
+      "id": "grpc-tls-pin",
+      "kind": "grpc-tls",
+      "listen_port": 2445,
+      "recommended": false,
+      "tls_profile_id": "",
+      "tls_server_name": "",
+      "wan_destination_address": ""
+    },
+    {
+      "enabled": false,
+      "fingerprint": "chrome",
+      "handshake_port": 443,
+      "handshake_server": "",
+      "hostname": "",
+      "id": "grpc-reality",
+      "hostname_mode": "auto",
+      "kind": "reality-grpc",
+      "grpc_health_check_timeout": 20,
+      "grpc_idle_timeout": 60,
+      "grpc_permit_without_stream": true,
+      "listen_port": 2444,
+      "public_key": "",
+      "recommended": false,
+      "server_name": "",
+      "wan_destination_address": ""
+    },
+    {
+      "enabled": false,
+      "fingerprint": "chrome",
+      "handshake_port": 443,
+      "handshake_server": "",
+      "hostname": "",
+      "id": "xhttp-reality",
+      "hostname_mode": "auto",
+      "kind": "xhttp-reality",
+      "listen_port": 2446,
+      "mode": "auto",
+      "public_key": "",
+      "recommended": false,
+      "seq_key": "_seq",
+      "seq_placement": "query",
+      "server_max_header_bytes": 16384,
+      "server_name": "",
+      "session_id_key": "_sid",
+      "session_id_placement": "cookie",
+      "uplink_chunk_size": "2048-3072",
+      "uplink_data_key": "X-Data",
+      "uplink_data_placement": "header",
+      "uplink_http_method": "GET",
+      "vless_encryption_authentication": "mlkem768",
+      "vless_encryption_enabled": true,
+      "wan_destination_address": "",
+      "x_padding_bytes": "100-1000",
+      "x_padding_header": "X-Padding",
+      "x_padding_key": "_v",
+      "x_padding_method": "tokenish",
+      "x_padding_obfs_mode": true,
+      "x_padding_placement": "query"
+    },
+    {
+      "enabled": false,
+      "id": "hysteria2",
+      "hostname_mode": "auto",
+      "kind": "hysteria2",
+      "listen_port": 443,
+      "obfs_enabled": false,
+      "recommended": false,
+      "tls_pin_certificate": false,
+      "tls_server_name": "",
+      "wan_destination_address": "",
+      "xray_hysteria": {
+        "masquerade": {
+          "type": "api"
+        },
+        "quic_params": {
+          "congestion": "bbr",
+          "keep_alive_period": 15
+        },
+        "udp_hop": {
+          "enabled": false,
+          "excluded_ports": "",
+          "interval_max": 45,
+          "interval_min": 15,
+          "port_end": 20100,
+          "port_start": 20000
+        },
+        "udp_idle_timeout": 60
+      }
+    }
+  ],
+  "updates": {
+    "automatic_install": false,
+    "channel": "stable",
+    "retain_previous_images": 0,
+    "rollback_window_hours": 24,
+    "signing_public_key_secret_ref": "updates/signing-public-key.pem"
+  },
+  "watchdog": {
+    "failure_threshold": 3,
+    "interval_seconds": 5,
+    "max_restarts_per_hour": 6,
+    "recovery_cooldown_seconds": 0,
+    "recovery_threshold": 3
+  }
+}

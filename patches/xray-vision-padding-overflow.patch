@@ -1,0 +1,80 @@
+diff --git a/proxy/proxy.go b/proxy/proxy.go
+index ab7d7ab..7fe7ade 100644
+--- a/proxy/proxy.go
++++ b/proxy/proxy.go
+@@ -515,2 +515,16 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
+-	if paddingLen > buf.Size-21-contentLen {
+-		paddingLen = buf.Size - 21 - contentLen
++	maxPaddingLen := int32(buf.Size-21) - contentLen
++	if maxPaddingLen < 0 {
++		maxPaddingLen = 0
++	}
++	if paddingLen > maxPaddingLen {
++		paddingLen = maxPaddingLen
++	}
++	bufferSize := contentLen + paddingLen + 5
++	if userUUID != nil {
++		bufferSize += int32(len(*userUUID))
++	}
++	var newbuffer *buf.Buffer
++	if bufferSize > buf.Size {
++		newbuffer = buf.NewWithSize(bufferSize)
++	} else {
++		newbuffer = buf.New()
+@@ -518 +531,0 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
+-	newbuffer := buf.New()
+diff --git a/proxy/xtls_padding_test.go b/proxy/xtls_padding_test.go
+new file mode 100644
+index 0000000..c8c4462
+--- /dev/null
++++ b/proxy/xtls_padding_test.go
+@@ -0,0 +1,49 @@
++package proxy
++
++import (
++	"bytes"
++	"context"
++	"testing"
++
++	"github.com/xtls/xray-core/common/buf"
++)
++
++func TestXtlsPaddingPreservesFullBuffer(t *testing.T) {
++	payload := bytes.Repeat([]byte{0x5a}, buf.Size)
++	tests := []struct {
++		name string
++		uuid []byte
++	}{
++		{name: "uuid already sent"},
++		{name: "first frame", uuid: bytes.Repeat([]byte{0x7b}, 16)},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			input := buf.New()
++			if written, err := input.Write(payload); err != nil || written != len(payload) {
++				t.Fatalf("write full input: written=%d err=%v", written, err)
++			}
++			uuid := append([]byte(nil), test.uuid...)
++			result := XtlsPadding(
++				input,
++				CommandPaddingContinue,
++				&uuid,
++				false,
++				context.Background(),
++				[]uint32{900, 500, 900, 1},
++			)
++			defer result.Release()
++
++			headerLen := len(test.uuid) + 5
++			if got, want := int(result.Len()), headerLen+len(payload); got != want {
++				t.Fatalf("padded length=%d, want %d", got, want)
++			}
++			if !bytes.Equal(result.BytesRange(int32(headerLen), result.Len()), payload) {
++				t.Fatal("full input payload was not preserved")
++			}
++			if uuid != nil {
++				t.Fatal("UUID was not consumed")
++			}
++		})
++	}
++}

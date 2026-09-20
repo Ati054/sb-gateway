@@ -1,0 +1,362 @@
+# Полный безопасный пример контракта Web UI.
+# Секретных значений нет; deployment_ready=false запрещает применение примера.
+schema_version: 1
+
+system:
+  name: sb-gateway
+  deployment_ready: false
+  architecture: arm64
+  primary_interface: web
+  cli_mode: recovery-only
+  object_comment_prefix: SB-GATEWAY
+  xray_version: "26.7.28"
+  management:
+    api_listen: 127.0.0.1:8080
+    https_listen: 172.31.255.2:9443
+    allowed_source_cidrs:
+      - 192.168.88.0/24
+      # Точный адрес администратора внутри WireGuard/OpenVPN.
+      - 10.12.0.17/32
+    allowed_ingress_interfaces:
+      - bridge
+      - wireguard-admin
+      # Для OpenVPN используйте стабильный server binding, например ovpn-admin-static.
+    tls_certificate: /config/certs/origin.pem
+    tls_private_key: /config/certs/origin.key
+    htpasswd_secret_ref: management.htpasswd
+    api_token_secret_ref: management-api-token
+    idle_timeout_seconds: 900
+    absolute_timeout_seconds: 28800
+  files:
+    users: /config/users.yaml
+    networks: /config/networks.yaml
+    policies: /config/policies.yaml
+    subscriptions: /config/subscriptions.yaml
+    rulesets: /config/rulesets.yaml
+  networking:
+    bridge_name: bridge-sb
+    veth_name: veth-sb
+    routeros_gateway: 172.31.255.1
+    container_address: 172.31.255.2/30
+    container_dns: 172.31.255.1
+    tun_address: 172.31.254.1/30
+    tun_mtu: 1400
+    addresses_confirmed: false
+    tcp_mss_clamp: auto
+    routing_table: to-sb-gateway
+    connection_mark: sb-managed
+    preserve_client_source_ip: true
+    ipv6_mode: block_managed
+    remote_ipv6_mode: proxy_only
+
+routeros:
+  detected_version: null
+  channel: null
+  channel_policy: informational
+  architecture: arm64
+  base_url: null
+  username_secret_ref: routeros/username
+  password_secret_ref: routeros/password
+  preserve_channel: true
+  automatic_update: false
+  apply_gate: capabilities-only
+  required_capabilities:
+    - routeros_major_7
+    - arm64
+    - container_package
+    - container_envs
+    - container_mounts
+    - container_start_on_boot
+    - container_auto_restart
+    - policy_routing
+    - firewall_mangle
+    - watchdog_scheduler
+  capabilities: {}
+  # Populated by the required plain /export import; examples are not trusted.
+  router_addresses: []
+  import_review:
+    source_fingerprint: null
+    imported_at: null
+    networks: []
+    management_ingress_suggestions: []
+    management_network_suggestions: []
+    posture_warnings: []
+    topology_suggestions: {}
+  last_tested_reference:
+    version: "7.21.5"
+    channel: long-term
+    release_date: "2026-07-06"
+    verified_date: "2026-07-29"
+
+watchdog:
+  interval_seconds: 5
+  failure_threshold: 3
+  recovery_threshold: 3
+  recovery_cooldown_seconds: 60
+  max_restarts_per_hour: 6
+
+service_packs: [] # дополнительные пакеты из доверенного каталога добавляет Web UI
+
+local_clients:
+  - id: phone-wifi
+    enabled: false
+    source_cidrs:
+      - 192.168.88.25/32
+    policy_id: local-phone-selective
+  - id: phone-wireguard
+    enabled: false
+    source_cidrs:
+      - 10.20.0.2/32
+    policy_id: local-wireguard-selective
+
+remote_users:
+  - id: phone-main
+    enabled: false
+    uuid_secret_ref: users/phone-main.uuid
+    role: trusted-full
+    policy_id: europe-priority
+    client_tun_address: "" # выбрать свободный CIDR через Web UI
+    transports:
+      - websocket
+      - grpc
+    fail_mode: closed
+    allow_direct_fallback: false
+    direct_domains: []
+    direct_services: []
+  - id: laptop-main
+    enabled: false
+    uuid_secret_ref: users/laptop-main.uuid
+    role: trusted-full
+    policy_id: finland-auto
+    client_tun_address: "" # выбрать свободный CIDR через Web UI
+    transports:
+      - websocket
+      - grpc
+    fail_mode: closed
+    allow_direct_fallback: false
+    direct_domains: []
+    direct_services: []
+
+reverse_vless_exits: []
+
+networks:
+  - id: home-lan
+    enabled: true
+    kind: internal
+    cidrs:
+      - 192.168.88.0/24
+  - id: wireguard-clients
+    enabled: false
+    kind: internal
+    cidrs:
+      - 10.20.0.0/24
+  - id: management-lan
+    enabled: true
+    kind: management
+    cidrs:
+      - 192.168.88.0/24
+
+policies:
+  - id: local-phone-selective
+    kind: local-selective
+    mode: select
+    outbounds:
+      - germany-auto
+      - europe-priority
+    service_routes:
+      youtube: germany-auto
+      telegram: europe-priority
+    final: direct
+    container_outage: direct
+  - id: local-wireguard-selective
+    kind: local-selective
+    mode: select
+    outbounds:
+      - finland-auto
+    service_routes:
+      youtube: finland-auto
+      telegram: finland-auto
+    final: direct
+    container_outage: direct
+  - id: local-full-tunnel-example
+    kind: local-selective
+    mode: select
+    enabled: false
+    outbounds:
+      - europe-cities
+    service_routes: {}
+    final: europe-cities
+    direct_services:
+      - ozon
+    direct_domains: []
+    container_outage: lan_only
+  - id: germany-auto
+    kind: outbound
+    mode: urltest
+    outbounds: []
+    countries:
+      - DE
+    on_all_unavailable: block
+  - id: finland-auto
+    kind: outbound
+    mode: urltest
+    outbounds: []
+    countries:
+      - FI
+    on_all_unavailable: block
+  - id: europe-priority
+    kind: outbound
+    mode: fallback
+    outbounds:
+      - germany-auto
+      - finland-auto
+    countries:
+      - DE
+      - NL
+      - FI
+    failure_threshold: 3
+    recovery_threshold: 3
+    switch_cooldown_seconds: 300
+    on_all_unavailable: block
+  - id: europe-cities
+    kind: outbound
+    mode: city_priority
+    outbounds: []
+    cities:
+      - Frankfurt
+      - Amsterdam
+      - Helsinki
+    quality_window: 5
+    max_packet_loss_percent: 40
+    max_latency_ms: 2000
+    switch_improvement_percent: 25
+    switch_improvement_ms: 50
+    failure_threshold: 3
+    recovery_threshold: 3
+    switch_cooldown_seconds: 300
+    return_to_primary: true
+    interrupt_exist_connections: false
+    on_all_unavailable: block
+
+subscriptions:
+  - id: provider-main
+    enabled: false
+    format: auto
+    url_secret_ref: subscriptions/provider-main.url
+    refresh_minutes: 360
+    update_interval_seconds: 21600
+    max_download_bytes: 8388608
+    download_timeout_seconds: 30
+    allowed_countries:
+      - DE
+      - NL
+      - FI
+    allowed_locations: []
+    allow_unknown_country: false
+    location_overrides: {}
+
+transports:
+  - id: websocket
+    kind: ws
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: true
+    recommended: true
+    hostname: ws.example.com
+    path_secret_ref: ws-path
+    backend: 127.0.0.1:11001
+  - id: grpc
+    kind: grpc
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: true
+    recommended: false
+    hostname: grpc.example.com
+    service_name_secret_ref: grpc-service
+    backend: 127.0.0.1:11002
+  - id: httpupgrade
+    kind: httpupgrade
+    cdn_provider: cloudflare
+    listen_port: 443
+    enabled: false
+    recommended: false
+    hostname: hu.example.com
+    path_secret_ref: httpupgrade-path
+    backend: 127.0.0.1:11003
+  - id: direct-reality
+    kind: reality
+    enabled: false
+    recommended: false
+    hostname: direct.example.com
+    listen_port: 2443
+    handshake_server: www.microsoft.com
+    handshake_port: 443
+    server_name: www.microsoft.com
+    public_key: ""
+    fingerprint: chrome
+    wan_destination_address: ""
+    require_public_address: true
+  - id: hysteria2
+    kind: hysteria2
+    enabled: false
+    recommended: false
+    hostname: hy2.example.com
+    listen_port: 443
+    up_mbps: 100
+    down_mbps: 100
+    ignore_client_bandwidth: false
+    obfs_enabled: false
+    wan_destination_address: ""
+    require_public_address: true
+
+ingress:
+  public_listen_port: 443
+  status_hostname: status.example.com
+  subscription_hostname: status.example.com
+  subscription_endpoint_enabled: true
+  subscription_origin_server_name: origin.example.com
+  subscription_listen_port: 443
+  subscription_cdn_provider: cloudflare
+  subscription_tls_profile_id: cdn-default
+  origin_certificate: /config/certs/origin.pem
+  origin_private_key: /config/certs/origin.key
+  require_cloudflare_source_ranges: true
+
+public_exposure:
+  subscription:
+    display_name: SB Gateway
+    # Required by Happ before subscription-managed iOS TUN settings are accepted.
+    # Obtain it from the provider account at https://happ-proxy.com/.
+    happ_provider_id: ""
+
+dns:
+  internal_server: 172.31.255.1
+  address_confirmed: false
+  internal_zones: []
+  local_public_mode: direct
+  remote_public_mode: assigned-policy
+  hijack_managed_clients: true
+  strict_dns: true
+  force_tcp_for_proxy_services: false
+
+security:
+  allow_router_management: false
+
+updates:
+  automatic_routeros_update: false
+  preserve_routeros_channel: true
+  capability_preflight: true
+  version_equality_gate: false
+  atomic: true
+  validate_candidate: true
+  verify_sha256: true
+  keep_last_known_good: true
+
+storage:
+  require_external_storage: true
+  config: /config
+  data: /data
+  logs: /logs
+  state: /state
+  log_max_size: 10MiB
+  log_keep_files: 5

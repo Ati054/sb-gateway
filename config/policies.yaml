@@ -1,0 +1,127 @@
+schema_version: 1
+
+local_policies:
+  - id: local-phone-selective
+    service_routes:
+      youtube: germany-auto
+      telegram: europe-priority
+    final: direct
+    container_outage: direct
+  - id: local-wireguard-selective
+    service_routes:
+      youtube: finland-auto
+      telegram: finland-auto
+    final: direct
+    container_outage: direct
+  - id: local-tv-selective
+    service_routes:
+      youtube: europe-best
+    final: direct
+    container_outage: direct
+  - id: local-full-tunnel-example
+    enabled: false
+    service_routes: {}
+    final: europe-cities
+    direct_domains:
+      - ozon.ru
+      - ozonusercontent.com
+    container_outage: lan_only
+
+outbound_policies:
+  germany-auto:
+    mode: best_latency
+    countries:
+      - DE
+    on_all_unavailable: block
+
+  finland-auto:
+    mode: best_latency
+    countries:
+      - FI
+    on_all_unavailable: block
+
+  europe-best:
+    mode: best_latency
+    countries:
+      - DE
+      - NL
+      - FI
+    on_all_unavailable: block
+
+  europe-priority:
+    mode: country_priority
+    countries:
+      - DE
+      - NL
+      - FI
+    failure_threshold: 3
+    recovery_threshold: 3
+    switch_cooldown: 300s
+    on_all_unavailable: block
+
+  europe-cities:
+    mode: city_priority
+    cities:
+      - Frankfurt
+      - Amsterdam
+      - Helsinki
+    quality_window: 5
+    max_packet_loss_percent: 40
+    max_latency_ms: 2000
+    failure_threshold: 3
+    recovery_threshold: 3
+    switch_cooldown: 300s
+    return_to_primary: true
+    interrupt_exist_connections: false
+    on_all_unavailable: block
+
+# Пример закрепления; включается после появления такого нормализованного тега.
+  fixed-example:
+    mode: fixed
+    outbound: provider-main-de-01
+    enabled: false
+    on_unavailable: block
+
+health:
+  interval: 60s
+  failure_threshold: 3
+  recovery_threshold: 3
+  switch_cooldown: 300s
+  latency_tolerance_ms: 80
+  max_packet_loss_percent: 40
+  persist_selection: true
+
+services:
+  youtube:
+    enabled: true
+    rule_set: service-youtube
+    udp: true
+  telegram:
+    enabled: true
+    rule_set: service-telegram
+    udp: true
+  chatgpt:
+    enabled: false
+    rule_set: service-chatgpt
+    udp: false
+  discord:
+    enabled: false
+    rule_set: service-discord
+    udp: true
+  netflix:
+    enabled: false
+    rule_set: service-netflix
+    udp: true
+
+route_order:
+  - sniff
+  - dns-hijack
+  - loop-defense
+  - remote-trusted-internal
+  - remote-limited-allowed
+  - remote-internal-reject
+  - remote-public-assigned-policy
+  - tun-internal-defense
+  - tun-service-policy
+  - tun-final-direct
+  - unknown-inbound-reject
