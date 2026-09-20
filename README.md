@@ -143,6 +143,12 @@ contract.
 - Local managed clients choose WAN fail-open or LAN-only fail-closed for a
   container outage. Remote VLESS/Hysteria users always fail closed and never
   receive ordinary WAN as an implicit fallback.
+- Managed LAN traffic on the router uses kernel TPROXY only; the container does
+  not use a userspace TUN/gVisor dataplane. An exported full-tunnel profile for
+  a remote phone or PC creates its system VPN interface on the client itself.
+  Its public IPv6 follows the assigned VLESS policy only
+  (`remote_ipv6_mode: proxy_only`); an IPv4-only WAN never becomes a direct
+  IPv6 fallback.
 - In `VLESS + WAN`, selected service cards use WAN and the remaining traffic
   uses the selected VPN policy. In `WAN + VLESS`, the same cards use the VPN
   policy and the remaining traffic uses WAN. The VPN side can contain provider
