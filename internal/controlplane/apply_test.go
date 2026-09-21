@@ -161,6 +161,17 @@ func TestApplyFirstNativeRouterOSChangeUsesFailOpenRollbackBaseline(t *testing.T
 		finalize func(context.Context, routeros.BackupRef) error,
 	) (routerOSApplyOutput, error) {
 		previousSource = previous
+		operation, journalErr := server.repository.auxiliary("apply-operation")
+		if journalErr != nil {
+			return routerOSApplyOutput{}, journalErr
+		}
+		recoveryRevision := text(operation["recovery_revision"])
+		if !safeRevision(recoveryRevision) || text(operation["previous_revision"]) != "" {
+			return routerOSApplyOutput{}, fmt.Errorf("first Apply recovery journal is invalid: %#v", operation)
+		}
+		if _, loadErr := server.repository.loadGeneration(recoveryRevision); loadErr != nil {
+			return routerOSApplyOutput{}, loadErr
+		}
 		if err := health(ctx); err != nil {
 			return routerOSApplyOutput{}, err
 		}
@@ -321,6 +332,73 @@ func TestInterruptedApplyRecoveryConvergesToAuthoritativeActiveGeneration(t *tes
 				t.Fatalf("runtime was not reconciled exactly once: %#v", runtime)
 			}
 		})
+	}
+}
+
+func TestInterruptedFirstApplyRecoveryRestoresSafeBaselineWithoutPublishingActive(t *testing.T) {
+	server := newTestServer(t)
+	target := routerOSReadyConfig(t)
+	target["name"] = "first-target"
+	targetRevision, err := server.repository.stageGeneration(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := firstApplyRollbackConfig(target)
+	baseline["name"] = "safe-installation-baseline"
+	recoveryRevision, err := server.repository.stageGeneration(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.saveAuxiliary("apply-operation", map[string]any{
+		"kind": "apply", "pending": true, "state": "runtime_activated",
+		"previous_revision": nil, "target_revision": targetRevision,
+		"recovery_revision":        recoveryRevision,
+		"previous_routeros_source": "router-safe", "target_routeros_source": "router-target",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntimeApplier{revision: strings.Repeat("f", 64)}
+	server.runtime = runtime
+	var recoveredName, recoveredSource string
+	server.applyRouterOS = func(
+		ctx context.Context, config map[string]any, desired, _ string,
+		health func(context.Context) error, finalize func(context.Context, routeros.BackupRef) error,
+	) (routerOSApplyOutput, error) {
+		recoveredName, recoveredSource = text(config["name"]), desired
+		if err := health(ctx); err != nil {
+			return routerOSApplyOutput{}, err
+		}
+		if err := finalize(ctx, routeros.BackupRef{}); err != nil {
+			return routerOSApplyOutput{}, err
+		}
+		return routerOSApplyOutput{Kind: "full"}, nil
+	}
+
+	worked, err := server.reconcilePendingApply(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("first Apply recovery worked=%t err=%v", worked, err)
+	}
+	if recoveredName != "safe-installation-baseline" || recoveredSource != "router-safe" {
+		t.Fatalf("recovered name=%q source=%q", recoveredName, recoveredSource)
+	}
+	if revision, err := server.repository.activeRevision(); err != nil || revision != "" {
+		t.Fatalf("safe recovery published active revision %q, err=%v", revision, err)
+	}
+	operation, err := server.repository.auxiliary("apply-operation")
+	if err != nil || len(operation) != 0 {
+		t.Fatalf("first Apply recovery journal remains: %#v, %v", operation, err)
+	}
+	if runtime.prepareCalls != 1 || runtime.activateCalls != 1 || runtime.commitCalls != 1 {
+		t.Fatalf("safe runtime was not reconciled exactly once: %#v", runtime)
+	}
+	if conflict, err := server.stateMutationConflict(""); err != nil || conflict != "" {
+		t.Fatalf("repeat Apply remains blocked: conflict=%q err=%v", conflict, err)
+	}
+	if result, status, err := server.applyConfiguration(context.Background(), target, "admin"); err != nil || status != http.StatusOK || result["operation"] != "applied" {
+		t.Fatalf("repeat first Apply result=%#v status=%d err=%v", result, status, err)
+	}
+	if revision, err := server.repository.activeRevision(); err != nil || revision == "" {
+		t.Fatalf("repeated first Apply did not publish active revision: %q, %v", revision, err)
 	}
 }
 

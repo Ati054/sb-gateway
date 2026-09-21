@@ -1,6 +1,6 @@
 # CDN-развёртывания и Cloudflare
 
-Документ соответствует модели CDN-развёртываний SB Gateway 1.6.19.
+Документ соответствует модели CDN-развёртываний SB Gateway 1.6.20.
 
 Документ относится к VLESS WebSocket, gRPC, HTTPUpgrade, XHTTP и выдаче
 клиентской HTTPS-подписки. Direct REALITY и Hysteria 2 не являются обычным

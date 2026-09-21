@@ -195,21 +195,26 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	}
 	committedRouterOS, _ := metadata["routeros_source"].(string)
 	previousRouterOS := committedRouterOS
-	if previousRouterOS == "" && active != nil {
+	recoveryRevision := activeRevision
+	if active == nil {
+		// active.json is the only commit point. On a fresh installation do not
+		// trust a leftover derivative metadata file as a previous generation.
+		// Persist the bounded installation baseline before writing the operation
+		// journal or changing runtime/RouterOS.
+		firstApplyRecovery := firstApplyRollbackConfig(config)
+		recoveryRevision, err = server.repository.stageGeneration(firstApplyRecovery)
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("persist first-apply recovery generation: %w", err)
+		}
+		previousRouterOS, err = runtimeconfig.RenderRouterOSTrafficCandidate(firstApplyRecovery, nil, server.opts.Runtime.RuleSetDir)
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("render first-apply fail-open rollback: %w", err)
+		}
+	} else if previousRouterOS == "" {
 		previousNodes := server.routerOSNodesForRevision(activeRevision, nodes)
 		previousRouterOS, err = runtimeconfig.RenderRouterOSTrafficCandidate(active, previousNodes, server.opts.Runtime.RuleSetDir)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
-		}
-	} else if previousRouterOS == "" {
-		// A fresh installation has no committed generation yet. Build a bounded
-		// rollback candidate from the operator-confirmed topology, but remove
-		// every traffic-diversion and public-exposure decision. RouterOS Safe
-		// Mode remains the exact primary rollback; this source is the independent
-		// scheduler fallback and deliberately restores fail-open reachability.
-		previousRouterOS, err = runtimeconfig.RenderRouterOSTrafficCandidate(firstApplyRollbackConfig(config), nil, server.opts.Runtime.RuleSetDir)
-		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("render first-apply fail-open rollback: %w", err)
 		}
 	}
 	// Compare against what was actually committed, not the old configuration
@@ -237,7 +242,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	if err := server.saveSubscriptionSnapshot(stagedRevision, desiredNodes); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	if err := server.beginApplyRecovery(activeRevision, stagedRevision, previousRouterOS, desiredRouterOS, candidate.Revision); err != nil {
+	if err := server.beginApplyRecovery(activeRevision, recoveryRevision, stagedRevision, previousRouterOS, desiredRouterOS, candidate.Revision); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 

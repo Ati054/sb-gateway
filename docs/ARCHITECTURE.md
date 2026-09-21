@@ -1,6 +1,6 @@
 # Архитектура SB Gateway
 
-Документ соответствует SB Gateway 1.6.19, серверному Xray-core 26.9.9 и runtime renderer
+Документ соответствует SB Gateway 1.6.20, серверному Xray-core 26.9.9 и runtime renderer
 schema 38.
 
 ## Границы системы
@@ -693,13 +693,23 @@ generation, фиксирует runtime LKG и только затем очища
 поэтому watchdog не публикует RouterOS lease и промежуточная комбинация не
 получает управляемый трафик.
 
+Для самого первого Apply, когда `active.json` ещё не существует, до мутаций
+отдельно сохраняется content-addressed `recovery_revision` безопасной
+установочной конфигурации. После аварии reconciler применяет и проверяет именно
+эту generation вместе с записанным fail-open RouterOS source, фиксирует runtime
+LKG, но не публикует `active.json`: первый Apply можно повторить как первый.
+Старый журнал без `recovery_revision` совместим только при точном совпадении
+заново построенного безопасного RouterOS source с уже сохранённым journal.
+
 Все операции, меняющие runtime или RouterOS, проходят через общий mutation
-barrier. Внутрипроцессный lock сериализует Apply, image update/uninstall,
-восстановление и активацию подписки; `apply-operation`, `lifecycle-operation`,
-`subscription-runtime-operation` и recovery marker продолжают ту же защиту
-после рестарта API. Read-only status, readiness и diagnostics этим lock не
-закрываются. Загрузка/разбор подписки может выполняться в фоне, но публикация
-нового node inventory требует свободного mutation barrier.
+barrier. Внутрипроцессный lock сериализует Apply, ручной откат, image
+update/uninstall, восстановление и активацию подписки; `apply-operation`,
+`lifecycle-operation`, `subscription-runtime-operation` и recovery marker
+продолжают ту же защиту после рестарта API. Ручной откат использует тот же
+порядок lock: mutation barrier, проверка persisted journal, затем config lock.
+Read-only status, readiness и diagnostics этим lock не закрываются.
+Загрузка/разбор подписки может выполняться в фоне, но публикация нового node
+inventory требует свободного mutation barrier.
 
 Перед созданием каждого нового rollback-scheduler control plane читает все
 project-owned scheduler. Пока хотя бы один из них ещё не выполнялся
