@@ -298,6 +298,18 @@ func (server *Server) subscriptionRefreshError(response http.ResponseWriter, req
 }
 
 func (server *Server) commitSubscriptionNodes(subscription map[string]any, body []byte, headers http.Header, nodes []map[string]any, channel subscriptionRefreshChannel) (map[string]any, error) {
+	// Download and parsing may run in the background, but publishing a new node
+	// inventory is a state mutation. Do not wait while holding subscriptionMu:
+	// a concurrent Apply/recovery owns mutationMu and must finish first.
+	if !server.mutationMu.TryLock() {
+		return nil, errors.New("another configuration-changing operation is in progress")
+	}
+	defer server.mutationMu.Unlock()
+	if conflict, err := server.stateMutationConflict(mutationSubscription); err != nil {
+		return nil, err
+	} else if conflict != "" {
+		return nil, errors.New("another configuration-changing operation is in progress")
+	}
 	server.configMu.Lock()
 	defer server.configMu.Unlock()
 	subscriptionID := fmt.Sprint(subscription["id"])

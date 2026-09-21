@@ -56,6 +56,11 @@ func (server *Server) scheduleFullUninstall(response http.ResponseWriter, reques
 		server.writeErrorResponse(response, request, http.StatusUnprocessableEntity, "invalid_storage_root", err.Error())
 		return
 	}
+	server.mutationMu.Lock()
+	defer server.mutationMu.Unlock()
+	if server.rejectMutationConflict(response, request, mutationLifecycle) {
+		return
+	}
 	server.lifecycleMu.Lock()
 	defer server.lifecycleMu.Unlock()
 	config, err := server.getDraft()

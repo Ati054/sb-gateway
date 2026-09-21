@@ -64,7 +64,7 @@ func applyFailureResponse(err error) (string, string) {
 	case applyRolledBack:
 		return "apply_rolled_back", "The candidate was rejected and the previous configuration was restored."
 	case applyRecoveryPending:
-		return "apply_recovery_pending", "Apply did not complete. The RouterOS rollback guard remains armed and restoration is pending; check status before retrying."
+		return "apply_recovery_pending", "Apply did not start or complete because a RouterOS rollback guard remains armed. Check status before retrying."
 	default:
 		return "apply_state_unconfirmed", "Apply ended without a confirmed final state. Check RouterOS and container status before retrying."
 	}
@@ -123,6 +123,11 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 		return
 	}
 
+	server.mutationMu.Lock()
+	defer server.mutationMu.Unlock()
+	if server.rejectMutationConflict(response, request, "") {
+		return
+	}
 	server.configMu.Lock()
 	defer server.configMu.Unlock()
 	actor := fmt.Sprint(payload["sub"])
@@ -232,11 +237,15 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	if err := server.saveSubscriptionSnapshot(stagedRevision, desiredNodes); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	if err := server.beginApplyRecovery(activeRevision, stagedRevision, previousRouterOS, desiredRouterOS, candidate.Revision); err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
 
 	var receipt runtimeconfig.ActivationReceipt
 	var activated bool
 	var stateCommitted bool
 	runtimeCleanupPending := false
+	runtimeCommitPending := false
 	runtimeReady := false
 	activate := func(operationContext context.Context) error {
 		if runtimeReady {
@@ -249,6 +258,10 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		receipt, activateErr = server.runtime.activate(operationContext, candidate)
 		activated = len(receipt.Changed()) > 0
 		runtimeReady = activateErr == nil
+		if activateErr == nil {
+			activateErr = server.markApplyRecoveryState("runtime_activated")
+			runtimeReady = activateErr == nil
+		}
 		return activateErr
 	}
 	rollbackRuntime := func() error {
@@ -274,6 +287,10 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			return commitErr
 		}
 		stateCommitted = true
+		if err := server.markApplyRecoveryState("active_committed"); err != nil {
+			runtimeCleanupPending = true
+			log.Printf("control-plane: active commit published; Apply journal update pending: %v", err)
+		}
 		if commitErr != nil {
 			// active.json is authoritative. Derivative pointers are repaired by
 			// reconcileCommitPointers; rolling Xray back here would split state.
@@ -282,6 +299,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		}
 		if err := server.runtime.commit(candidate); err != nil {
 			runtimeCleanupPending = true
+			runtimeCommitPending = true
 		}
 		return nil
 	}
@@ -299,20 +317,34 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		applyKind, sections, cleanupPending = output.Kind, output.Sections, output.Result.CleanupPending
 		guardMode = output.Result.GuardMode
 		if applyErr != nil {
-			return nil, http.StatusConflict, classifyApplyFailure(applyErr, rollbackRuntime())
+			failure := classifyApplyFailure(applyErr, rollbackRuntime())
+			server.finishFailedApplyRecovery(failure)
+			return nil, http.StatusConflict, failure
 		}
 	} else {
 		if err := activate(ctx); err != nil {
-			return nil, http.StatusConflict, classifyApplyFailure(err, rollbackRuntime())
+			failure := classifyApplyFailure(err, rollbackRuntime())
+			server.finishFailedApplyRecovery(failure)
+			return nil, http.StatusConflict, failure
 		}
 		if err := commit(backup); err != nil {
-			return nil, http.StatusInternalServerError, classifyApplyFailure(err, rollbackRuntime())
+			failure := classifyApplyFailure(err, rollbackRuntime())
+			server.finishFailedApplyRecovery(failure)
+			return nil, http.StatusInternalServerError, failure
 		}
 	}
 	if _, err := server.repository.saveDraft(config); err != nil {
 		runtimeCleanupPending = true
 	}
 	server.noteXrayLoggingApplied(config, stagedRevision)
+	if runtimeCommitPending {
+		if err := server.markApplyRecoveryState("recovery_pending"); err != nil {
+			log.Printf("control-plane: runtime LKG recovery journal update failed: %v", err)
+		}
+	} else if err := server.clearApplyRecovery(); err != nil {
+		runtimeCleanupPending = true
+		log.Printf("control-plane: successful Apply journal cleanup pending: %v", err)
+	}
 	result := applyResponse("applied", stagedRevision, activeRevision, candidate.Revision, routerOSChanged, applyKind, sections, backup, cleanupPending || runtimeCleanupPending)
 	result["routeros_guard_mode"] = guardMode
 	result["check"] = check.payload()

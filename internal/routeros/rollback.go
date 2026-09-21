@@ -16,6 +16,8 @@ const rollbackSchedulerComment = "SB-GATEWAY Safe Mode rollback fallback"
 
 var rollbackSchedulerNamePattern = regexp.MustCompile(`^SB-GATEWAY-safe-rollback-[0-9a-f]{8}$`)
 
+var ErrRollbackGuardPending = errors.New("previous RouterOS rollback guard remains armed")
+
 type RollbackOptions struct {
 	Delay          time.Duration
 	ResumeWatchdog bool
@@ -31,6 +33,9 @@ func (client *Client) ArmRollback(ctx context.Context, scriptName string, option
 	}
 	if options.ManagedImport != "" && !managedImportNamePattern.MatchString(options.ManagedImport) {
 		return "", errors.New("managed RouterOS rollback import name is invalid")
+	}
+	if err := client.ensureNoPendingRollbackGuard(ctx); err != nil {
+		return "", err
 	}
 	delay := options.Delay
 	if delay == 0 {
@@ -86,6 +91,28 @@ func (client *Client) ArmRollback(ctx context.Context, scriptName string, option
 		return "", err
 	}
 	return name, nil
+}
+
+// ensureNoPendingRollbackGuard prevents two independent rollback generations
+// from overlapping. A guard with run-count zero can still restore an older
+// configuration, so no later candidate may be applied until that guard has
+// either fired or been removed successfully.
+func (client *Client) ensureNoPendingRollbackGuard(ctx context.Context) error {
+	rows, err := client.list(ctx, "/rest/system/scheduler?.proplist=name,comment,run-count")
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		name := text(row["name"])
+		if !rollbackSchedulerNamePattern.MatchString(name) || text(row["comment"]) != rollbackSchedulerComment {
+			continue
+		}
+		count, countErr := strconv.Atoi(text(row["run-count"]))
+		if countErr != nil || count == 0 {
+			return ErrRollbackGuardPending
+		}
+	}
+	return nil
 }
 
 // DisarmRollback removes only the exact scheduler owned by this project. A

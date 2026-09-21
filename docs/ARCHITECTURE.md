@@ -1,6 +1,6 @@
 # Архитектура SB Gateway
 
-Документ соответствует SB Gateway 1.6.18, серверному Xray-core 26.9.9 и runtime renderer
+Документ соответствует SB Gateway 1.6.19, серверному Xray-core 26.9.9 и runtime renderer
 schema 38.
 
 ## Границы системы
@@ -684,6 +684,32 @@ RouterOS к прежней generation немедленно; неудача эт�
 не откатывает уже опубликованный runtime: документы восстанавливаются из
 `active.json` при reconciliation.
 
+Перед первой runtime/RouterOS-мутацией Apply записывает долговечный
+`apply-operation.json`. Если процесс завершается после снятия rollback guard,
+решение не выводится из промежуточной фазы: единственным решением остаётся
+`active.json`. Background reconciler заново строит runtime и RouterOS из этой
+generation, фиксирует runtime LKG и только затем очищает journal. Пока journal
+активен, readiness и traffic-readiness возвращают `apply_recovery_pending`,
+поэтому watchdog не публикует RouterOS lease и промежуточная комбинация не
+получает управляемый трафик.
+
+Все операции, меняющие runtime или RouterOS, проходят через общий mutation
+barrier. Внутрипроцессный lock сериализует Apply, image update/uninstall,
+восстановление и активацию подписки; `apply-operation`, `lifecycle-operation`,
+`subscription-runtime-operation` и recovery marker продолжают ту же защиту
+после рестарта API. Read-only status, readiness и diagnostics этим lock не
+закрываются. Загрузка/разбор подписки может выполняться в фоне, но публикация
+нового node inventory требует свободного mutation barrier.
+
+Перед созданием каждого нового rollback-scheduler control plane читает все
+project-owned scheduler. Пока хотя бы один из них ещё не выполнялся
+(`run-count=0`), новая изменяющая транзакция останавливается до запуска
+candidate и возвращает `recovery_pending`. Поэтому guard, который не удалось
+снять после успешного немедленного отката, не может пережить следующий
+успешный Apply и позднее вернуть уже подтверждённую новую конфигурацию. После
+срабатывания либо подтверждённого удаления прежнего guard новый Apply снова
+разрешён; отработавшая one-shot запись не считается активной generation.
+
 Та же транзакция поддерживает полный generated RSC до 2 МиБ. Apply и rollback
 проверяются на точный заголовок, полный упорядоченный набор managed sections и
 запрещённые команды, получают SHA-256-derived имена и потоково загружаются по
@@ -691,6 +717,14 @@ SCP. REST хранит лишь короткие `/import file-name=...` wrapper
 оба inert-файла удаляются одной SSH-командой; ошибка этой необязательной уборки
 помечается как `CleanupPending`, но не превращает уже здоровый commit в ложную
 ошибку. Candidate source нигде не дублируется в постоянный cache.
+
+Последний PUT image-update scheduler имеет отдельную семантику неопределённого
+результата. Явный RouterOS HTTP 4xx считается отказом. При transport error
+операция остаётся `preparing` с bounded confirmation window: control plane
+читает точный owned scheduler и текущие container roots. Найденный scheduler
+переводит операцию в `scheduled`, его отсутствие после окна — в `failed`.
+Повторный запрос до подтверждения видит активный persisted journal и не может
+заменить уже работающий scheduler.
 
 Go control plane теперь обслуживает read-only `POST /api/v1/drafts/plan` без
 записи состояния и без сетевого обращения к RouterOS. Plan делает один

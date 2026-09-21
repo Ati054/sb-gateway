@@ -109,7 +109,7 @@ func (transaction *Transaction) ApplyDelta(ctx context.Context, applySource, rol
 	result.ApplyScript = applyName
 	scheduler, err := transaction.rest.ArmRollback(ctx, rollbackName, RollbackOptions{Delay: options.RollbackDelay})
 	if err != nil {
-		return result, err
+		return result, classifyRollbackArmFailure(err)
 	}
 	return transaction.applyPrepared(ctx, result, scheduler, options, nil)
 }
@@ -152,9 +152,16 @@ func (transaction *Transaction) ApplyCandidate(ctx context.Context, applySource,
 		Delay: options.RollbackDelay, ManagedImport: rollbackImport,
 	})
 	if err != nil {
-		return result, errors.Join(err, transaction.cleanupImports(imports, options.SettleTimeout))
+		return result, errors.Join(classifyRollbackArmFailure(err), transaction.cleanupImports(imports, options.SettleTimeout))
 	}
 	return transaction.applyPrepared(ctx, result, scheduler, options, imports)
+}
+
+func classifyRollbackArmFailure(err error) error {
+	if errors.Is(err, ErrRollbackGuardPending) {
+		return transactionFailure(TransactionRecoveryPending, err)
+	}
+	return err
 }
 
 func (transaction *Transaction) applyPrepared(ctx context.Context, result TransactionResult, scheduler string, options TransactionOptions, imports []string) (TransactionResult, error) {

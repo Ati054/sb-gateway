@@ -69,6 +69,7 @@ type Server struct {
 	trafficReadyAfter         time.Time
 	mu                        sync.RWMutex
 	passwordMu                sync.Mutex
+	mutationMu                sync.Mutex
 	recoveryMu                sync.Mutex
 	recoveryBeforeSnapshot    func(int)
 	recoveryCleanupSnapshot   func(string) error
@@ -184,6 +185,7 @@ func Run(ctx context.Context, opts Options) error {
 	defer cancel()
 	defer websiteListener.Close()
 	go server.runSubscriptionScheduler(runContext)
+	go server.runApplyRecoveryScheduler(runContext)
 	go server.runRouterOSLiveNetworkScheduler(runContext)
 	go server.runCDNFeedScheduler(runContext)
 	go server.runACMEScheduler(runContext)
