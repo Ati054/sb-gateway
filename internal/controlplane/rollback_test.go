@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -83,5 +84,66 @@ func TestRollbackRequiresExactConfirmationBeforePasswordCheck(t *testing.T) {
 	}, map[string]string{csrfHeader: csrf}, cookie)
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("inexact confirmation returned %d", response.Code)
+	}
+}
+
+func TestRollbackRejectsPersistedConflictingMutation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		journal   string
+		operation map[string]any
+	}{
+		{name: "scheduled image update", journal: "lifecycle-operation", operation: map[string]any{"kind": "image-update", "state": "scheduled"}},
+		{name: "image probation", journal: "lifecycle-operation", operation: map[string]any{"kind": "image-update", "state": "probation"}},
+		{name: "pending Apply recovery", journal: "apply-operation", operation: map[string]any{"kind": "apply", "pending": true, "state": "recovery_pending"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			cookie, csrf := bootstrapSession(t, server)
+			previous := routerOSReadyConfig(t)
+			previousRevision, err := server.repository.stageGeneration(previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			active := cloneJSONObject(previous)
+			active["name"] = "active"
+			activeRevision, err := server.repository.stageGeneration(active)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := server.repository.commitActive(commitMetadata{
+				Revision: activeRevision, PreviousRevision: previousRevision,
+				RuntimeRevision: strings.Repeat("4", 64), PreviousRuntimeRevision: strings.Repeat("3", 64),
+				Actor: "test", CommittedAt: server.now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := server.repository.saveAuxiliary(test.journal, test.operation); err != nil {
+				t.Fatal(err)
+			}
+			before, err := server.repository.auxiliary(test.journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := &fakeRuntimeApplier{revision: strings.Repeat("5", 64)}
+			server.runtime = runtime
+			response := performRequest(t, server, http.MethodPost, apiPrefix+"/drafts/rollback", map[string]any{
+				"password": "panel-password-123", "confirmation": "ОТКАТИТЬ",
+			}, map[string]string{csrfHeader: csrf}, cookie)
+			if response.Code != http.StatusConflict {
+				t.Fatalf("conflicting rollback status=%d body=%s", response.Code, response.Body.String())
+			}
+			failure := objectAt(decodeResponse(t, response), "error")
+			if failure["code"] != "state_mutation_in_progress" || runtime.prepareCalls != 0 {
+				t.Fatalf("conflict=%#v runtime=%#v", failure, runtime)
+			}
+			after, err := server.repository.auxiliary(test.journal)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("conflicting rollback changed journal: before=%#v after=%#v err=%v", before, after, err)
+			}
+			if revision, err := server.repository.activeRevision(); err != nil || revision != activeRevision {
+				t.Fatalf("conflicting rollback changed active revision: %q, %v", revision, err)
+			}
+		})
 	}
 }
