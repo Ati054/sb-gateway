@@ -1,81 +1,103 @@
 # Changelog
 
-## 1.6.18
+## 1.6.19
 
 ## Русский
 
 ### Описание
 
-Версия 1.6.18 исправляет завершение защищённого Apply и приводит таблицу
-качества узлов к порядку маршрутного листа.
+Версия 1.6.19 усиливает восстановление после прерванных операций управления.
+Она сохраняет согласованность RouterOS, Xray, DNS и активной конфигурации при
+потере ответа, аварийном завершении процесса и повторном запросе из панели.
 
 ### Изменения
 
-- Control plane снимает RouterOS rollback-scheduler до публикации `active.json`
-  и runtime LKG. Ошибка снятия guard блокирует Finalize, запускает сохранённый
-  rollback и оставляет scheduler повторной страховкой.
-- API и панель различают подтверждённый откат, ожидаемое восстановление и
-  неподтверждённое состояние. Панель не предлагает повторный Apply, пока итог
-  операции требует проверки.
-- `active.json` служит единственной точкой фиксации. Ошибка записи производных
-  LKG/metadata запускает последующее восстановление документов без отката
-  работающего Xray.
-- Таблица **Качество узлов** показывает приоритетный маршрут в настроенном
-  порядке. Режим URLTest сохраняет сортировку по измеренному качеству.
-- Публичные исходники содержат очищенные Go- и browser-регрессии. Release CI
-  запускает их вместе со сборкой и проверкой публичной границы.
+- Если RouterOS создал scheduler обновления контейнера, но HTTP-ответ потерян,
+  панель проверяет фактическое состояние и не запускает второе обновление.
+- Apply записывает долговечный журнал до первого изменения. После перезапуска
+  система восстанавливает RouterOS и runtime строго из активной generation;
+  управляемая маршрутизация остаётся неготовой до завершения сверки.
+- Одновременные Apply, обновление контейнера, восстановление и активация
+  подписки безопасно сериализуются. Чтение статуса и диагностика доступны.
+- Повреждённые производные документы LKG и apply metadata восстанавливаются из
+  проверенного `active.json`. Повреждённый `active.json` не угадывается.
+- Пустой, HTML-, повреждённый JSON- или некорректный base64-ответ подписки не
+  заменяет последнюю рабочую конфигурацию и не включает прямой выход.
+- Незавершённый RouterOS rollback guard блокирует следующую изменяющую
+  транзакцию, поэтому устаревший таймер не может отменить новый Apply.
+- Таблица **Качество узлов** сохраняет настроенный порядок приоритетного
+  маршрутного листа; URLTest продолжает сортировать узлы по качеству.
 
 ### Установка и обновление
 
-Для чистой установки используйте `sb-gateway-1.6.18-routeros-bundle.zip` и
+Для чистой установки используйте `sb-gateway-1.6.19-routeros-bundle.zip` и
 [инструкцию](../INSTALL-RU.md).
 
 Для обновления работающей установки загрузите
-`sb-gateway-1.6.18-linux-arm64.tar` в разделе
+`sb-gateway-1.6.19-linux-arm64.tar` в разделе
 **Эксплуатация → Обновление контейнера**. Панель проверит архитектуру, версию и
 SHA-256 до остановки текущего контейнера.
 
 ### Проверка релиза
 
-Перед публикацией команда проекта выполняет Go- и browser-тесты, ESLint,
-production-сборку интерфейса, проверку публичного дерева, ARM64-сборку,
-RouterOS dry-run и цикл обновления на изолированном MikroTik CHR.
+Пройдены Go- и browser-тесты, ESLint, production-сборка интерфейса и проверка
+ARM64-образа. На изолированном MikroTik CHR обновление 1.6.19 завершило
+probation; подтверждены RouterOS-сценарии, реальные маршруты и DNS, обязательные
+правила Claude/Antigravity, учёт трафика более специфичного клиента и подавление
+лишних переключений при нестабильном WAN. Подтверждённый timeout активного узла
+переключил маршрут примерно за 10 секунд.
+
+Отдельно проверена полная остановка контейнера: обычный WAN сохранился для
+неуправляемого клиента, `lan_only` пропустил только явно разрешённые сервисы,
+остальной публичный трафик остался закрыт, LAN продолжил работать, а контейнер,
+маршрутизация и исходная конфигурация восстановились без перезагрузки CHR.
 
 ## English
 
 ### Overview
 
-Version 1.6.18 fixes the protected Apply finalization path and aligns the node
-quality table with route-list priority.
+Version 1.6.19 strengthens recovery from interrupted management operations. It
+keeps RouterOS, Xray, DNS, and the active configuration consistent across lost
+responses, process termination, and repeated panel requests.
 
 ### Changes
 
-- The control plane disarms the RouterOS rollback scheduler before publishing
-  `active.json` and the runtime LKG. A disarm failure blocks Finalize, runs the
-  saved rollback, and keeps the scheduler as a second recovery attempt.
-- The API and Web UI distinguish a completed rollback, pending recovery, and
-  an unconfirmed final state. The UI withholds retry guidance until the
-  operation state has been checked.
-- `active.json` is the sole application commit point. A derivative LKG or
-  metadata write failure schedules document repair without reverting the live
-  Xray configuration.
-- The **Node quality** table follows configured order for priority routes.
-  URLTest routes retain quality-based ranking.
-- Public source archives include sanitized Go and browser regressions. Release
-  CI runs them with build and public-boundary checks.
+- When RouterOS creates the container-update scheduler but its HTTP response is
+  lost, the panel checks live state and does not start a duplicate update.
+- Apply writes a durable journal before the first mutation. After a restart,
+  RouterOS and runtime are rebuilt strictly from the active generation;
+  managed routing remains unready until reconciliation finishes.
+- Concurrent Apply, container update, recovery, and subscription activation
+  are serialized safely. Status and diagnostics remain available.
+- Corrupt derivative LKG and apply metadata documents are rebuilt from a
+  verified `active.json`. A corrupt `active.json` is never guessed.
+- Empty, HTML, malformed JSON, or invalid base64 subscription responses do not
+  replace the last working configuration or enable a direct fallback.
+- An unfinished RouterOS rollback guard blocks the next mutating transaction,
+  preventing a stale timer from reverting a later Apply.
+- The **Node quality** table retains configured priority-route order; URLTest
+  continues to rank nodes by measured quality.
 
 ### Installation and update
 
-For a clean installation, use `sb-gateway-1.6.18-routeros-bundle.zip` and the
+For a clean installation, use `sb-gateway-1.6.19-routeros-bundle.zip` and the
 [installation guide](../INSTALL.md).
 
 To update an existing installation, upload
-`sb-gateway-1.6.18-linux-arm64.tar` under
+`sb-gateway-1.6.19-linux-arm64.tar` under
 **Operations → Container update**. The panel checks architecture, version, and
-SHA-256 before it stops the current container.
+SHA-256 before stopping the current container.
 
 ### Release verification
 
-Before publication, the project runs Go and browser tests, ESLint, the
-production UI build, public-tree verification, the ARM64 build, RouterOS
-dry-run checks, and an update cycle on an isolated MikroTik CHR.
+Go and browser tests, ESLint, the production UI build, and ARM64 image
+validation passed. On an isolated MikroTik CHR, the 1.6.19 update completed
+probation. RouterOS scripts, live routing and DNS, mandatory Claude/Antigravity
+rules, longest-prefix client traffic accounting, and WAN-flap suppression were
+verified. A confirmed active-node timeout switched the route in about 10
+seconds.
+
+A full container outage was also verified: unmanaged WAN remained available,
+the `lan_only` client reached only explicitly allowed services, other public
+traffic stayed closed, LAN remained reachable, and the container, routing, and
+original configuration recovered without rebooting the CHR.

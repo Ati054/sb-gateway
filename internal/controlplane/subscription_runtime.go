@@ -33,6 +33,13 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 	if server.runtime == nil {
 		return false, nil
 	}
+	server.mutationMu.Lock()
+	defer server.mutationMu.Unlock()
+	if conflict, err := server.stateMutationConflict(mutationSubscription); err != nil {
+		return false, err
+	} else if conflict != "" {
+		return false, nil
+	}
 	server.subscriptionMu.Lock()
 	defer server.subscriptionMu.Unlock()
 	server.configMu.Lock()

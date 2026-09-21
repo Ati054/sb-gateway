@@ -22,3 +22,4 @@ docs/research/** export-ignore
 docs/releases/** export-ignore
 docs/releases/1.6.17.md -export-ignore
 docs/releases/1.6.18.md -export-ignore
+docs/releases/1.6.19.md -export-ignore

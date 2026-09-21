@@ -18,6 +18,7 @@ import (
 )
 
 const lifecycleImageUpdateResponseTimeout = 5 * time.Minute
+const lifecycleScheduleConfirmationWindow = time.Minute
 
 const (
 	lifecycleContainerMemoryHigh = int64(224 << 20)
@@ -37,6 +38,11 @@ func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter,
 	}
 	if text(body["confirmation"]) != "ОБНОВИТЬ" {
 		server.writeErrorResponse(response, request, http.StatusConflict, "image_update_confirmation_required", "Confirm the autonomous image update explicitly.")
+		return
+	}
+	server.mutationMu.Lock()
+	defer server.mutationMu.Unlock()
+	if server.rejectMutationConflict(response, request, mutationLifecycle) {
 		return
 	}
 	server.lifecycleMu.Lock()
@@ -145,11 +151,37 @@ func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter,
 		KeepPrevious: keepPreviousImage(config),
 	})
 	if err != nil {
-		operation["state"] = "failed"
-		operation["failed_at"] = server.now().UTC().Format(time.RFC3339Nano)
-		operation["failure"] = "routeros_schedule_rejected"
-		_ = server.repository.saveAuxiliary("lifecycle-operation", operation)
-		server.writeErrorResponse(response, request, http.StatusBadGateway, "image_update_schedule_failed", "RouterOS rejected the autonomous image update schedule.")
+		if routeros.DefinitiveRequestRejection(err) {
+			operation["state"] = "failed"
+			operation["failed_at"] = server.now().UTC().Format(time.RFC3339Nano)
+			operation["failure"] = "routeros_schedule_rejected"
+			_ = server.repository.saveAuxiliary("lifecycle-operation", operation)
+			server.writeErrorResponse(response, request, http.StatusBadGateway, "image_update_schedule_failed", "RouterOS rejected the autonomous image update schedule.")
+			return
+		}
+		// A transport error does not prove that RouterOS rejected the final
+		// scheduler PUT: the scheduler may be live while only its HTTP response
+		// was lost. Keep the operation active, persist the ambiguity, then query
+		// RouterOS before allowing a retry.
+		confirmationAt := server.now().UTC()
+		operation["schedule_confirmation"] = "pending"
+		operation["schedule_confirmation_pending_at"] = confirmationAt.Format(time.RFC3339Nano)
+		operation["schedule_confirmation_deadline_at"] = confirmationAt.Add(lifecycleScheduleConfirmationWindow).Format(time.RFC3339Nano)
+		if saveErr := server.repository.saveAuxiliary("lifecycle-operation", operation); saveErr != nil {
+			server.internalStateError(response, request, errors.Join(err, saveErr))
+			return
+		}
+		reconcileContext, reconcileCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		operation = server.reconcileLifecycleOperation(reconcileContext, config, operation)
+		reconcileCancel()
+		server.audit(request, fmt.Sprint(payload["sub"]), "container.image_update_schedule", "confirmation_pending", map[string]any{
+			"version": version, "state": operation["state"], "recovery_archive": recovery.Name,
+		})
+		server.writeJSON(response, http.StatusAccepted, map[string]any{
+			"ok": true, "operation": "image-update", "state": operation["state"], "version": version,
+			"starts_in_seconds": 10, "schedule_confirmation_pending": text(operation["state"]) == "preparing",
+			"recovery_archive": recovery.Name,
+		})
 		return
 	}
 	operation["state"] = "scheduled"
@@ -234,8 +266,14 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 		return operation
 	}
 	nextState := text(operation["state"])
-	if schedulerPresent && currentRoot == text(operation["candidate_root"]) && transitionCount == 1 {
-		nextState = "probation"
+	if schedulerPresent {
+		if currentRoot == text(operation["candidate_root"]) && transitionCount == 1 {
+			nextState = "probation"
+		} else if nextState == "preparing" {
+			// The final scheduler PUT is confirmed even if its original HTTP
+			// response was lost and the worker has not started yet.
+			nextState = "scheduled"
+		}
 	} else if !schedulerPresent && transitionCount == 0 {
 		switch currentRoot {
 		case text(operation["candidate_root"]):
@@ -255,7 +293,14 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 			}
 			nextState = "completed"
 		case text(operation["previous_root"]):
-			nextState = "rolled_back"
+			if nextState == "preparing" && text(operation["schedule_confirmation"]) == "pending" {
+				deadline, deadlineErr := time.Parse(time.RFC3339Nano, text(operation["schedule_confirmation_deadline_at"]))
+				if deadlineErr == nil && !server.now().UTC().Before(deadline) {
+					nextState = "failed"
+				}
+			} else {
+				nextState = "rolled_back"
+			}
 		}
 	}
 	if nextState == text(operation["state"]) {
@@ -264,6 +309,12 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 	operation = cloneJSONObject(operation)
 	operation["state"] = nextState
 	operation[nextState+"_at"] = server.now().UTC().Format(time.RFC3339Nano)
+	if nextState == "scheduled" || nextState == "probation" || nextState == "completed" {
+		operation["schedule_confirmation"] = "confirmed"
+	}
+	if nextState == "failed" && text(operation["failure"]) == "" {
+		operation["failure"] = "routeros_schedule_not_observed"
+	}
 	_ = server.repository.saveAuxiliary("lifecycle-operation", operation)
 	log.Printf("lifecycle image update state=%s version=%s", nextState, text(operation["version"]))
 	return operation

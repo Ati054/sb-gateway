@@ -203,6 +203,11 @@ func (server *Server) restoreRecoveryBackup(response http.ResponseWriter, reques
 		server.writeErrorResponse(response, request, http.StatusNotFound, "recovery_archive_missing", "The selected recovery archive is unavailable.")
 		return
 	}
+	server.mutationMu.Lock()
+	defer server.mutationMu.Unlock()
+	if server.rejectMutationConflict(response, request, mutationRecovery) {
+		return
+	}
 	operationID, files, err := server.stageRecoveryArchive(path, name, password)
 	if err != nil {
 		if errors.Is(err, errRecoveryPending) {

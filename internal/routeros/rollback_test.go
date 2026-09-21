@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,8 @@ func TestArmRollbackUsesRouterClockAndOneShotOwnedScheduler(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler":
+			_, _ = response.Write([]byte(`[]`))
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/clock":
 			// RouterOS 7.24 exposes singleton resources as objects.
 			_, _ = response.Write([]byte(`{"date":"2026-08-17","time":"23:55:30.500"}`))
@@ -88,6 +91,10 @@ func TestManagedImportCanUpdateWatchdogWithoutSensitivePermission(t *testing.T) 
 func TestArmRollbackAcceptsLegacyClockArray(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler" {
+			_, _ = response.Write([]byte(`[]`))
+			return
+		}
 		if request.Method == http.MethodGet && request.URL.Path == "/rest/system/clock" {
 			_, _ = response.Write([]byte(`[{"date":"sep/04/2026","time":"15:47:00"}]`))
 			return
@@ -106,6 +113,58 @@ func TestArmRollbackAcceptsLegacyClockArray(t *testing.T) {
 		"SB-GATEWAY-rollback-0123456789ab",
 		RollbackOptions{Delay: 10 * time.Minute},
 	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArmRollbackBlocksWhilePreviousOwnedGuardIsPending(t *testing.T) {
+	putCalls := 0
+	clockCalls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler":
+			_, _ = response.Write([]byte(`[{"name":"SB-GATEWAY-safe-rollback-1234abcd","comment":"SB-GATEWAY Safe Mode rollback fallback","run-count":"0"},{"name":"SB-GATEWAY-safe-rollback-deadbeef","comment":"foreign","run-count":"0"}]`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/clock":
+			clockCalls++
+			_, _ = response.Write([]byte(`{"date":"2026-09-21","time":"10:00:00"}`))
+		case request.Method == http.MethodPut:
+			putCalls++
+			_, _ = response.Write([]byte(`{}`))
+		default:
+			http.Error(response, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server)
+	defer client.CloseIdleConnections()
+	_, err := client.ArmRollback(context.Background(), "SB-GATEWAY-rollback-0123456789ab", RollbackOptions{})
+	if !errors.Is(err, ErrRollbackGuardPending) {
+		t.Fatalf("error = %v, want pending rollback guard", err)
+	}
+	if clockCalls != 0 || putCalls != 0 {
+		t.Fatalf("blocked generation reached clock/create: clock=%d put=%d", clockCalls, putCalls)
+	}
+}
+
+func TestArmRollbackAllowsCompletedOwnedGuard(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler":
+			_, _ = response.Write([]byte(`[{"name":"SB-GATEWAY-safe-rollback-1234abcd","comment":"SB-GATEWAY Safe Mode rollback fallback","run-count":"1"}]`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/clock":
+			_, _ = response.Write([]byte(`{"date":"2026-09-21","time":"10:00:00"}`))
+		case request.Method == http.MethodPut && request.URL.Path == "/rest/system/scheduler":
+			_, _ = response.Write([]byte(`{}`))
+		default:
+			http.Error(response, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server)
+	defer client.CloseIdleConnections()
+	if _, err := client.ArmRollback(context.Background(), "SB-GATEWAY-rollback-0123456789ab", RollbackOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }

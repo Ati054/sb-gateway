@@ -106,16 +106,26 @@ func TestNativeSubscriptionRefreshFailureKeepsLastKnownGoodNodes(t *testing.T) {
 	}
 	before, _ := server.repository.auxiliary("subscription-nodes")
 	fingerprint := before["provider"].(map[string]any)["fingerprint"]
-	server.fetchSubscription = func(context.Context, string, int) ([]byte, http.Header, error) {
-		return []byte("hy2://secret@invalid.example.test:443?obfs=salamander"), nil, nil
-	}
-	failed := performRequest(t, server, http.MethodPost, apiPrefix+"/subscriptions/provider/refresh", nil, map[string]string{csrfHeader: csrf}, cookie)
-	if failed.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unsafe refresh returned %d: %s", failed.Code, failed.Body.String())
-	}
-	after, _ := server.repository.auxiliary("subscription-nodes")
-	if after["provider"].(map[string]any)["fingerprint"] != fingerprint {
-		t.Fatal("failed refresh replaced last-known-good nodes")
+	for name, invalidBody := range map[string][]byte{
+		"empty":          {},
+		"html error":     []byte("<!doctype html><title>upstream error</title>"),
+		"truncated json": []byte(`{"nodes":[`),
+		"damaged base64": []byte("%%%not-a-subscription%%%"),
+		"invalid node":   []byte("hy2://secret@invalid.example.test:443?obfs=salamander"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			server.fetchSubscription = func(context.Context, string, int) ([]byte, http.Header, error) {
+				return invalidBody, nil, nil
+			}
+			failed := performRequest(t, server, http.MethodPost, apiPrefix+"/subscriptions/provider/refresh", nil, map[string]string{csrfHeader: csrf}, cookie)
+			if failed.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("unsafe refresh returned %d: %s", failed.Code, failed.Body.String())
+			}
+			after, _ := server.repository.auxiliary("subscription-nodes")
+			if after["provider"].(map[string]any)["fingerprint"] != fingerprint {
+				t.Fatal("failed or empty refresh replaced last-known-good nodes")
+			}
+		})
 	}
 }
 

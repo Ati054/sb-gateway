@@ -9,10 +9,12 @@ import (
 )
 
 type fakeTransactionREST struct {
-	events      []string
-	settleError error
-	runError    error
-	disarmError error
+	events            []string
+	settleError       error
+	runError          error
+	disarmError       error
+	trackPendingGuard bool
+	pendingGuard      bool
 }
 
 func (fake *fakeTransactionREST) PrepareDirectDelta(_ context.Context, role, _ string) (string, error) {
@@ -28,11 +30,20 @@ func (fake *fakeTransactionREST) PrepareImportScript(_ context.Context, role, na
 
 func (fake *fakeTransactionREST) ArmRollback(_ context.Context, name string, _ RollbackOptions) (string, error) {
 	fake.events = append(fake.events, "arm:"+name)
+	if fake.trackPendingGuard && fake.pendingGuard {
+		return "", ErrRollbackGuardPending
+	}
+	if fake.trackPendingGuard {
+		fake.pendingGuard = true
+	}
 	return "SB-GATEWAY-safe-rollback-1234abcd", nil
 }
 
 func (fake *fakeTransactionREST) DisarmRollback(_ context.Context, name string) error {
 	fake.events = append(fake.events, "disarm:"+name)
+	if fake.disarmError == nil && fake.trackPendingGuard {
+		fake.pendingGuard = false
+	}
 	return fake.disarmError
 }
 
@@ -382,6 +393,71 @@ func TestTransactionReportsPendingRecoveryWhenGuardAndImmediateRollbackFail(t *t
 	state, ok := TransactionFailureStateOf(err)
 	if !ok || state != TransactionRecoveryPending {
 		t.Fatalf("failure state = %q, %t; err=%v", state, ok, err)
+	}
+}
+
+func TestTransactionBlocksRetryUntilPreviousRollbackGuardIsResolved(t *testing.T) {
+	for _, schedulerOnly := range []bool{false, true} {
+		t.Run(map[bool]string{false: "safe_mode", true: "scheduler_guard"}[schedulerOnly], func(t *testing.T) {
+			rest := &fakeTransactionREST{
+				disarmError:       errors.New("REST delete failed"),
+				trackPendingGuard: true,
+			}
+			candidateRuns := 0
+			current := "A"
+			transaction := &Transaction{
+				rest: rest,
+				run: func(ctx context.Context, name string) error {
+					if err := rest.runSSHScript(ctx, name); err != nil {
+						return err
+					}
+					if name == "SB-GATEWAY-apply-0123456789ab" {
+						candidateRuns++
+						current = "B"
+					} else if name == "SB-GATEWAY-rollback-0123456789ab" {
+						current = "A"
+					}
+					return nil
+				},
+				begin: func(context.Context, string) (*SafeModeSession, error) {
+					candidateRuns++
+					current = "B"
+					return &SafeModeSession{channel: &fakeSafeModeChannel{input: bytes.NewReader([]byte("Safe Mode released"))}, active: true}, nil
+				},
+			}
+			_, firstErr := transaction.ApplyDelta(context.Background(), "apply", "rollback", TransactionOptions{
+				SchedulerGuardOnly: schedulerOnly,
+				HealthCheck:        func(context.Context) error { return nil },
+			})
+			firstState, ok := TransactionFailureStateOf(firstErr)
+			if !ok || firstState != TransactionRolledBack || current != "A" || candidateRuns != 1 || !rest.pendingGuard {
+				t.Fatalf("first apply: state=%q ok=%t current=%s runs=%d pending=%t err=%v", firstState, ok, current, candidateRuns, rest.pendingGuard, firstErr)
+			}
+
+			rest.disarmError = nil
+			finalized := false
+			_, retryErr := transaction.ApplyDelta(context.Background(), "apply", "rollback", TransactionOptions{
+				SchedulerGuardOnly: schedulerOnly,
+				HealthCheck:        func(context.Context) error { return nil },
+				Finalize: func(context.Context) error {
+					finalized = true
+					return nil
+				},
+			})
+			retryState, ok := TransactionFailureStateOf(retryErr)
+			if !ok || retryState != TransactionRecoveryPending || finalized || current != "A" || candidateRuns != 1 {
+				t.Fatalf("retry: state=%q ok=%t finalized=%t current=%s runs=%d err=%v", retryState, ok, finalized, current, candidateRuns, retryErr)
+			}
+
+			// When the old one-shot guard eventually runs, there is no newer
+			// committed candidate to overwrite because the retry was blocked.
+			if err := transaction.run(context.Background(), "SB-GATEWAY-rollback-0123456789ab"); err != nil {
+				t.Fatal(err)
+			}
+			if current != "A" || candidateRuns != 1 {
+				t.Fatalf("stale guard changed confirmed state: %s", current)
+			}
+		})
 	}
 }
 

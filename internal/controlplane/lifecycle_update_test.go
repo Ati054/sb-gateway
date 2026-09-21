@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -209,6 +210,62 @@ func TestNativeImageUpdateSchedulesAfterBrowserDisconnectDuringRecoveryArchive(t
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted || scheduleCalls != 1 {
 		t.Fatalf("disconnected request schedule = %d calls=%d body=%s", response.Code, scheduleCalls, response.Body.String())
+	}
+}
+
+func TestNativeImageUpdateReconcilesLostSchedulerResponseWithoutDuplicate(t *testing.T) {
+	var scheduled atomic.Bool
+	var scheduleCalls atomic.Int32
+	router := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/container":
+			_, _ = response.Write([]byte(`[{".id":"*1","comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root"}]`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script":
+			_, _ = response.Write([]byte(`[]`))
+		case request.Method == http.MethodPut && request.URL.Path == "/rest/system/script":
+			_, _ = response.Write([]byte(`{".id":"*2"}`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler":
+			if scheduled.Load() {
+				_, _ = response.Write([]byte(`[{".id":"*3","name":"SB-GATEWAY-image-update","comment":"SB-GATEWAY autonomous image update"}]`))
+			} else {
+				_, _ = response.Write([]byte(`[]`))
+			}
+		case request.Method == http.MethodPut && request.URL.Path == "/rest/system/scheduler":
+			scheduleCalls.Add(1)
+			scheduled.Store(true)
+			// RouterOS accepted the scheduler, but the connection disappeared
+			// before the control plane received its response.
+			panic(http.ErrAbortHandler)
+		default:
+			http.Error(response, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer router.Close()
+
+	server := newTestServer(t)
+	cookie, csrf := bootstrapSession(t, server)
+	configureLifecycleRouter(t, server, router)
+	upload := uploadImageRequest(t, server, cookie, csrf, "candidate.tar", dockerImageArchive(t, "arm64", "1.7.2", "layer"))
+	if upload.Code != http.StatusOK {
+		t.Fatalf("upload failed: %d %s", upload.Code, upload.Body.String())
+	}
+	reference := text(decodeResponse(t, upload)["routeros_path"])
+	payload := map[string]any{
+		"candidate_source": "local-file", "candidate_reference": reference, "confirmation": "ОБНОВИТЬ",
+	}
+	response := performRequest(t, server, http.MethodPost, apiPrefix+"/lifecycle/image-update", payload, map[string]string{csrfHeader: csrf}, cookie)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("lost scheduler response was reported as rejection: %d %s", response.Code, response.Body.String())
+	}
+	operation, err := server.repository.auxiliary("lifecycle-operation")
+	if err != nil || operation["state"] != "scheduled" || operation["schedule_confirmation"] != "confirmed" {
+		t.Fatalf("lost response was not reconciled: %#v, %v", operation, err)
+	}
+
+	retry := performRequest(t, server, http.MethodPost, apiPrefix+"/lifecycle/image-update", payload, map[string]string{csrfHeader: csrf}, cookie)
+	if retry.Code != http.StatusConflict || scheduleCalls.Load() != 1 {
+		t.Fatalf("retry replaced a live operation: code=%d calls=%d body=%s", retry.Code, scheduleCalls.Load(), retry.Body.String())
 	}
 }
 

@@ -56,6 +56,22 @@ type Client struct {
 	actionHTTP *http.Client
 }
 
+// HTTPError preserves the RouterOS response class so callers can distinguish
+// a command that was explicitly rejected from a transport failure where the
+// command may already have been accepted and only its response was lost.
+type HTTPError struct {
+	StatusCode int
+}
+
+func (err HTTPError) Error() string {
+	return fmt.Sprintf("RouterOS REST returned HTTP %d", err.StatusCode)
+}
+
+func DefinitiveRequestRejection(err error) bool {
+	var httpErr HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500
+}
+
 func NewClient(options Options) (*Client, error) {
 	parsed, err := url.Parse(strings.TrimSpace(options.BaseURL))
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.Port() == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -520,7 +536,7 @@ func (client *Client) requestValueWithHTTP(ctx context.Context, requester *http.
 		return nil, errors.New("RouterOS REST response exceeds 4 MiB")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("RouterOS REST returned HTTP %d", response.StatusCode)
+		return nil, HTTPError{StatusCode: response.StatusCode}
 	}
 	if len(bytes.TrimSpace(responseBody)) == 0 {
 		return nil, nil
