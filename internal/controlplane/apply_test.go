@@ -19,6 +19,7 @@ type fakeRuntimeApplier struct {
 	activateCalls int
 	commitCalls   int
 	rollbackCalls int
+	commitErr     error
 }
 
 func (runtime *fakeRuntimeApplier) prepare(map[string]any, []map[string]any) (runtimeconfig.RuntimeCandidate, error) {
@@ -46,7 +47,7 @@ func (runtime *fakeRuntimeApplier) rollbackSubscription(ctx context.Context, rec
 
 func (runtime *fakeRuntimeApplier) commit(runtimeconfig.RuntimeCandidate) error {
 	runtime.commitCalls++
-	return nil
+	return runtime.commitErr
 }
 
 func TestApplyEndpointCommitsRuntimeAndStateAfterRouterOSTransactionFinalizes(t *testing.T) {
@@ -230,6 +231,163 @@ func TestApplyOperationContextSurvivesClientDisconnectAndRemainsBounded(t *testi
 	remaining := time.Until(deadline)
 	if remaining <= 0 || remaining > applyOperationTimeout {
 		t.Fatalf("unexpected operation deadline: %v", remaining)
+	}
+}
+
+func TestInterruptedApplyRecoveryConvergesToAuthoritativeActiveGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		phase        string
+		commitTarget bool
+		wantName     string
+	}{
+		{name: "after guard disarm before active commit", phase: "runtime_activated", wantName: "A"},
+		{name: "after active commit", phase: "active_committed", commitTarget: true, wantName: "B"},
+		{name: "before runtime LKG commit", phase: "active_committed", commitTarget: true, wantName: "B"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			activeA := routerOSReadyConfig(t)
+			activeA["name"] = "A"
+			revisionA, err := server.repository.stageGeneration(activeA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := server.repository.commitActive(commitMetadata{
+				Revision: revisionA, RuntimeRevision: strings.Repeat("a", 64), RouterOSSource: "router-A", Actor: "test", CommittedAt: server.now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			activeB := cloneJSONObject(activeA)
+			activeB["name"] = "B"
+			revisionB, err := server.repository.stageGeneration(activeB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.commitTarget {
+				if err := server.repository.commitActive(commitMetadata{
+					Revision: revisionB, PreviousRevision: revisionA, RuntimeRevision: strings.Repeat("b", 64),
+					PreviousRuntimeRevision: strings.Repeat("a", 64), RouterOSSource: "router-B", Actor: "test", CommittedAt: server.now(),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := server.repository.saveAuxiliary("apply-operation", map[string]any{
+				"kind": "apply", "pending": true, "state": test.phase,
+				"previous_revision": revisionA, "target_revision": revisionB,
+				"previous_routeros_source": "router-A", "target_routeros_source": "router-B",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			runtime := &fakeRuntimeApplier{revision: strings.Repeat("c", 64)}
+			server.runtime = runtime
+			var recoveredName string
+			var recoveredSource string
+			server.applyRouterOS = func(
+				ctx context.Context, config map[string]any, desired, _ string,
+				health func(context.Context) error, finalize func(context.Context, routeros.BackupRef) error,
+			) (routerOSApplyOutput, error) {
+				recoveredName = text(config["name"])
+				recoveredSource = desired
+				if err := health(ctx); err != nil {
+					return routerOSApplyOutput{}, err
+				}
+				if err := finalize(ctx, routeros.BackupRef{}); err != nil {
+					return routerOSApplyOutput{}, err
+				}
+				return routerOSApplyOutput{Kind: "full"}, nil
+			}
+			worked, err := server.reconcilePendingApply(context.Background())
+			if err != nil || !worked {
+				t.Fatalf("recovery worked=%t err=%v", worked, err)
+			}
+			wantSource := "router-A"
+			wantRevision := revisionA
+			if test.commitTarget {
+				wantSource = "router-B"
+				wantRevision = revisionB
+			}
+			if recoveredName != test.wantName || recoveredSource != wantSource {
+				t.Fatalf("recovered name=%q source=%q; want %q %q", recoveredName, recoveredSource, test.wantName, wantSource)
+			}
+			if revision, _ := server.repository.activeRevision(); revision != wantRevision {
+				t.Fatalf("recovery changed the commit decision: %q", revision)
+			}
+			operation, err := server.repository.auxiliary("apply-operation")
+			if err != nil || len(operation) != 0 {
+				t.Fatalf("recovery journal remains: %#v, %v", operation, err)
+			}
+			if runtime.prepareCalls != 1 || runtime.activateCalls != 1 || runtime.commitCalls != 1 {
+				t.Fatalf("runtime was not reconciled exactly once: %#v", runtime)
+			}
+		})
+	}
+}
+
+func TestReadinessStaysFalseWhileApplyRecoveryIsPending(t *testing.T) {
+	server := newTestServer(t)
+	cookie, _ := bootstrapSession(t, server)
+	config := routerOSReadyConfig(t)
+	revision, err := server.repository.stageGeneration(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.saveAuxiliary("apply-operation", map[string]any{"pending": true, "state": "runtime_activated"}); err != nil {
+		t.Fatal(err)
+	}
+	response := performRequest(t, server, http.MethodGet, apiPrefix+"/health/ready", nil, nil, cookie)
+	if response.Code != http.StatusServiceUnavailable || decodeResponse(t, response)["apply_recovery_pending"] != true {
+		t.Fatalf("pending recovery was reported ready: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestApplyRuntimeLKGWriteFailureRemainsRecoverable(t *testing.T) {
+	server := newTestServer(t)
+	active := routerOSReadyConfig(t)
+	revision, err := server.repository.stageGeneration(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{
+		Revision: revision, RuntimeRevision: strings.Repeat("1", 64), RouterOSSource: "router-old", Actor: "test", CommittedAt: server.now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := cloneJSONObject(active)
+	desired["watchdog"].(map[string]any)["interval_seconds"] = float64(7)
+	runtime := &fakeRuntimeApplier{revision: strings.Repeat("2", 64), commitErr: errors.New("no space left on device")}
+	server.runtime = runtime
+	server.applyRouterOS = func(
+		ctx context.Context, _ map[string]any, _, _ string,
+		health func(context.Context) error, finalize func(context.Context, routeros.BackupRef) error,
+	) (routerOSApplyOutput, error) {
+		if err := health(ctx); err != nil {
+			return routerOSApplyOutput{}, err
+		}
+		if err := finalize(ctx, routeros.BackupRef{}); err != nil {
+			return routerOSApplyOutput{}, err
+		}
+		return routerOSApplyOutput{Kind: "delta"}, nil
+	}
+	result, status, err := server.applyConfiguration(context.Background(), desired, "admin")
+	if err != nil || status != http.StatusOK || result["cleanup_pending"] != true {
+		t.Fatalf("status=%d result=%#v err=%v", status, result, err)
+	}
+	operation, err := server.repository.auxiliary("apply-operation")
+	if err != nil || operation["pending"] != true || operation["state"] != "recovery_pending" {
+		t.Fatalf("missing recovery journal: %#v, %v", operation, err)
+	}
+	runtime.commitErr = nil
+	worked, err := server.reconcilePendingApply(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("LKG recovery worked=%t err=%v", worked, err)
+	}
+	operation, _ = server.repository.auxiliary("apply-operation")
+	if len(operation) != 0 {
+		t.Fatalf("recovery journal remains: %#v", operation)
 	}
 }
 
