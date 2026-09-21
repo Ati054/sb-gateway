@@ -436,11 +436,13 @@ func (repository *stateRepository) reconcileCommitPointers() error {
 		if readErr == nil && equalJSONObject(current, active) {
 			continue
 		}
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return readErr
-		}
+		// These documents are derived caches, not commit points. Missing,
+		// truncated or otherwise invalid content is replaced only from the
+		// already verified active pointer. A failure to rewrite still remains
+		// fatal so the API never claims that repair succeeded on a full or
+		// read-only filesystem.
 		if err := repository.writeJSON(filepath.Join(repository.root, name), active); err != nil {
-			return err
+			return errors.Join(readErr, err)
 		}
 	}
 	return nil

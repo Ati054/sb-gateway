@@ -1,4 +1,4 @@
-# Установка SB Gateway 1.6.18
+# Установка SB Gateway 1.6.19
 
 Инструкция описывает первую установку на MikroTik ARM64 с RouterOS 7. Английская
 версия находится в [INSTALL.md](INSTALL.md).
@@ -17,16 +17,16 @@
 
 ## Файлы релиза
 
-Скачайте из GitHub Release `v1.6.18`:
+Скачайте из GitHub Release `v1.6.19`:
 
-- `sb-gateway-1.6.18-routeros-bundle.zip`
-- `sb-gateway-1.6.18-routeros-bundle.zip.sha256`
+- `sb-gateway-1.6.19-routeros-bundle.zip`
+- `sb-gateway-1.6.19-routeros-bundle.zip.sha256`
 
 В комплект входят:
 
-- `sb-gateway-1.6.18-linux-arm64.tar`
-- `sb-gateway-1.6.18-linux-arm64.tar.sha256`
-- `sb-gateway-1.6.18-linux-arm64.manifest.json`
+- `sb-gateway-1.6.19-linux-arm64.tar`
+- `sb-gateway-1.6.19-linux-arm64.tar.sha256`
+- `sb-gateway-1.6.19-linux-arm64.manifest.json`
 - установочные скрипты в каталоге `routeros/`
 - инструкции на русском и английском языках
 
@@ -35,20 +35,20 @@
 PowerShell:
 
 ```powershell
-(Get-FileHash .\sb-gateway-1.6.18-routeros-bundle.zip -Algorithm SHA256).Hash
-Get-Content .\sb-gateway-1.6.18-routeros-bundle.zip.sha256
+(Get-FileHash .\sb-gateway-1.6.19-routeros-bundle.zip -Algorithm SHA256).Hash
+Get-Content .\sb-gateway-1.6.19-routeros-bundle.zip.sha256
 ```
 
 Linux или macOS:
 
 ```sh
-sha256sum -c sb-gateway-1.6.18-routeros-bundle.zip.sha256
+sha256sum -c sb-gateway-1.6.19-routeros-bundle.zip.sha256
 ```
 
 После распаковки проверьте контейнер:
 
 ```sh
-sha256sum -c sb-gateway-1.6.18-linux-arm64.tar.sha256
+sha256sum -c sb-gateway-1.6.19-linux-arm64.tar.sha256
 ```
 
 Ожидаемый SHA-256 контейнера:
@@ -100,8 +100,8 @@ sha256sum -c sb-gateway-1.6.18-linux-arm64.tar.sha256
 после сверки адресов с конфигурацией роутера. Стандартные пути этого релиза:
 
 ```routeros
-:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.18-linux-arm64.tar"
-:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.18"
+:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.19-linux-arm64.tar"
+:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.19"
 ```
 
 ## Загрузка и установка
@@ -118,7 +118,7 @@ usb1/sb-gateway/
   variables.rsc
   watchdog.rsc
   webfig-bootstrap.rsc
-  sb-gateway-1.6.18-linux-arm64.tar
+  sb-gateway-1.6.19-linux-arm64.tar
 ```
 
 Копируйте содержимое каталога `routeros/`, а не сам каталог. Файлы

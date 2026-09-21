@@ -114,7 +114,13 @@ func (server *Server) readiness(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	configured := active != ""
-	consistent := !configured || lkg == active
+	applyOperation, err := server.repository.auxiliary("apply-operation")
+	if err != nil {
+		server.internalStateError(response, request, err)
+		return
+	}
+	applyRecoveryPending := applyOperation["pending"] == true
+	consistent := (!configured || lkg == active) && !applyRecoveryPending
 	status := http.StatusOK
 	if !consistent {
 		status = http.StatusServiceUnavailable
@@ -122,6 +128,7 @@ func (server *Server) readiness(response http.ResponseWriter, request *http.Requ
 	server.writeJSON(response, status, map[string]any{
 		"ready": consistent, "configured": configured,
 		"last_known_good_consistent": consistent,
+		"apply_recovery_pending":     applyRecoveryPending,
 		"container_healthy":          nestedValue(runtimeStatus, "container", "healthy"),
 		"watchdog":                   valueOrEmpty(runtimeStatus["watchdog"]),
 		"outage_policy_active":       server.outagePolicyForActive(),
@@ -159,12 +166,15 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 		}
 	}
 	mountsWritable, blockedMounts := server.checkPersistentMounts()
-	ready = ready && mountsWritable
+	applyOperation, _ := server.repository.auxiliary("apply-operation")
+	applyRecoveryPending := applyOperation["pending"] == true
+	ready = ready && mountsWritable && !applyRecoveryPending
 	payload := map[string]any{
 		"ready": ready, "configured": active != nil,
 		"lease_age_seconds": nil, "lease_ttl_seconds": ttl,
 		"outage_policy_active":       outagePolicy(active),
 		"persistent_mounts_writable": mountsWritable,
+		"apply_recovery_pending":     applyRecoveryPending,
 	}
 	if len(blockedMounts) != 0 {
 		payload["blocked_persistent_mounts"] = blockedMounts

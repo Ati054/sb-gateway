@@ -173,6 +173,29 @@ func TestCommitActiveDetailedReportsPublishedCommitWhenDerivativeWriteFails(t *t
 	if readErr != nil || active != revision {
 		t.Fatalf("active revision=%q err=%v", active, readErr)
 	}
+	if err := os.Remove(filepath.Join(derivativePath, "block")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(derivativePath); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newStateRepository(repository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.reconcileCommitPointers(); err != nil {
+		t.Fatalf("startup repair after post-active write failure: %v", err)
+	}
+	activePointer, err := reopened.readJSON(filepath.Join(reopened.root, "active.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"last-known-good.json", "apply-metadata.json"} {
+		derived, readErr := reopened.readJSON(filepath.Join(reopened.root, name))
+		if readErr != nil || !equalJSONObject(derived, activePointer) {
+			t.Fatalf("%s not repaired after restart: %#v, %v", name, derived, readErr)
+		}
+	}
 }
 
 func TestReconcileCommitPointersRepairsOnlyFromVerifiedActive(t *testing.T) {
@@ -200,5 +223,52 @@ func TestReconcileCommitPointersRepairsOnlyFromVerifiedActive(t *testing.T) {
 		if readErr != nil || !equalJSONObject(active, value) {
 			t.Fatalf("%s was not repaired: %#v, %v", name, value, readErr)
 		}
+	}
+}
+
+func TestReconcileCommitPointersRepairsCorruptDerivedDocuments(t *testing.T) {
+	for _, name := range []string{"last-known-good.json", "apply-metadata.json"} {
+		for caseName, content := range map[string]string{
+			"empty": "", "truncated": `{"revision":`, "stale": `{"revision":"stale"}`,
+		} {
+			t.Run(name+"/"+caseName, func(t *testing.T) {
+				repository, err := newStateRepository(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				revision, err := repository.stageGeneration(map[string]any{"schema_version": 1, "name": "active"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				active := map[string]any{"revision": revision, "actor": "admin"}
+				if err := repository.writeJSON(filepath.Join(repository.root, "active.json"), active); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(repository.root, name)
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := repository.reconcileCommitPointers(); err != nil {
+					t.Fatalf("reconcile corrupt %s: %v", name, err)
+				}
+				repaired, err := repository.readJSON(path)
+				if err != nil || !equalJSONObject(repaired, active) {
+					t.Fatalf("%s was not rebuilt from active: %#v, %v", name, repaired, err)
+				}
+			})
+		}
+	}
+}
+
+func TestReconcileCommitPointersDoesNotGuessCorruptActive(t *testing.T) {
+	repository, err := newStateRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository.root, "active.json"), []byte(`{"revision":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.reconcileCommitPointers(); err == nil {
+		t.Fatal("corrupt active commit point was silently accepted")
 	}
 }
