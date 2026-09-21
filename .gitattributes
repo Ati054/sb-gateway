@@ -19,7 +19,6 @@ QUATTRO_SERVERS_AUDIT.md export-ignore
 docs/ACCEPTANCE-TESTS.md export-ignore
 docs/research export-ignore
 docs/research/** export-ignore
-docs/releases/** export-ignore
-docs/releases/1.6.17.md -export-ignore
-docs/releases/1.6.18.md -export-ignore
-docs/releases/1.6.19.md -export-ignore
+
+# The public export script keeps only the package version's release document.
+# Do not maintain a version whitelist here: it can silently omit new notes.

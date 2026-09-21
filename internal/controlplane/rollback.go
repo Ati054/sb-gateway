@@ -29,6 +29,11 @@ func (server *Server) rollbackDraft(response http.ResponseWriter, request *http.
 		return
 	}
 
+	server.mutationMu.Lock()
+	defer server.mutationMu.Unlock()
+	if server.rejectMutationConflict(response, request, "") {
+		return
+	}
 	server.configMu.Lock()
 	defer server.configMu.Unlock()
 	metadata, err := server.repository.metadata()

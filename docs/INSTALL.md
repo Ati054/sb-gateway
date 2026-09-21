@@ -1,4 +1,4 @@
-# Install SB Gateway 1.6.19
+# Install SB Gateway 1.6.20
 
 This guide covers the first installation on an ARM64 MikroTik running
 RouterOS 7. Use the matching Russian guide if needed:
@@ -19,16 +19,16 @@ The `container` package version must match RouterOS.
 
 ## Release files
 
-Download these assets from GitHub Release `v1.6.19`:
+Download these assets from GitHub Release `v1.6.20`:
 
-- `sb-gateway-1.6.19-routeros-bundle.zip`
-- `sb-gateway-1.6.19-routeros-bundle.zip.sha256`
+- `sb-gateway-1.6.20-routeros-bundle.zip`
+- `sb-gateway-1.6.20-routeros-bundle.zip.sha256`
 
 The bundle contains:
 
-- `sb-gateway-1.6.19-linux-arm64.tar`
-- `sb-gateway-1.6.19-linux-arm64.tar.sha256`
-- `sb-gateway-1.6.19-linux-arm64.manifest.json`
+- `sb-gateway-1.6.20-linux-arm64.tar`
+- `sb-gateway-1.6.20-linux-arm64.tar.sha256`
+- `sb-gateway-1.6.20-linux-arm64.manifest.json`
 - the `routeros/` installation scripts
 - this installation guide in English and Russian
 
@@ -37,20 +37,20 @@ Verify the bundle before extracting it.
 PowerShell:
 
 ```powershell
-(Get-FileHash .\sb-gateway-1.6.19-routeros-bundle.zip -Algorithm SHA256).Hash
-Get-Content .\sb-gateway-1.6.19-routeros-bundle.zip.sha256
+(Get-FileHash .\sb-gateway-1.6.20-routeros-bundle.zip -Algorithm SHA256).Hash
+Get-Content .\sb-gateway-1.6.20-routeros-bundle.zip.sha256
 ```
 
 Linux or macOS:
 
 ```sh
-sha256sum -c sb-gateway-1.6.19-routeros-bundle.zip.sha256
+sha256sum -c sb-gateway-1.6.20-routeros-bundle.zip.sha256
 ```
 
 After extraction, verify the container archive too:
 
 ```sh
-sha256sum -c sb-gateway-1.6.19-linux-arm64.tar.sha256
+sha256sum -c sb-gateway-1.6.20-linux-arm64.tar.sha256
 ```
 
 The expected container SHA-256 is:
@@ -103,8 +103,8 @@ addresses match the router. The default image and root paths for this release
 are:
 
 ```routeros
-:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.19-linux-arm64.tar"
-:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.19"
+:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.20-linux-arm64.tar"
+:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.20"
 ```
 
 ## Upload and install
@@ -121,7 +121,7 @@ usb1/sb-gateway/
   variables.rsc
   watchdog.rsc
   webfig-bootstrap.rsc
-  sb-gateway-1.6.19-linux-arm64.tar
+  sb-gateway-1.6.20-linux-arm64.tar
 ```
 
 Copy the contents of the bundle's `routeros/` directory, not the directory
