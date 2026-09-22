@@ -29,6 +29,9 @@ type effectivePolicySettings struct {
 	fullScan          int
 	shortlist         int
 	batch             int
+	liveness          int
+	failureRetry      int
+	blockRecovery     int
 }
 
 func policySettings(policy healthPolicy, mode string) effectivePolicySettings {
@@ -51,6 +54,9 @@ func policySettings(policy healthPolicy, mode string) effectivePolicySettings {
 		fullScan:          maxInt(defaultInt(policy.FullScanSeconds, 1800, 1, 86400), defaultInt(policy.BackupCheckSeconds, 300, 1, 86400)),
 		shortlist:         defaultInt(policy.MaxActiveCandidates, defaultInt(policy.MaxProbeCandidates, 5, 1, 10), 1, 10),
 		batch:             defaultInt(policy.ProbeBatchSize, 5, 1, 10),
+		liveness:          defaultInt(policy.ActiveLivenessSeconds, int(activeLivenessInterval/time.Second), 2, 30),
+		failureRetry:      defaultInt(policy.FailureRetrySeconds, int(failureRetryInterval/time.Second), 1, 10),
+		blockRecovery:     defaultInt(policy.BlockRecoverySeconds, int(outageRetryInterval/time.Second), 5, 60),
 	}
 }
 

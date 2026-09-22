@@ -17,9 +17,10 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 		}
 		return true, controller.tickPolicy(now, policyID, contract, item)
 	}
-	interval := activeLivenessInterval
+	p := policySettings(contract.Policy, contract.Mode)
+	interval := time.Duration(p.liveness) * time.Second
 	if item.AvailabilityFailures[selected] > 0 {
-		interval = failureRetryInterval
+		interval = time.Duration(p.failureRetry) * time.Second
 	}
 	last := controller.livenessAt[policyID]
 	if full := time.Unix(int64(item.LastProbeAt[selected]), 0); full.After(last) {
@@ -92,7 +93,6 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 		return true, nil
 	}
 	item.AvailabilityFailures[selected] += failureCount
-	p := policySettings(contract.Policy, contract.Mode)
 	threshold := failureConfirmationThreshold(evidence, p.failureThreshold)
 	if item.AvailabilityFailures[selected] >= threshold {
 		item.AvailabilityFailures[selected] = p.failureThreshold

@@ -42,6 +42,70 @@ func TestBuildXrayHealthPoolUsesCurrentPriorityOrder(t *testing.T) {
 	}
 }
 
+func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
+	config := map[string]any{
+		"system": map[string]any{"routing_monitor": map[string]any{
+			"active_liveness_interval_seconds": 4,
+			"failure_retry_interval_seconds":   2,
+			"block_recovery_interval_seconds":  12,
+			"active_quality_interval_seconds":  45,
+			"reserve_check_interval_seconds":   180,
+			"full_scan_interval_seconds":       900,
+			"probe_batch_size":                 0,
+		}},
+		"reverse_vless_exits": []any{
+			map[string]any{"id": "first", "enabled": true},
+			map[string]any{"id": "second", "enabled": true},
+		},
+		"policies": []any{
+			map[string]any{"id": "best", "enabled": true, "mode": "best", "selection_order": []any{"reverse:first", "reverse:second"}, "active_check_interval_seconds": 999},
+			map[string]any{"id": "priority", "enabled": true, "mode": "priority", "selection_order": []any{"reverse:first", "reverse:second"}, "probe_batch_size": 1},
+		},
+	}
+	body, err := BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pool map[string]any
+	if err := json.Unmarshal(body, &pool); err != nil {
+		t.Fatal(err)
+	}
+	policies := objectValue(pool["health_policies"])
+	for id, wantBatch := range map[string]int{"best": 2, "priority": 3} {
+		policy := objectValue(objectValue(policies[id])["policy"])
+		for field, want := range map[string]int{
+			"active_liveness_interval_seconds": 4,
+			"failure_retry_interval_seconds":   2,
+			"block_recovery_interval_seconds":  12,
+			"active_check_interval_seconds":    45,
+			"backup_check_interval_seconds":    180,
+			"full_scan_interval_seconds":       900,
+			"probe_batch_size":                 wantBatch,
+		} {
+			got, ok := numericInt(policy[field])
+			if !ok || got != want {
+				t.Fatalf("%s %s = %v, want %d", id, field, policy[field], want)
+			}
+		}
+	}
+
+	objectValue(objectValue(config["system"])["routing_monitor"])["probe_batch_size"] = json.Number("1")
+	body, err = BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &pool); err != nil {
+		t.Fatal(err)
+	}
+	policies = objectValue(pool["health_policies"])
+	for _, id := range []string{"best", "priority"} {
+		policy := objectValue(objectValue(policies[id])["policy"])
+		if batch, ok := numericInt(policy["probe_batch_size"]); !ok || batch != 1 {
+			t.Fatalf("%s explicit batch = %v, want 1", id, policy["probe_batch_size"])
+		}
+	}
+}
+
 func TestHealthPoolPublishesSafeTransportMetadata(t *testing.T) {
 	config := map[string]any{"policies": []any{map[string]any{"id": "test", "enabled": true, "mode": "best", "selection_order": []any{"country:PL"}}}}
 	nodes := []map[string]any{

@@ -35,6 +35,29 @@ func TestValidateCurrentConfigAcceptsShippedDefault(t *testing.T) {
 	}
 }
 
+func TestValidateRoutingMonitorSettings(t *testing.T) {
+	config := currentConfigFixture(t)
+	monitor := objectAt(config, "system")["routing_monitor"].(map[string]any)
+	monitor["active_liveness_interval_seconds"] = 1
+	monitor["failure_retry_interval_seconds"] = 9
+	monitor["active_quality_interval_seconds"] = 120
+	monitor["reserve_check_interval_seconds"] = 60
+	monitor["full_scan_interval_seconds"] = 30
+	monitor["probe_batch_size"] = 4
+	result := validateCurrentConfig(config)
+	for _, path := range []string{
+		"system.routing_monitor.active_liveness_interval_seconds",
+		"system.routing_monitor.failure_retry_interval_seconds",
+		"system.routing_monitor.reserve_check_interval_seconds",
+		"system.routing_monitor.full_scan_interval_seconds",
+		"system.routing_monitor.probe_batch_size",
+	} {
+		if !hasValidationPath(result.Errors, path) {
+			t.Fatalf("missing validation error for %s: %#v", path, result.Errors)
+		}
+	}
+}
+
 func TestValidateCurrentConfigValidatesHappProviderID(t *testing.T) {
 	config := currentConfigFixture(t)
 	subscription := config["public_exposure"].(map[string]any)["subscription"].(map[string]any)

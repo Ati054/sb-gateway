@@ -48,7 +48,7 @@ func regularProbeTargets(now time.Time, selected string, candidates, shortlist [
 		case 1:
 			interval := p.active
 			if item.AvailabilityFailures[selected] > 0 {
-				interval = minInt(interval, int(failureRetryInterval/time.Second))
+				interval = minInt(interval, p.failureRetry)
 			}
 			candidate = oldest([]string{selected}, interval)
 		case 2:
