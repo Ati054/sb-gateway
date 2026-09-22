@@ -5116,6 +5116,115 @@ function Routing({
   );
 }
 
+const ROUTING_MONITOR_DEFAULTS = {
+  active_liveness_interval_seconds: 3,
+  failure_retry_interval_seconds: 2,
+  block_recovery_interval_seconds: 15,
+  active_quality_interval_seconds: 60,
+  reserve_check_interval_seconds: 300,
+  full_scan_interval_seconds: 1800,
+  probe_batch_size: 0,
+} as const;
+
+type RoutingMonitorValues = {
+  [Key in keyof typeof ROUTING_MONITOR_DEFAULTS]: number;
+};
+
+function routingMonitorValues(config: JsonObject): RoutingMonitorValues {
+  const monitor = asObject(asObject(config.system).routing_monitor);
+  return Object.fromEntries(
+    Object.entries(ROUTING_MONITOR_DEFAULTS).map(([key, fallback]) => {
+      const value = Number(monitor[key]);
+      return [key, Number.isInteger(value) ? value : fallback];
+    }),
+  ) as RoutingMonitorValues;
+}
+
+function RoutingMonitorSettings({
+  values,
+  onChange,
+  disabled,
+}: {
+  values: RoutingMonitorValues;
+  onChange: (values: RoutingMonitorValues) => void;
+  disabled: boolean;
+}) {
+  const { tr } = useLanguage();
+
+  const update = (key: keyof RoutingMonitorValues, value: string) => {
+    onChange({ ...values, [key]: Number(value) });
+  };
+
+  const numberField = (
+    key: keyof RoutingMonitorValues,
+    label: string,
+    min: number,
+    max: number,
+  ) => (
+    <label className="field">
+      <span>{tr(label as MessageKey)}</span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        required
+        disabled={disabled}
+        value={values[key]}
+        onChange={(event) => update(key, event.target.value)}
+      />
+    </label>
+  );
+
+  return (
+    <section className="card routing-monitor-card">
+      <details>
+        <summary>
+          <span>
+            <strong>{tr("Мониторинг маршрутов")}</strong>
+            <small>{tr("Общие настройки всех маршрутных листов")}</small>
+          </span>
+          <span className="routing-monitor-summary" aria-label={tr("Быстрые интервалы")}>
+            {values.active_liveness_interval_seconds} / {values.failure_retry_interval_seconds} / {values.block_recovery_interval_seconds} {tr("сек.")}
+          </span>
+        </summary>
+        <div className="routing-monitor-form">
+          <div className="routing-monitor-grid">
+            {numberField("active_liveness_interval_seconds", "Доступность активного узла, сек.", 2, 30)}
+            {numberField("failure_retry_interval_seconds", "Повтор после ошибки, сек.", 1, 10)}
+            {numberField("block_recovery_interval_seconds", "Поиск выхода из блокировки, сек.", 5, 60)}
+            {numberField("active_quality_interval_seconds", "Качество активного узла, сек.", 10, 3600)}
+            {numberField("reserve_check_interval_seconds", "Проверка резервов, сек.", 10, 86400)}
+            {numberField("full_scan_interval_seconds", "Полный обход, сек.", 10, 86400)}
+            <label className="field">
+              <span>{tr("Максимум проверок за цикл")}</span>
+              <select
+                disabled={disabled}
+                value={values.probe_batch_size}
+                onChange={(event) => update("probe_batch_size", event.target.value)}
+              >
+                <option value={0}>{tr("Авто · URLTest: 2, приоритет: 3")}</option>
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
+            </label>
+          </div>
+          <div className="routing-monitor-actions">
+            <button
+              className="button button-tertiary"
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange({ ...ROUTING_MONITOR_DEFAULTS })}
+            >
+              {tr("Рекомендуемые значения")}
+            </button>
+          </div>
+        </div>
+      </details>
+    </section>
+  );
+}
+
 function RoutingInfrastructureSettings({
   config,
   runtime,
@@ -5194,6 +5303,9 @@ function RoutingInfrastructureSettings({
   );
   const [forceTcpForProxyServices, setForceTcpForProxyServices] = useState(
     dns.force_tcp_for_proxy_services === true,
+  );
+  const [routingMonitor, setRoutingMonitor] = useState<RoutingMonitorValues>(() =>
+    routingMonitorValues(config),
   );
   const [routingResetVersion, setRoutingResetVersion] = useState(0);
   const [saveBusy, setSaveBusy] = useState(false);
@@ -5303,11 +5415,39 @@ function RoutingInfrastructureSettings({
     setVpnDnsProtocol(asText(vpnResolver.protocol, "doh"));
     setRemoteIpv6Enabled(configuredRemoteIpv6Enabled);
     setForceTcpForProxyServices(dns.force_tcp_for_proxy_services === true);
+    setRoutingMonitor(routingMonitorValues(config));
     setRoutingResetVersion((current) => current + 1);
     setSaveMessage(tr("Изменения формы сброшены."));
   }
 
   async function saveRoutingInfrastructure() {
+    const monitorRanges: Array<[keyof RoutingMonitorValues, number, number]> = [
+      ["active_liveness_interval_seconds", 2, 30],
+      ["failure_retry_interval_seconds", 1, 10],
+      ["block_recovery_interval_seconds", 5, 60],
+      ["active_quality_interval_seconds", 10, 3600],
+      ["reserve_check_interval_seconds", 10, 86400],
+      ["full_scan_interval_seconds", 10, 86400],
+      ["probe_batch_size", 0, 3],
+    ];
+    if (monitorRanges.some(([key, minimum, maximum]) =>
+      !Number.isInteger(routingMonitor[key]) || routingMonitor[key] < minimum || routingMonitor[key] > maximum
+    )) {
+      setSaveMessage(prefixedErrorMessage(new Error(tr("Проверьте значения мониторинга маршрутов."))));
+      return;
+    }
+    if (routingMonitor.failure_retry_interval_seconds > routingMonitor.active_liveness_interval_seconds) {
+      setSaveMessage(prefixedErrorMessage(new Error(tr("Интервал повтора после ошибки не может быть больше интервала проверки активного узла."))));
+      return;
+    }
+    if (routingMonitor.reserve_check_interval_seconds < routingMonitor.active_quality_interval_seconds) {
+      setSaveMessage(prefixedErrorMessage(new Error(tr("Резервы нельзя проверять чаще активного узла."))));
+      return;
+    }
+    if (routingMonitor.full_scan_interval_seconds < routingMonitor.reserve_check_interval_seconds) {
+      setSaveMessage(prefixedErrorMessage(new Error(tr("Полный обход не может выполняться чаще проверки резервов."))));
+      return;
+    }
     if (!wireguardValid) {
       setSaveMessage(
         tr("Ошибка: выберите хотя бы один доступный WireGuard-интерфейс."),
@@ -5328,6 +5468,7 @@ function RoutingInfrastructureSettings({
             reverse_vless_exits: reverseVlessExits,
             system: {
               ...system,
+              routing_monitor: routingMonitor,
               networking: {
                 ...networking,
                 wireguard_egress_enabled: wireguardEnabled,
@@ -5581,6 +5722,11 @@ function RoutingInfrastructureSettings({
           </div>
         </article>
       </div>
+      <RoutingMonitorSettings
+        values={routingMonitor}
+        onChange={setRoutingMonitor}
+        disabled={saveBusy}
+      />
       <div className="routing-save-bar">
         <button
           className="button button-ghost"
@@ -11964,12 +12110,8 @@ function PolicyDialog({
         speed_check_interval_seconds: 10800,
         speed_probe_bytes: 2097152,
         speed_candidate_count: 2,
-        active_check_interval_seconds: 60,
-        backup_check_interval_seconds: 300,
-        full_scan_interval_seconds: 1800,
         max_active_candidates: candidateLimit,
         max_probe_candidates: candidateLimit,
-        probe_batch_size: mode === "best" ? 2 : 3,
         return_to_primary: true,
         interrupt_exist_connections: false,
       };
@@ -12211,7 +12353,7 @@ function PolicyDialog({
                 <summary>{tr("Дополнительные параметры переключения")}</summary>
                 <div className="policy-check-grid">
                   {mode === "best" ? <label className="field">
-                    <span className="policy-check-label">{tr("Размер активного пула")}</span>
+                    <span className="policy-check-label">{tr("Узлов в активном пуле")}</span>
                     <select name="max_active_candidates" value={candidateLimit} onChange={(event) => setCandidateLimit(Number(event.target.value))}>
                       {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}
                     </select>
@@ -12232,11 +12374,12 @@ function PolicyDialog({
                     <small>{tr("0 отключает порог задержки.")}</small>
                   </label>
                   <label className="field">
-                    <span className="policy-check-label">{tr("Плохих проверок до отказа")}</span>
+                    <span className="policy-check-label">{tr("Подтверждений обычной ошибки")}</span>
                     <input name="failure_threshold" type="number" min="1" max="20" defaultValue={asText(existingPolicy.failure_threshold, "3")} />
+                    <small>{tr("Сетевой отказ или TLS-ошибка — сразу; тайм-аут — после двух запросов.")}</small>
                   </label>
                   <label className="field">
-                    <span className="policy-check-label">{tr("Хороших проверок до выбора")}</span>
+                    <span className="policy-check-label">{tr("Подтверждений восстановления")}</span>
                     <input name="recovery_threshold" type="number" min="1" max="20" defaultValue={asText(existingPolicy.recovery_threshold, "3")} />
                   </label>
                   {mode === "best" ? (
@@ -12254,7 +12397,7 @@ function PolicyDialog({
                     </>
                   ) : null}
                   <label className="field">
-                    <span className="policy-check-label">{tr("Пауза переключения, сек.")}</span>
+                    <span className="policy-check-label">{tr("Защита от обратного переключения, сек.")}</span>
                     <input name="switch_cooldown_seconds" type="number" min="0" max="86400" defaultValue={asText(existingPolicy.switch_cooldown_seconds, "600")} />
                     <small>{tr("Только для планового выбора лучшего узла. Отказ, деградация и выход из блокировки выполняются без этой паузы.")}</small>
                   </label>

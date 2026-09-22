@@ -517,6 +517,39 @@ func failedEvidence() probeEvidence {
 	return probeEvidence{Targets: map[string]*int{"gstatic-204": nil}}
 }
 
+func TestConfiguredMonitorIntervalsControlScheduling(t *testing.T) {
+	policy := healthPolicy{
+		ActiveCheckSeconds: 30, ActiveLivenessSeconds: 7,
+		FailureRetrySeconds: 1, BlockRecoverySeconds: 11,
+	}
+	p := policySettings(policy, "best")
+	if p.active != 30 || p.liveness != 7 || p.failureRetry != 1 || p.blockRecovery != 11 {
+		t.Fatalf("monitor settings were not resolved: %+v", p)
+	}
+	item := newPolicyHealthState()
+	item.Selected = "active"
+	item.ProbeLimits = probeLimits{LivenessSeconds: 7, FailureRetrySeconds: 1, BlockRecoverySeconds: 11}
+	controller := &healthController{
+		opts:  Options{HealthInterval: time.Minute},
+		state: healthState{"policy": item},
+	}
+	if got := controller.nextInterval(); got != 7*time.Second {
+		t.Fatalf("healthy liveness interval = %v, want 7s", got)
+	}
+	item.AvailabilityFailures["active"] = 1
+	if got := controller.nextInterval(); got != time.Second {
+		t.Fatalf("failure retry interval = %v, want 1s", got)
+	}
+	item.Selected = "block"
+	if got := controller.nextInterval(); got != 11*time.Second {
+		t.Fatalf("block recovery interval = %v, want 11s", got)
+	}
+	contract := healthPolicyContract{Mode: "best", Policy: policy}
+	if got := controller.regularInterval(contract); got != 30*time.Second {
+		t.Fatalf("quality interval = %v, want 30s", got)
+	}
+}
+
 func hasSelection(values [][2]string, selector, member string) bool {
 	for _, value := range values {
 		if value[0] == selector && value[1] == member {
