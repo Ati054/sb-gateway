@@ -640,9 +640,11 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.doesNotMatch(page, /Количество резервов/);
   assert.match(page, /policy-priority-replace/);
   assert.match(page, /selection_order:.*selectionOrder/);
-  assert.match(page, /active_check_interval_seconds:.*60/);
-  assert.match(page, /backup_check_interval_seconds:.*300/);
-  assert.match(page, /full_scan_interval_seconds:.*1800/);
+  assert.match(page, /active_quality_interval_seconds: 60/);
+  assert.match(page, /reserve_check_interval_seconds: 300/);
+  assert.match(page, /full_scan_interval_seconds: 1800/);
+  assert.match(page, /active_liveness_interval_seconds: 3/);
+  assert.match(page, /block_recovery_interval_seconds: 15/);
   assert.match(page, /max_active_candidates:.*candidateLimit/);
   assert.match(page, /max_probe_candidates:.*candidateLimit/);
   assert.doesNotMatch(page, /name="switch_improvement_percent"/);

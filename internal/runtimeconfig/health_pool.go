@@ -33,6 +33,7 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 	policyMembers := make(map[string][]string)
 	policyPrefixes := make(map[string]string)
 	healthPolicies := make(map[string]any)
+	routingMonitor := objectValue(objectValue(config["system"])["routing_monitor"])
 	for _, policy := range enabledObjects(config["policies"]) {
 		mode := textDefault(policy["mode"], "best")
 		if mode == "urltest" {
@@ -86,8 +87,30 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 			}
 			inventory[member] = map[string]any{"label": label, "country": country, "protocol": protocol, "transport": transport, "subscription_id": textValue(nodesByID[member]["subscription_id"])}
 		}
+		resolvedPolicy := cloneJSONMap(policy)
+		if len(routingMonitor) != 0 {
+			for source, target := range map[string]string{
+				"active_liveness_interval_seconds": "active_liveness_interval_seconds",
+				"failure_retry_interval_seconds":   "failure_retry_interval_seconds",
+				"block_recovery_interval_seconds":  "block_recovery_interval_seconds",
+				"active_quality_interval_seconds":  "active_check_interval_seconds",
+				"reserve_check_interval_seconds":   "backup_check_interval_seconds",
+				"full_scan_interval_seconds":       "full_scan_interval_seconds",
+			} {
+				if value, exists := routingMonitor[source]; exists {
+					resolvedPolicy[target] = value
+				}
+			}
+			if batch, ok := numericInt(routingMonitor["probe_batch_size"]); ok && batch > 0 {
+				resolvedPolicy["probe_batch_size"] = batch
+			} else if mode == "best" {
+				resolvedPolicy["probe_batch_size"] = 2
+			} else {
+				resolvedPolicy["probe_batch_size"] = 3
+			}
+		}
 		healthPolicies[policyID] = map[string]any{
-			"policy": cloneJSONMap(policy), "mode": mode, "groups": serializedGroups,
+			"policy": resolvedPolicy, "mode": mode, "groups": serializedGroups,
 			"candidates": members, "nodes": inventory,
 		}
 		policyMembers[policyID] = append([]string(nil), members...)
@@ -144,6 +167,23 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 		return nil, err
 	}
 	return body, nil
+}
+
+func numericInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case json.Number:
+		integer, err := number.Int64()
+		return int(integer), err == nil
+	case int:
+		return number, true
+	case int64:
+		return int(number), true
+	case float64:
+		integer := int(number)
+		return integer, number == float64(integer)
+	default:
+		return 0, false
+	}
 }
 
 // PruneDynamicXrayOutbounds removes subscription-backed leaves from the

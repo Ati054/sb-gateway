@@ -64,7 +64,7 @@ test("selection expansion retains every matching server, including more than ten
 
 test("active pool size is visible and editable in advanced switching parameters", () => {
   assert.match(page, /\[candidateLimit, setCandidateLimit\] = useState/);
-  assert.match(page, /Дополнительные параметры переключения[\s\S]*?Размер активного пула[\s\S]*?name="max_active_candidates" value=\{candidateLimit\} onChange=\{\(event\) => setCandidateLimit\(Number\(event.target.value\)\)\}/);
+  assert.match(page, /Дополнительные параметры переключения[\s\S]*?Узлов в активном пуле[\s\S]*?name="max_active_candidates" value=\{candidateLimit\} onChange=\{\(event\) => setCandidateLimit\(Number\(event.target.value\)\)\}/);
   assert.match(page, /max_active_candidates: candidateLimit,\s+max_probe_candidates: candidateLimit/);
   assert.match(page, /const activeNodeCount = mode === "priority" \? eligibleNodeCount : Math.min\(candidateLimit, eligibleNodeCount\)/);
 });
@@ -72,7 +72,20 @@ test("active pool size is visible and editable in advanced switching parameters"
 test("priority editor retains the whole ordered queue and decouples probe batch from URLTest limit", () => {
   assert.match(page, /const activePriorityItems = selectionOrder;/);
   assert.doesNotMatch(page, /selectionOrder.slice\(0, candidateLimit\)|coldPriorityItems/);
-  assert.match(page, /probe_batch_size: mode === "best" \? 2 : 3/);
+  assert.doesNotMatch(page, /probe_batch_size: mode === "best" \? 2 : 3/);
+  assert.match(page, /Авто · URLTest: 2, приоритет: 3/);
+});
+
+test("route monitoring is one global form with concise scheduling controls", () => {
+  assert.match(page, /function RoutingMonitorSettings/);
+  assert.match(page, /Мониторинг маршрутов/);
+  assert.match(page, /Доступность активного узла, сек\./);
+  assert.match(page, /Максимум проверок за цикл/);
+  assert.match(page, /routing_monitor: routingMonitor/);
+  assert.match(page, /const monitorRanges/);
+  assert.doesNotMatch(page, /Сохранить мониторинг/);
+  assert.doesNotMatch(page, /active_check_interval_seconds: 60/);
+  assert.doesNotMatch(page, /backup_check_interval_seconds: 300/);
 });
 
 test("actual pool field JSX is absent in priority and present in URLTest", async () => {
