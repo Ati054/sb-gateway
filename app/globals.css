@@ -8205,6 +8205,83 @@ td small {
   margin: 0;
 }
 
+.screen-routing .routing-monitor-card {
+  overflow: hidden;
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.routing-monitor-card summary {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 20px;
+  cursor: pointer;
+}
+
+.routing-monitor-card summary > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.routing-monitor-card summary strong {
+  color: #1e5347;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.routing-monitor-card summary strong::before {
+  display: inline-block;
+  width: 14px;
+  margin-right: 5px;
+  content: "▸";
+  transform: translateY(-1px);
+}
+
+.routing-monitor-card details[open] summary strong::before {
+  content: "▾";
+}
+
+.routing-monitor-card summary small {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.routing-monitor-summary {
+  flex: none;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  padding: 5px 9px;
+  color: var(--primary-dark);
+  font-size: 12px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.routing-monitor-card details[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.routing-monitor-form {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px 18px;
+}
+
+.routing-monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.routing-monitor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .routing-policy-section,
 .screen-routing .quality-dashboard,
 .screen-routing .settings-card {
@@ -9074,6 +9151,10 @@ td small {
 }
 
 @media (max-width: 860px) {
+  .routing-monitor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .screen-routing .routing-infrastructure-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -9088,6 +9169,30 @@ td small {
 }
 
 @media (max-width: 680px) {
+  .routing-monitor-card summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+    padding-inline: 14px;
+  }
+
+  .routing-monitor-form {
+    padding-inline: 14px;
+  }
+
+  .routing-monitor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .routing-monitor-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .routing-monitor-actions .button {
+    width: 100%;
+  }
+
   .routing-section-header {
     align-items: stretch;
     flex-direction: column;

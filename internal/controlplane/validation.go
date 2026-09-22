@@ -176,6 +176,43 @@ func (result *configValidation) validateSystemSettings(config map[string]any) {
 			result.optionalIntegerRange(settings, "xray_debug_timeout_minutes", "system.logging", 1, 60)
 		}
 	}
+	if monitor, exists := system["routing_monitor"]; exists {
+		settings, valid := monitor.(map[string]any)
+		if !valid {
+			result.add("system.routing_monitor", "type", "Routing monitor settings must be an object.")
+		} else {
+			for _, field := range []struct {
+				name    string
+				minimum int
+				maximum int
+			}{
+				{"active_liveness_interval_seconds", 2, 30},
+				{"failure_retry_interval_seconds", 1, 10},
+				{"block_recovery_interval_seconds", 5, 60},
+				{"active_quality_interval_seconds", 10, 3600},
+				{"reserve_check_interval_seconds", 10, 86400},
+				{"full_scan_interval_seconds", 10, 86400},
+				{"probe_batch_size", 0, 3},
+			} {
+				result.optionalIntegerRange(settings, field.name, "system.routing_monitor", field.minimum, field.maximum)
+			}
+			if retry, retryOK := jsonInteger(settings["failure_retry_interval_seconds"]); retryOK {
+				if liveness, livenessOK := jsonInteger(settings["active_liveness_interval_seconds"]); livenessOK && retry > liveness {
+					result.add("system.routing_monitor.failure_retry_interval_seconds", "ordering", "Failure retry cannot be slower than active availability checks.")
+				}
+			}
+			if active, activeOK := jsonInteger(settings["active_quality_interval_seconds"]); activeOK {
+				if reserve, reserveOK := jsonInteger(settings["reserve_check_interval_seconds"]); reserveOK && reserve < active {
+					result.add("system.routing_monitor.reserve_check_interval_seconds", "ordering", "Reserve checks cannot run more often than active quality checks.")
+				}
+			}
+			if reserve, reserveOK := jsonInteger(settings["reserve_check_interval_seconds"]); reserveOK {
+				if full, fullOK := jsonInteger(settings["full_scan_interval_seconds"]); fullOK && full < reserve {
+					result.add("system.routing_monitor.full_scan_interval_seconds", "ordering", "Full scans cannot run more often than reserve checks.")
+				}
+			}
+		}
+	}
 	deploymentReady := system["deployment_ready"] == true
 	networking, ok := system["networking"].(map[string]any)
 	if !ok {

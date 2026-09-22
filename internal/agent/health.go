@@ -85,6 +85,9 @@ type healthPolicy struct {
 	MaxProbeCandidates        int                 `json:"max_probe_candidates"`
 	MaxActiveCandidates       int                 `json:"max_active_candidates"`
 	ProbeBatchSize            int                 `json:"probe_batch_size"`
+	ActiveLivenessSeconds     int                 `json:"active_liveness_interval_seconds"`
+	FailureRetrySeconds       int                 `json:"failure_retry_interval_seconds"`
+	BlockRecoverySeconds      int                 `json:"block_recovery_interval_seconds"`
 	CandidateServiceIDs       []string            `json:"candidate_service_ids"`
 	CandidateServiceAccess    map[string][]string `json:"candidate_service_access"`
 }
@@ -208,11 +211,14 @@ type serviceHealthStatus struct {
 }
 
 type probeLimits struct {
-	Batch           int `json:"batch"`
-	Shortlist       int `json:"shortlist"`
-	ActiveSeconds   int `json:"active_seconds"`
-	BackupSeconds   int `json:"backup_seconds"`
-	FullScanSeconds int `json:"full_scan_seconds"`
+	Batch                int `json:"batch"`
+	Shortlist            int `json:"shortlist"`
+	ActiveSeconds        int `json:"active_seconds"`
+	BackupSeconds        int `json:"backup_seconds"`
+	FullScanSeconds      int `json:"full_scan_seconds"`
+	LivenessSeconds      int `json:"liveness_seconds"`
+	FailureRetrySeconds  int `json:"failure_retry_seconds"`
+	BlockRecoverySeconds int `json:"block_recovery_seconds"`
 }
 
 type qualityThresholds struct {
@@ -328,25 +334,35 @@ func (controller *healthController) nextInterval() time.Duration {
 	}
 	interval := controller.opts.HealthInterval
 	for _, item := range controller.state {
-		if item.Selected != "" && item.Selected != "block" && interval > activeLivenessInterval {
-			interval = activeLivenessInterval
+		liveness := configuredHealthDuration(item.ProbeLimits.LivenessSeconds, activeLivenessInterval)
+		failureRetry := configuredHealthDuration(item.ProbeLimits.FailureRetrySeconds, failureRetryInterval)
+		blockRecovery := configuredHealthDuration(item.ProbeLimits.BlockRecoverySeconds, outageRetryInterval)
+		if item.Selected != "" && item.Selected != "block" && interval > liveness {
+			interval = liveness
 		}
-		if item.Selected == "block" && interval > outageRetryInterval {
-			interval = outageRetryInterval
-		} else if item.UnderlayFailure != "" && interval > failureRetryInterval {
-			interval = failureRetryInterval
-		} else if item.Selected != "block" && item.AvailabilityFailures[item.Selected] > 0 && interval > failureRetryInterval {
-			interval = failureRetryInterval
+		if item.Selected == "block" && interval > blockRecovery {
+			interval = blockRecovery
+		} else if item.UnderlayFailure != "" && interval > failureRetry {
+			interval = failureRetry
+		} else if item.Selected != "block" && item.AvailabilityFailures[item.Selected] > 0 && interval > failureRetry {
+			interval = failureRetry
 		}
 	}
 	return interval
+}
+
+func configuredHealthDuration(seconds int, fallback time.Duration) time.Duration {
+	if seconds <= 0 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // Walk the whole pool fairly, including nodes outside the regular shortlist.
 // LastProbeAt already persists this order; no second queue/cache is needed.
 func outageProbeTargets(now time.Time, candidates []string, item *policyHealthState, p effectivePolicySettings) []string {
 	result := make([]string, 0, minInt(p.batch, outageProbeBatch))
-	interval := minInt(p.backup, int(outageRetryInterval/time.Second))
+	interval := minInt(p.backup, p.blockRecovery)
 	for len(result) < cap(result) {
 		oldest := ""
 		for _, candidate := range candidates {
@@ -423,7 +439,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		if !controller.warmStarted[policyID] || !now.Before(controller.regularNext[policyID]) || item.Selected == "block" {
 			err = controller.tickPolicy(now, policyID, contract, item)
 			if !errors.Is(err, errHealthYield) {
-				controller.regularNext[policyID] = now.Add(controller.opts.HealthInterval)
+				controller.regularNext[policyID] = now.Add(controller.regularInterval(contract))
 			}
 			dirty = true
 		} else {
@@ -462,6 +478,14 @@ func (controller *healthController) Tick(now time.Time) error {
 	}
 	controller.state = managed
 	return errors.Join(failures...)
+}
+
+func (controller *healthController) regularInterval(contract healthPolicyContract) time.Duration {
+	qualityInterval := time.Duration(policySettings(contract.Policy, contract.Mode).active) * time.Second
+	if controller.opts.HealthInterval <= 0 || qualityInterval < controller.opts.HealthInterval {
+		return qualityInterval
+	}
+	return controller.opts.HealthInterval
 }
 
 func newPolicyHealthState() *policyHealthState {
@@ -635,7 +659,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	if outage {
 		emergency := p
 		if selected != "block" {
-			emergency.backup = minInt(p.backup, int(failureRetryInterval/time.Second))
+			emergency.backup = minInt(p.backup, p.failureRetry)
 		}
 		probeTargets = outageProbeTargets(now, candidates, item, emergency)
 	} else if !emergencySwitched {
@@ -738,7 +762,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				break
 			}
 			emergency := p
-			emergency.backup = minInt(p.backup, int(failureRetryInterval/time.Second))
+			emergency.backup = minInt(p.backup, p.failureRetry)
 			for _, reserve := range outageProbeTargets(now, without(candidates, probeTargets), item, emergency) {
 				if len(probeTargets) >= minInt(p.batch, outageProbeBatch) {
 					break
@@ -1028,7 +1052,12 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	item.ProbedCandidates, item.HTTPSProbeTargets = probeTargets, targetsMap
 	item.SpeedMedianBPS, item.SpeedProbeTargets = speedMedians, speedTargets
 	item.Mode, item.CandidateCount, item.HealthyReserves = contract.Mode, len(candidates), reserves
-	item.ProbeLimits = probeLimits{p.batch, p.shortlist, p.active, p.backup, p.fullScan}
+	item.ProbeLimits = probeLimits{
+		Batch: p.batch, Shortlist: p.shortlist, ActiveSeconds: p.active,
+		BackupSeconds: p.backup, FullScanSeconds: p.fullScan,
+		LivenessSeconds: p.liveness, FailureRetrySeconds: p.failureRetry,
+		BlockRecoverySeconds: p.blockRecovery,
+	}
 	item.QualityThresholds = qualityThresholds{p.qualityWindow, p.maxLoss, p.maxLatency, p.improvement, p.speedEnabled, p.speedImprovement, p.speedInterval, p.speedBytes, p.speedCandidates, p.failureThreshold, p.recoveryThreshold, p.cooldown}
 	item.CheckedAt = now.UTC().Format(time.RFC3339)
 	rememberWorkingSelection(contract, item)
