@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,56 @@ func TestSubscriptionArtifactRetentionKeepsOnlyLiveAndRollbackGenerations(t *tes
 	}
 	if _, err := os.Stat(filepath.Join(server.repository.root, "subscription-nodes-"+staleRevision+".json")); !os.IsNotExist(err) {
 		t.Fatalf("stale snapshot remains: %v", err)
+	}
+}
+
+func TestSubscriptionArtifactRetentionPrunesSnapshotsWithoutSecretGenerations(t *testing.T) {
+	server := newTestServer(t)
+	active := strings.Repeat("a", 64)
+	if err := server.repository.writeJSON(filepath.Join(server.repository.root, "active.json"), map[string]any{"revision": active}); err != nil {
+		t.Fatal(err)
+	}
+	stale := make([]string, 0, 24)
+	for index := 1; index <= 24; index++ {
+		stale = append(stale, fmt.Sprintf("%064x", index))
+	}
+	for _, revision := range append([]string{active}, stale...) {
+		if err := server.repository.saveAuxiliary("subscription-nodes-"+revision, map[string]any{"revision": revision, "nodes": []any{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := server.pruneSubscriptionArtifacts(map[string]any{"provider": map[string]any{"nodes": []any{}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(server.repository.root, "subscription-nodes-"+active+".json")); err != nil {
+		t.Fatalf("active snapshot was removed: %v", err)
+	}
+	for _, revision := range stale {
+		if _, err := os.Stat(filepath.Join(server.repository.root, "subscription-nodes-"+revision+".json")); !os.IsNotExist(err) {
+			t.Fatalf("stale snapshot %s remains: %v", revision, err)
+		}
+	}
+}
+
+func TestSubscriptionArtifactRetentionPreservesSnapshotsWhenPointersAreUnreadable(t *testing.T) {
+	for _, pointer := range []string{"active.json", "last-known-good.json", "apply-metadata.json"} {
+		t.Run(pointer, func(t *testing.T) {
+			server := newTestServer(t)
+			revision := strings.Repeat("c", 64)
+			path := filepath.Join(server.repository.root, "subscription-nodes-"+revision+".json")
+			if err := server.repository.saveAuxiliary("subscription-nodes-"+revision, map[string]any{"revision": revision}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(server.repository.root, pointer), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := server.pruneSubscriptionArtifacts(map[string]any{}); err == nil {
+				t.Fatal("cleanup accepted an unreadable retention pointer")
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("snapshot removed despite unreadable pointer: %v", err)
+			}
+		})
 	}
 }
 

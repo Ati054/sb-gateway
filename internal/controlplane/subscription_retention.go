@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,7 +23,11 @@ func (server *Server) pruneSubscriptionArtifacts(current map[string]any) error {
 	keepGenerations := map[string]bool{}
 	collectSubscriptionGenerations(current, keepGenerations)
 	keepRevisions := map[string]bool{}
-	for _, revision := range server.subscriptionRetentionRevisions() {
+	revisions, err := server.subscriptionRetentionRevisions()
+	if err != nil {
+		return err
+	}
+	for _, revision := range revisions {
 		if revision == "" || keepRevisions[revision] {
 			continue
 		}
@@ -33,19 +38,30 @@ func (server *Server) pruneSubscriptionArtifacts(current map[string]any) error {
 		}
 		collectSubscriptionGenerations(snapshot, keepGenerations)
 	}
-	if len(keepGenerations) == 0 {
-		return errors.New("current subscription generation set is empty")
-	}
-	if err := pruneSubscriptionGenerationDirs(server.secrets.root, keepGenerations); err != nil {
-		return err
+	// A subscription may have no generated credentials. Do not infer that
+	// unreferenced secret directories are safe to remove in that case, but
+	// still prune obsolete node snapshots.
+	if len(keepGenerations) != 0 {
+		if err := pruneSubscriptionGenerationDirs(server.secrets.root, keepGenerations); err != nil {
+			return err
+		}
 	}
 	return pruneSubscriptionSnapshots(server.repository.root, keepRevisions)
 }
 
-func (server *Server) subscriptionRetentionRevisions() []string {
-	active, _ := server.repository.activeRevision()
-	lkg, _ := server.repository.lkgRevision()
-	metadata, _ := server.repository.metadata()
+func (server *Server) subscriptionRetentionRevisions() ([]string, error) {
+	active, err := server.repository.activeRevision()
+	if err != nil {
+		return nil, fmt.Errorf("active revision: %w", err)
+	}
+	lkg, err := server.repository.lkgRevision()
+	if err != nil {
+		return nil, fmt.Errorf("last-known-good revision: %w", err)
+	}
+	metadata, err := server.repository.metadata()
+	if err != nil {
+		return nil, fmt.Errorf("apply metadata: %w", err)
+	}
 	previous := text(metadata["previous_revision"])
 	result := make([]string, 0, 3)
 	for _, revision := range []string{active, lkg, previous, subscriptionText(metadata["node_snapshot_revision"]), subscriptionText(metadata["previous_node_snapshot_revision"])} {
@@ -53,7 +69,7 @@ func (server *Server) subscriptionRetentionRevisions() []string {
 			result = append(result, revision)
 		}
 	}
-	return result
+	return result, nil
 }
 
 func collectSubscriptionGenerations(value any, keep map[string]bool) {

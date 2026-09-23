@@ -124,6 +124,11 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 		runtime.selectorMembers = make(map[string]string)
 		runtime.probeRuntimeTag = ""
 	}
+	// Retry deferred handler removal during the ordinary health loop, even
+	// when the selected node remains stable after a transient Xray API error.
+	for policyID := range runtime.retiredByPolicy {
+		runtime.pruneRetiredOutbounds(policyID)
+	}
 	return runtime.pool, reset, nil
 }
 
@@ -331,20 +336,39 @@ func (runtime *xraySelectorRuntime) commitPolicySelection(policyID, nodeID, runt
 	if nodeID != "" {
 		runtime.activeByNode[nodeID] = runtimeTag
 	}
+	retired := runtime.retiredByPolicy[policyID]
+	// A previously retired handler can become active again. Never remove the
+	// newly selected handler while trimming older generations.
+	if len(retired) != 0 {
+		remaining := retired[:0]
+		for _, tag := range retired {
+			if tag != runtimeTag {
+				remaining = append(remaining, tag)
+			}
+		}
+		retired = remaining
+	}
 	if previous != "" && previous != runtimeTag && strings.HasPrefix(previous, prefix) {
-		retired := runtime.retiredByPolicy[policyID]
 		if !contains(retired, previous) {
 			retired = append(retired, previous)
 		}
-		for len(retired) > 1 {
-			if err := runtime.removeOutbound(retired[0]); err != nil {
-				break
-			}
-			retired = retired[1:]
-		}
-		runtime.retiredByPolicy[policyID] = retired
 	}
+	runtime.retiredByPolicy[policyID] = retired
+	runtime.pruneRetiredOutbounds(policyID)
 	return nil
+}
+
+func (runtime *xraySelectorRuntime) pruneRetiredOutbounds(policyID string) {
+	retired := runtime.retiredByPolicy[policyID]
+	// Keep the newest retired handler for existing connections. An older
+	// removal failure retains ownership and is retried on the next health tick.
+	for len(retired) > 1 {
+		if err := runtime.removeOutbound(retired[0]); err != nil {
+			break
+		}
+		retired = retired[1:]
+	}
+	runtime.retiredByPolicy[policyID] = retired
 }
 
 func (runtime *xraySelectorRuntime) probeTag(nodeID string) (string, error) {

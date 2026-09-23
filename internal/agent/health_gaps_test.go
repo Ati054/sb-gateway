@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +65,59 @@ func TestFailedPrimaryRecoversWithoutWaitingForFullScan(t *testing.T) {
 				t.Fatalf("%s recovery waited for full scan: selected=%s queue=%v", mode, item.Selected, item.ScanQueue)
 			}
 		}
+	}
+}
+
+func TestBlockedSevenNodeSweepUsesEmergencyRetryUntilExhausted(t *testing.T) {
+	for _, liveLast := range []bool{true, false} {
+		t.Run(fmt.Sprintf("live_last=%t", liveLast), func(t *testing.T) {
+			pool := healthFixture(false)
+			contract := pool.HealthPolicies["europe"]
+			contract.Mode = "priority"
+			contract.Candidates = []string{"n1", "n2", "n3", "n4", "n5", "n6", "n7"}
+			contract.Groups = nil
+			contract.Policy.ProbeBatchSize = 3
+			contract.Policy.FailureRetrySeconds = 2
+			contract.Policy.BlockRecoverySeconds = 15
+			contract.Policy.BackupCheckSeconds = 300
+			pool.HealthPolicies["europe"] = contract
+			item := newPolicyHealthState()
+			item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "block", "block", true
+			item.CandidateSignature = strings.Join(contract.Candidates, "\n")
+			probes := make(map[string]probeEvidence)
+			for _, candidate := range contract.Candidates {
+				probes[candidate] = failedEvidence()
+			}
+			if liveLast {
+				probes["n7"] = successfulEvidence(50)
+			}
+			runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "block"}, probes: probes}
+			controller := &healthController{
+				opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime,
+				warmStarted: map[string]bool{"europe": true}, stateLoaded: true, state: healthState{"europe": item},
+			}
+			for batch := 0; batch < 3; batch++ {
+				before := len(runtime.availabilityCalls)
+				if err := controller.Tick(time.Unix(int64(1000+batch*2), 0)); err != nil {
+					t.Fatal(err)
+				}
+				got := runtime.availabilityCalls[before:]
+				want := contract.Candidates[batch*3 : minInt((batch+1)*3, len(contract.Candidates))]
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("batch %d probed %v, want %v", batch, got, want)
+				}
+				if batch < 2 && (item.Selected != "block" || controller.nextInterval() != 2*time.Second) {
+					t.Fatalf("batch %d delayed an untested candidate: selected=%s interval=%s", batch, item.Selected, controller.nextInterval())
+				}
+			}
+			if liveLast {
+				if item.Selected != "n7" || runtime.current["europe"] != "n7" {
+					t.Fatalf("working final reserve was not selected: state=%s runtime=%s", item.Selected, runtime.current["europe"])
+				}
+			} else if item.Selected != "block" || controller.nextInterval() != 15*time.Second {
+				t.Fatalf("exhausted outage sweep did not return to economical polling: selected=%s interval=%s", item.Selected, controller.nextInterval())
+			}
+		})
 	}
 }
 
