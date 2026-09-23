@@ -176,6 +176,7 @@ type policyHealthState struct {
 	LastWorkingSelection   *workingSelection                 `json:"last_working_selection,omitempty"`
 	UnderlayFailure        string                            `json:"underlay_failure,omitempty"`
 	UnderlayCheckedAt      string                            `json:"underlay_checked_at,omitempty"`
+	OutageProbePending     bool                              `json:"-"`
 }
 
 type healthSample struct {
@@ -340,8 +341,14 @@ func (controller *healthController) nextInterval() time.Duration {
 		if item.Selected != "" && item.Selected != "block" && interval > liveness {
 			interval = liveness
 		}
-		if item.Selected == "block" && interval > blockRecovery {
-			interval = blockRecovery
+		if item.Selected == "block" {
+			blockInterval := blockRecovery
+			if item.OutageProbePending && failureRetry < blockInterval {
+				blockInterval = failureRetry
+			}
+			if interval > blockInterval {
+				interval = blockInterval
+			}
 		} else if item.UnderlayFailure != "" && interval > failureRetry {
 			interval = failureRetry
 		} else if item.Selected != "block" && item.AvailabilityFailures[item.Selected] > 0 && interval > failureRetry {
@@ -1058,6 +1065,9 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		LivenessSeconds: p.liveness, FailureRetrySeconds: p.failureRetry,
 		BlockRecoverySeconds: p.blockRecovery,
 	}
+	// Keep draining eligible, untested candidates at the emergency interval.
+	// The cheaper block recovery interval applies after that sweep is exhausted.
+	item.OutageProbePending = item.Selected == "block" && len(outageProbeTargets(now, candidates, item, p)) > 0
 	item.QualityThresholds = qualityThresholds{p.qualityWindow, p.maxLoss, p.maxLatency, p.improvement, p.speedEnabled, p.speedImprovement, p.speedInterval, p.speedBytes, p.speedCandidates, p.failureThreshold, p.recoveryThreshold, p.cooldown}
 	item.CheckedAt = now.UTC().Format(time.RFC3339)
 	rememberWorkingSelection(contract, item)

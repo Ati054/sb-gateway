@@ -126,7 +126,11 @@ func TestSubscriptionRuntimeAutomaticActivationKeepsDraftAndOtherProviders(t *te
 	metadata, _ := s.repository.metadata()
 	snapshot := subscriptionText(metadata["node_snapshot_revision"])
 	found := false
-	for _, rev := range s.subscriptionRetentionRevisions() {
+	revisions, err := s.subscriptionRetentionRevisions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rev := range revisions {
 		found = found || rev == snapshot
 	}
 	if !found {
