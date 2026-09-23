@@ -1,80 +1,81 @@
 # Changelog
 
-## 1.6.21
+## 1.6.22
 
 ## Русский
 
 ### Описание
 
-Версия 1.6.21 добавляет единые настройки мониторинга маршрутов. Интервалы
-быстрых и фоновых проверок меняются в одном месте и действуют для всех
-маршрутных листов.
+Версия 1.6.22 ускоряет поиск рабочего резервного узла при полном отказе и
+ограничивает накопление служебных данных подписок и Xray.
 
 ### Изменения
 
-- Внизу раздела **Маршрутизация** добавлен блок **Мониторинг маршрутов**. Он
-  настраивает проверку активного узла, повтор после ошибки, поиск выхода из
-  блокировки, проверку качества, резервов и полный обход.
-- Размер порции задаётся общим параметром. Режим **Авто** проверяет до двух
-  узлов URLTest и до трёх узлов приоритетного листа за цикл.
-- Настройки мониторинга сохраняются общей кнопкой раздела. В редакторе
-  маршрутного листа остаются только параметры выбора узла, пороги качества и
-  защита от лишних переключений.
-- Таблица качества показывает приоритетный лист в заданном порядке. URLTest
-  по-прежнему сортируется по фактическому качеству узлов.
-- Обновление с 1.6.20 сохраняет активную конфигурацию, секреты, статистику
-  узлов и пользовательские настройки. Для существующих конфигураций действуют
-  безопасные значения по умолчанию.
+- Пока в маршрутном листе остаются непроверенные резервные узлы, аварийный
+  обход продолжает проверять их короткими порциями. Интервал поиска при полном
+  `block` применяется только после безуспешной проверки всего набора.
+- Устаревшие снимки подписки удаляются даже для набора без файлов учётных
+  данных. При ошибке чтения активного состояния или отката очистка не
+  выполняется.
+- Для основных маршрутов и сервисных правил Xray сохраняет один предыдущий
+  обработчик. Более старые удаляются после подтверждения выбора; неудачное
+  удаление повторяется, а повторно выбранный обработчик защищён.
+- Канал обновления подписок ведёт журнал отложенной очистки. Он удаляет
+  обработчики, которые были созданы, но не выбраны после ошибки, и сохраняет
+  задачу удаления старого обработчика при временном отказе Xray API.
+- Обновление с 1.6.21 сохраняет конфигурацию, подписки, секреты и историю
+  качества узлов. Пользовательские настройки менять не требуется.
+
+### Проверка
+
+
 
 ### Установка и обновление
 
-Для чистой установки используйте `sb-gateway-1.6.21-routeros-bundle.zip` и
+Для чистой установки используйте `sb-gateway-1.6.22-routeros-bundle.zip` и
 [инструкцию](../INSTALL-RU.md).
 
-Для обновления работающей установки загрузите
-`sb-gateway-1.6.21-linux-arm64.tar` в разделе
-**Эксплуатация → Обновление контейнера**. Панель проверит архитектуру, версию и
-SHA-256 до остановки текущего контейнера.
-
-### Проверка релиза
-
-
+Для обновления загрузите `sb-gateway-1.6.22-linux-arm64.tar` в разделе
+**Эксплуатация → Обновление контейнера**. Панель проверяет архитектуру, версию
+и SHA-256 до остановки текущего контейнера.
 
 ## English
 
 ### Overview
 
-Version 1.6.21 adds shared route-monitoring settings. Fast and background probe
-intervals are configured in one place and apply to every routing policy.
+Version 1.6.22 speeds up reserve discovery during a complete route outage and
+bounds subscription and Xray runtime artifacts.
 
 ### Changes
 
-- A **Route monitoring** section at the bottom of **Routing** controls active
-  path checks, failure retry, blocked-route recovery, quality checks, reserve
-  checks, and full scans.
-- Probe batch size is global. **Auto** checks up to two URLTest nodes and up to
-  three priority nodes per cycle.
-- The existing page-level Save button stores the monitoring settings. Policy
-  editors retain only selection rules, quality thresholds, and switch
-  protection.
-- The quality table follows configured order for priority policies. URLTest
-  remains ranked by measured node quality.
-- Updating from 1.6.20 preserves the active configuration, secrets, node
-  statistics, and user settings. Existing configurations receive safe defaults.
+- During a complete outage, the route monitor checks remaining untested nodes
+  in short emergency batches. The blocked-route interval applies only after
+  the full set has been checked without finding a working node.
+- Obsolete subscription snapshots are removed even when the current set has no
+  generated credential files. Cleanup stops if the active or rollback pointer
+  cannot be read.
+- Main and service routes retain one previous Xray handler. Older handlers are
+  removed after selector confirmation; failed cleanup is retried, and a
+  reselected handler cannot be removed as stale.
+- The subscription update route journals deferred cleanup, including handlers
+  added but never selected after an error. A temporary Xray API failure does
+  not discard the old handler's cleanup task.
+- Upgrading from 1.6.21 preserves configuration, subscriptions, secrets, and
+  node quality history. No setting changes are required.
+
+### Verification
+
+The build and Go and UI test suites passed. Container update, routing and DNS,
+container outage and recovery, and node failover passed on an isolated ARM64
+CHR. A test subscription refresh loaded 317 nodes and activated the updated
+runtime automatically. Xray API cleanup failures were covered by unit tests,
+not by fault injection on the CHR.
 
 ### Installation and update
 
-For a clean installation, use `sb-gateway-1.6.21-routeros-bundle.zip` and the
+For a clean installation, use `sb-gateway-1.6.22-routeros-bundle.zip` and the
 [installation guide](../INSTALL.md).
 
-To update an existing installation, upload
-`sb-gateway-1.6.21-linux-arm64.tar` under
-**Operations → Container update**. The panel checks architecture, version, and
-SHA-256 before stopping the current container.
-
-### Release verification
-
-Go and browser tests, ESLint, the production UI build, and ARM64 image
-validation passed. An isolated MikroTik CHR verified RouterOS scripts, live
-routing and DNS, mandatory service rules, emergency failover, unstable-WAN
-suppression, and recovery from a full container outage.
+To update, upload `sb-gateway-1.6.22-linux-arm64.tar` under
+**Operations → Container update**. The panel verifies architecture, version,
+and SHA-256 before stopping the current container.
