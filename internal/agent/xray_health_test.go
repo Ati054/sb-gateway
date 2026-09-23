@@ -410,6 +410,57 @@ func TestHealthContractReloadPreservesLiveXraySelectorCache(t *testing.T) {
 	}
 }
 
+func TestPolicyRetirementNeverRemovesReactivatedHandlerAndRetriesCleanup(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	policy := "europe"
+	prefix := "sb-urltest-europe-"
+	runtime.pool.PolicyPrefixes = map[string]string{policy: prefix}
+	a, b, c := prefix+"a", prefix+"b", prefix+"c"
+	for _, tag := range []string{a, b, c} {
+		runtime.loadedDynamic[tag] = true
+	}
+	runtime.activeByPolicy[policy] = a
+	removed := make([]string, 0)
+	failRemoval := true
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		if args[1] != "rmo" {
+			t.Fatalf("unexpected Xray command: %v", args)
+		}
+		removed = append(removed, args[len(args)-1])
+		if failRemoval {
+			return nil, errors.New("temporary Xray API failure")
+		}
+		return nil, nil
+	}
+	if err := runtime.commitPolicySelection(policy, "b", b); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.commitPolicySelection(policy, "a", a); err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 || !runtime.loadedDynamic[a] || !reflect.DeepEqual(runtime.retiredByPolicy[policy], []string{b}) {
+		t.Fatalf("reactivated handler was not protected: removed=%v retired=%v", removed, runtime.retiredByPolicy[policy])
+	}
+	if err := runtime.commitPolicySelection(policy, "c", c); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(removed, []string{b}) || !runtime.loadedDynamic[b] {
+		t.Fatalf("failed cleanup lost handler ownership: removed=%v loaded=%v", removed, runtime.loadedDynamic)
+	}
+	failRemoval = false
+	poolPath := filepath.Join(t.TempDir(), "pool.json")
+	if err := os.WriteFile(poolPath, []byte(`{"version":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime.opts.HealthPoolFile = poolPath
+	if _, _, err := runtime.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(removed, []string{b, b}) || runtime.loadedDynamic[b] || !runtime.loadedDynamic[a] || !runtime.loadedDynamic[c] || !reflect.DeepEqual(runtime.retiredByPolicy[policy], []string{a}) {
+		t.Fatalf("retry did not keep only the newest retired handler: removed=%v retired=%v loaded=%v", removed, runtime.retiredByPolicy[policy], runtime.loadedDynamic)
+	}
+}
+
 func selectorInfo(selected string) []byte {
 	line := ""
 	if selected != "" {

@@ -545,10 +545,17 @@ Provider outbounds входят в versioned health-pool contract и однов�
 остаются в полном `xray.json` для следующего cold start. Health worker вычисляет
 runtime tag из scoped ID и полного канонического outbound, добавляет новый
 handler через `HandlerService`, переключает основной и service selectors через
-`RoutingService` и проверяет фактический override через readback. Только после
-этого прежний handler выводится из registry; Xray не закрывает уже выданный
-соединению handler, поэтому существующий поток заканчивается на старой
-generation, а новый сразу идёт через новую.
+`RoutingService` и проверяет фактический override через readback. После этого
+health-agent удерживает один предыдущий handler для действующих соединений;
+более старые удаляются через `HandlerService`, а неудачное удаление повторяется
+в следующем health-цикле. Повторно активированный handler не попадает в список
+удаления. Новый поток сразу идёт через новую generation.
+
+Selector загрузки подписок ведёт собственный журнал отложенной очистки старых и
+ещё не выбранных dynamic handlers. Смена egress сначала сохраняет прежний tag,
+затем выполняет `bo` с readback. При потерянном ответе `ado` незакреплённый
+handler остаётся в журнале до сверки selector и очистки. Журнал с другим PID
+Xray не переносится на новое ядро.
 
 Cold-start helper восстанавливает versioned handlers и selectors до допуска
 трафика. При первом чтении health-agent сопоставляет фактический tag с текущим

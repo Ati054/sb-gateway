@@ -1,6 +1,6 @@
 # SB Gateway for MikroTik RouterOS 7
 
-SB Gateway 1.6.21 is a bilingual Web-managed traffic-policy gateway packaged as
+SB Gateway 1.6.22 is a bilingual Web-managed traffic-policy gateway packaged as
 one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.9
 only; sing-box is not shipped and there is no core switch in the UI.
 
@@ -46,7 +46,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.21-routeros-bundle.zip` from the GitHub release and
+Download `sb-gateway-1.6.22-routeros-bundle.zip` from the GitHub release and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 

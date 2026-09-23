@@ -547,7 +547,7 @@ func (server *Server) subscriptionRefreshChannels(subscription map[string]any) (
 }
 
 func (server *Server) selectSubscriptionUpdateExit(ctx context.Context, _ map[string]any, outbound string) error {
-	return selectSubscriptionXrayOutbound(ctx, server.opts.Runtime, outbound, runSubscriptionXrayCommand)
+	return selectSubscriptionXrayOutbound(ctx, server.opts.Runtime, outbound, runSubscriptionXrayCommand, server.repository)
 }
 
 func terminalSubscriptionRefreshError(err error) bool {
