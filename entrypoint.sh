@@ -8,6 +8,7 @@ export SB_GATEWAY_STATE_DIR="${SB_GATEWAY_STATE_DIR:-/state/control-plane}"
 export SB_GATEWAY_DATA_DIR="${SB_GATEWAY_DATA_DIR:-/data}"
 export SB_GATEWAY_SECRETS_DIR="${SB_GATEWAY_SECRETS_DIR:-/config/secrets}"
 export SB_XRAY_CONFIG="${SB_XRAY_CONFIG:-/config/generated/xray.json}"
+export SB_XRAY_FAILURE_SOCKET="${SB_XRAY_FAILURE_SOCKET:-/run/sb-gateway/xray-failures.sock}"
 export SB_RUNTIME_CANDIDATE_DIR="${SB_RUNTIME_CANDIDATE_DIR:-/state/runtime-candidates}"
 
 mkdir -p \

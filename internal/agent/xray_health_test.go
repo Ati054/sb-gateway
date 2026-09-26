@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,7 +54,19 @@ func TestBackgroundProbeLanesOwnDistinctDynamicOutbounds(t *testing.T) {
 		runtime := newXraySelectorRuntime(Options{})
 		runtime.pool = pool
 		runtime.probeSelector = selector
-		runtime.command = func(context.Context, time.Duration, string, ...string) ([]byte, error) { return nil, nil }
+		installed := false
+		runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+			if args[1] == "ado" {
+				installed = true
+			}
+			if args[1] == "lso" {
+				if installed {
+					return outboundTagsJSON("sb-health-" + shortHash(selector, 8) + "-" + runtime.dynamicDigest("node")), nil
+				}
+				return outboundTagsJSON(), nil
+			}
+			return nil, nil
+		}
 		tag, err := runtime.probeTag("node")
 		if err != nil {
 			t.Fatal(err)
@@ -103,7 +116,7 @@ func TestAvailabilityProbeStopsAtFirstSuccessAndFallsBack(t *testing.T) {
 	}
 }
 
-func TestAvailabilityProbeStopsAfterFirstTimeout(t *testing.T) {
+func TestAvailabilityProbeChecksIndependentTargetAfterTimeout(t *testing.T) {
 	originalTargets := healthTargets
 	originalTimeout := availabilityProbeTimeout
 	defer func() {
@@ -116,10 +129,12 @@ func TestAvailabilityProbeStopsAfterFirstTimeout(t *testing.T) {
 	}
 	availabilityProbeTimeout = 20 * time.Millisecond
 
-	calls := 0
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		time.Sleep(100 * time.Millisecond)
+		calls.Add(1)
+		if r.URL.Path == "/gstatic-204" {
+			time.Sleep(100 * time.Millisecond)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -127,8 +142,43 @@ func TestAvailabilityProbeStopsAfterFirstTimeout(t *testing.T) {
 	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
 	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
 	evidence := runtime.ProbeAvailability("direct-wan")
-	if evidence.OK || evidence.Failure != probeFailureTimeout || calls != 1 {
-		t.Fatalf("availability timeout: evidence=%#v calls=%d, want one timeout", evidence, calls)
+	if !evidence.OK || calls.Load() != 2 || evidence.TargetFailures["gstatic-204"] != probeFailureTimeout {
+		t.Fatalf("availability fallback: evidence=%#v calls=%d, want independent success", evidence, calls.Load())
+	}
+}
+
+func TestAvailabilityProbeRequiresTwoIndependentFailedTargets(t *testing.T) {
+	originalTargets := healthTargets
+	originalTimeout := availabilityProbeTimeout
+	defer func() {
+		healthTargets = originalTargets
+		availabilityProbeTimeout = originalTimeout
+	}()
+	healthTargets = append(healthTargets[:0:0], originalTargets...)
+	for i := range healthTargets {
+		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
+	}
+	availabilityProbeTimeout = 20 * time.Millisecond
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer server.Close()
+	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
+	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
+	evidence := runtime.ProbeAvailability("direct-wan")
+	if evidence.OK || evidence.Failure != probeFailureTimeout || calls.Load() != 2 || len(evidence.TargetFailures) != 2 {
+		t.Fatalf("availability failure: evidence=%#v calls=%d, want two different failed targets", evidence, calls.Load())
+	}
+}
+
+func TestMixedTargetErrorsAreNotFatalNodeEvidence(t *testing.T) {
+	if got := classifyTargetFailures([]probeFailureClass{probeFailureTLS, probeFailureTimeout}); got != probeFailureTimeout {
+		t.Fatalf("mixed target failures classified as %q, want timeout", got)
+	}
+	if got := classifyTargetFailures([]probeFailureClass{probeFailureFatal, probeFailureTransient}); got != probeFailureTransient {
+		t.Fatalf("mixed target failures classified as %q, want transient", got)
 	}
 }
 
@@ -258,7 +308,10 @@ func TestXrayCurrentDecodesCandidateRemovedFromLatestContract(t *testing.T) {
 		PolicyPrefixes: map[string]string{"europe": prefix},
 		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{}`), "nl": json.RawMessage(`{}`)},
 	}
-	runtime.command = func(_ context.Context, _ time.Duration, _ string, _ ...string) ([]byte, error) {
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		if args[1] == "lso" {
+			return outboundTagsJSON(runtime.dynamicTag(prefix, "de")), nil
+		}
 		return selectorInfo(runtime.dynamicTag(prefix, "de")), nil
 	}
 	got, err := runtime.Current("europe")
@@ -267,6 +320,173 @@ func TestXrayCurrentDecodesCandidateRemovedFromLatestContract(t *testing.T) {
 	}
 	if got != "de" {
 		t.Fatalf("removed dynamic member decoded as %q", got)
+	}
+}
+
+func TestXrayCurrentRestoresMissingSelectedOutboundBeforeConfirming(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	prefix := "sb-urltest-europe-"
+	runtime.pool = healthPool{
+		HealthPolicies: map[string]healthPolicyContract{"europe": {Candidates: []string{"de"}}},
+		PolicyPrefixes: map[string]string{"europe": prefix},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	tag := runtime.dynamicTag(prefix, "de")
+	runtime.loadedDynamic[tag] = true // stale local state after catalog churn
+	installed := false
+	commands := make([]string, 0)
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		commands = append(commands, args[1])
+		switch args[1] {
+		case "bi":
+			return selectorInfo(tag), nil
+		case "lso":
+			if installed {
+				return outboundTagsJSON(tag), nil
+			}
+			return outboundTagsJSON(), nil
+		case "ado":
+			installed = true
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if current, err := runtime.Current("europe"); err != nil || current != "de" || !installed {
+		t.Fatalf("current=%q installed=%t err=%v", current, installed, err)
+	}
+	if !reflect.DeepEqual(commands, []string{"bi", "lso", "ado", "lso"}) {
+		t.Fatalf("selected outbound was confirmed without checking/restoring it: %v", commands)
+	}
+}
+
+func TestXrayCurrentRestoresMissingCachedOutboundWithoutHealthContract(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	prefix := "sb-urltest-europe-"
+	runtime.pool = healthPool{
+		Policies:       map[string][]string{"europe": {"de"}},
+		PolicyPrefixes: map[string]string{"europe": prefix},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	tag := runtime.dynamicTag(prefix, "de")
+	runtime.activeByNode["de"] = tag
+	runtime.loadedDynamic[tag] = true
+	installed := false
+	commands := make([]string, 0)
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		commands = append(commands, args[1])
+		switch args[1] {
+		case "bi":
+			return selectorInfo(tag), nil
+		case "lso":
+			if installed {
+				return outboundTagsJSON(tag), nil
+			}
+			return outboundTagsJSON(), nil
+		case "ado":
+			installed = true
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if current, err := runtime.Current("europe"); err != nil || current != "de" || !installed {
+		t.Fatalf("current=%q installed=%t err=%v", current, installed, err)
+	}
+	if !reflect.DeepEqual(commands, []string{"bi", "lso", "ado", "lso"}) {
+		t.Fatalf("cached fallback returned without verifying/restoring handler: %v", commands)
+	}
+}
+
+func TestXrayCurrentDoesNotConfirmUnrestoredOutbound(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	prefix := "sb-urltest-europe-"
+	runtime.pool = healthPool{
+		HealthPolicies: map[string]healthPolicyContract{"europe": {Candidates: []string{"de"}}},
+		PolicyPrefixes: map[string]string{"europe": prefix},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	tag := runtime.dynamicTag(prefix, "de")
+	runtime.loadedDynamic[tag] = true
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "bi":
+			return selectorInfo(tag), nil
+		case "lso":
+			return outboundTagsJSON(), nil
+		case "ado":
+			return nil, errors.New("rejected")
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if current, err := runtime.Current("europe"); err == nil || current != "" || runtime.loadedDynamic[tag] {
+		t.Fatalf("missing outbound was marked confirmed: current=%q loaded=%v err=%v", current, runtime.loadedDynamic, err)
+	}
+}
+
+func TestXraySelectRepairsOverrideWithoutHandler(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	prefix := "sb-urltest-europe-"
+	runtime.pool = healthPool{
+		Policies:       map[string][]string{"europe": {"de"}},
+		PolicyPrefixes: map[string]string{"europe": prefix},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	tag := runtime.dynamicTag(prefix, "de")
+	installed := false
+	commands := make([]string, 0)
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		commands = append(commands, args[1])
+		switch args[1] {
+		case "bi":
+			return selectorInfo(tag), nil
+		case "lso":
+			return outboundTagsJSON(), nil
+		case "ado":
+			installed = true
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if err := runtime.Select("europe", "de"); err != nil || !installed || !runtime.loadedDynamic[tag] {
+		t.Fatalf("stale selector was not repaired: installed=%t loaded=%v err=%v", installed, runtime.loadedDynamic, err)
+	}
+	if !reflect.DeepEqual(commands, []string{"bi", "lso", "ado"}) {
+		t.Fatalf("stale selector repair commands=%v", commands)
+	}
+}
+
+func TestXrayProbeDoesNotReuseMissingActiveNodeOutbound(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	runtime.pool = healthPool{Outbounds: map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)}}
+	stale := "sb-urltest-europe-stale"
+	runtime.activeByNode["de"] = stale
+	runtime.loadedDynamic[stale] = true
+	installed := ""
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "lso":
+			if installed != "" {
+				return outboundTagsJSON(installed), nil
+			}
+			return outboundTagsJSON(), nil
+		case "ado":
+			installed = "sb-urltest-probe-" + runtime.dynamicDigest("de")
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	got, err := runtime.probeTag("de")
+	if err != nil || got != installed || got == stale || runtime.activeByNode["de"] != "" {
+		t.Fatalf("probe reused removed handler: got=%q installed=%q active=%q err=%v", got, installed, runtime.activeByNode["de"], err)
 	}
 }
 
@@ -294,10 +514,14 @@ func TestXraySelectorSwitchesBeforeRetiringPreviousHandler(t *testing.T) {
 	}
 	selected := ""
 	commands := make([]string, 0)
+	installed := make(map[string]bool)
 	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
 		commands = append(commands, args[1])
 		switch args[1] {
+		case "lso":
+			return installedOutboundTagsJSON(installed), nil
 		case "ado":
+			installed[runtime.dynamicTag("sb-urltest-europe-", "de")] = true
 			return nil, nil
 		case "bo":
 			selected = args[len(args)-1]
@@ -335,9 +559,13 @@ func TestPriorityServiceSelectorUsesDynamicProviderGeneration(t *testing.T) {
 		},
 	}
 	selected := ""
+	installed := make(map[string]bool)
 	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
 		switch args[1] {
+		case "lso":
+			return installedOutboundTagsJSON(installed), nil
 		case "ado":
+			installed[runtime.dynamicTag(prefix, "de")] = true
 			return nil, nil
 		case "bo":
 			selected = args[len(args)-1]
@@ -374,13 +602,16 @@ func TestPriorityServiceSelectorAdoptsColdStartDynamicProviderGeneration(t *test
 		if args[1] == "ado" || args[1] == "bo" {
 			t.Fatalf("restored selector must not be mutated: %v", args)
 		}
+		if args[1] == "lso" {
+			return outboundTagsJSON(wantTag), nil
+		}
 		return selectorInfo(wantTag), nil
 	}
 	if err := runtime.Select(selector, "de"); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(commands, []string{"bi"}) {
-		t.Fatalf("commands=%v want=[bi]", commands)
+	if !reflect.DeepEqual(commands, []string{"bi", "lso"}) {
+		t.Fatalf("commands=%v want=[bi lso]", commands)
 	}
 	if !runtime.loadedDynamic[wantTag] || runtime.activeByPolicy[selector] != wantTag {
 		t.Fatalf("restored handler was not adopted: loaded=%v active=%q", runtime.loadedDynamic, runtime.activeByPolicy[selector])
@@ -467,4 +698,23 @@ func selectorInfo(selected string) []byte {
 		line = "    1   " + selected + "\n"
 	}
 	return []byte("  - Selecting Override:\n" + line + "  - Selects:\n")
+}
+
+func outboundTagsJSON(tags ...string) []byte {
+	outbounds := make([]map[string]string, 0, len(tags))
+	for _, tag := range tags {
+		outbounds = append(outbounds, map[string]string{"tag": tag})
+	}
+	body, _ := json.Marshal(map[string]any{"outbounds": outbounds})
+	return body
+}
+
+func installedOutboundTagsJSON(installed map[string]bool) []byte {
+	tags := make([]string, 0, len(installed))
+	for tag, present := range installed {
+		if present {
+			tags = append(tags, tag)
+		}
+	}
+	return outboundTagsJSON(tags...)
 }

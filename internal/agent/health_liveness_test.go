@@ -114,7 +114,7 @@ func TestFailureClassControlsActivePathConfirmation(t *testing.T) {
 	}{
 		{name: "fatal network switches immediately", failure: probeFailureFatal, first: 1010, wantFirst: "nl", wantSecond: "nl"},
 		{name: "fatal TLS switches immediately", failure: probeFailureTLS, first: 1010, wantFirst: "nl", wantSecond: "nl"},
-		{name: "timeout needs immediate confirmation", failure: probeFailureTimeout, first: 1010, wantFirst: "nl", wantSecond: "nl"},
+		{name: "timeout needs next-cycle confirmation", failure: probeFailureTimeout, first: 1010, second: 1012, wantFirst: "de", wantSecond: "nl"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			c, runtime, item := livenessFixture(t, "priority")
@@ -132,8 +132,8 @@ func TestFailureClassControlsActivePathConfirmation(t *testing.T) {
 			if item.Selected != test.wantFirst {
 				t.Fatalf("first decision selected %q, want %q", item.Selected, test.wantFirst)
 			}
-			if test.failure == probeFailureTimeout && strings.Join(runtime.availabilityCalls, ",") != "de,de" {
-				t.Fatalf("timeout was not independently confirmed before failover: %v", runtime.availabilityCalls)
+			if test.failure == probeFailureTimeout && strings.Join(runtime.availabilityCalls, ",") != "de" {
+				t.Fatalf("timeout was repeated in the same cycle: %v", runtime.availabilityCalls)
 			}
 			if test.second == 0 {
 				return

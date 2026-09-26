@@ -31,6 +31,7 @@ type xraySelectorRuntime struct {
 	poolFileSignature string
 	xrayPID           int
 	loadedDynamic     map[string]bool
+	verifiedDynamic   map[string]time.Time
 	activeByPolicy    map[string]string
 	activeByNode      map[string]string
 	retiredByPolicy   map[string][]string
@@ -41,10 +42,14 @@ type xraySelectorRuntime struct {
 }
 
 func (runtime *xraySelectorRuntime) requestContext() context.Context {
+	ctx := context.Background()
 	if runtime.probeContext != nil {
-		return runtime.probeContext
+		ctx = runtime.probeContext
 	}
-	return context.Background()
+	if runtime.probeSelector != "" {
+		return backgroundXrayCommandContext(ctx)
+	}
+	return ctx
 }
 
 func (runtime *xraySelectorRuntime) probeSelectorName() string {
@@ -66,6 +71,7 @@ func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
 		opts:            opts,
 		command:         runXrayCommand,
 		loadedDynamic:   make(map[string]bool),
+		verifiedDynamic: make(map[string]time.Time),
 		activeByPolicy:  make(map[string]string),
 		activeByNode:    make(map[string]string),
 		retiredByPolicy: make(map[string][]string),
@@ -118,11 +124,16 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 	if pidChanged {
 		runtime.xrayPID = pid
 		runtime.loadedDynamic = make(map[string]bool)
+		runtime.verifiedDynamic = make(map[string]time.Time)
 		runtime.activeByPolicy = make(map[string]string)
 		runtime.activeByNode = make(map[string]string)
 		runtime.retiredByPolicy = make(map[string][]string)
 		runtime.selectorMembers = make(map[string]string)
 		runtime.probeRuntimeTag = ""
+	} else if contractChanged {
+		// A subscription generation can retire handlers without restarting Xray.
+		// Never carry an existence readback across that boundary.
+		runtime.verifiedDynamic = make(map[string]time.Time)
 	}
 	// Retry deferred handler removal during the ordinary health loop, even
 	// when the selected node remains stable after a transient Xray API error.
@@ -194,7 +205,17 @@ func (runtime *xraySelectorRuntime) Select(selector, member string) error {
 			// The cold-start helper restores the selected dynamic handler before
 			// the agent is admitted. Adopt that live handler instead of asking
 			// HandlerService to add the same deterministic tag a second time.
-			runtime.loadedDynamic[expected] = true
+			present, err := runtime.outboundPresent(expected)
+			if err != nil {
+				return err
+			}
+			if present {
+				runtime.loadedDynamic[expected] = true
+				runtime.verifiedDynamic[expected] = time.Now()
+			} else if err := runtime.ensureOutbound(member, expected); err != nil {
+				// The selector kept its override but its handler disappeared.
+				return err
+			}
 			runtimeMember = expected
 		} else {
 			var err error
@@ -254,6 +275,9 @@ func (runtime *xraySelectorRuntime) Current(selector string) (string, error) {
 				return candidate, nil
 			}
 			if member == runtime.dynamicTag(prefix, candidate) {
+				if err := runtime.ensureOutbound(candidate, member); err != nil {
+					return "", err
+				}
 				return candidate, nil
 			}
 		}
@@ -262,12 +286,23 @@ func (runtime *xraySelectorRuntime) Current(selector string) (string, error) {
 		// remain in the pool, so decode it before asking the controller to move.
 		for candidate := range runtime.pool.Outbounds {
 			if member == runtime.dynamicTag(prefix, candidate) {
+				if err := runtime.ensureOutbound(candidate, member); err != nil {
+					return "", err
+				}
 				return candidate, nil
 			}
 		}
 	}
 	for node, runtimeTag := range runtime.activeByNode {
 		if runtimeTag == member {
+			if runtime.pool.Outbounds[node] != nil && !runtime.isBase(node) {
+				if runtime.policyRuntimeTag(selector, node) != member {
+					return "", errors.New("Xray selected outbound belongs to an obsolete node generation")
+				}
+				if err := runtime.ensureOutbound(node, member); err != nil {
+					return "", err
+				}
+			}
 			return node, nil
 		}
 	}
@@ -376,7 +411,26 @@ func (runtime *xraySelectorRuntime) probeTag(nodeID string) (string, error) {
 		return nodeID, nil
 	}
 	if tag := runtime.activeByNode[nodeID]; tag != "" {
-		return tag, nil
+		if tag == nodeID {
+			return tag, nil
+		}
+		if runtime.loadedDynamic[tag] && time.Since(runtime.verifiedDynamic[tag]) < time.Second {
+			return tag, nil
+		}
+		present, err := runtime.outboundPresent(tag)
+		if err != nil {
+			return "", err
+		}
+		if present {
+			runtime.loadedDynamic[tag] = true
+			runtime.verifiedDynamic[tag] = time.Now()
+			return tag, nil
+		}
+		// A selector can outlive its HandlerService outbound. Probe the
+		// current subscription definition instead of reusing that stale tag.
+		delete(runtime.activeByNode, nodeID)
+		delete(runtime.loadedDynamic, tag)
+		delete(runtime.verifiedDynamic, tag)
 	}
 	if runtime.pool.Outbounds[nodeID] == nil {
 		return nodeID, nil
@@ -409,9 +463,24 @@ func (runtime *xraySelectorRuntime) dynamicDigest(nodeID string) string {
 }
 
 func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
-	if runtime.loadedDynamic[tag] {
-		return nil
+	repair := runtime.loadedDynamic[tag]
+	if repair {
+		if time.Since(runtime.verifiedDynamic[tag]) < time.Second {
+			return nil
+		}
+		present, err := runtime.outboundPresent(tag)
+		if err != nil {
+			return err
+		}
+		if present {
+			runtime.verifiedDynamic[tag] = time.Now()
+			return nil
+		}
+		delete(runtime.loadedDynamic, tag)
+		delete(runtime.verifiedDynamic, tag)
 	}
+	// A fresh tag needs only AddOutbound's success acknowledgement. Avoid two
+	// full handler listings per candidate during a parallel emergency batch.
 	var outbound map[string]any
 	if err := json.Unmarshal(runtime.pool.Outbounds[nodeID], &outbound); err != nil {
 		return err
@@ -442,8 +511,37 @@ func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
 	if commandErr != nil && !strings.Contains(strings.ToLower(string(output)), "already") {
 		return errors.New("Xray rejected dynamic outbound")
 	}
+	if repair || commandErr != nil {
+		present, err := runtime.outboundPresent(tag)
+		if err != nil || !present {
+			return errors.New("Xray dynamic outbound was not confirmed after add")
+		}
+	}
 	runtime.loadedDynamic[tag] = true
+	runtime.verifiedDynamic[tag] = time.Now()
 	return nil
+}
+
+func (runtime *xraySelectorRuntime) outboundPresent(tag string) (bool, error) {
+	output, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary,
+		"api", "lso", "--server="+runtime.opts.XrayAPIServer)
+	if err != nil {
+		return false, errors.New("Xray outbound list is unavailable")
+	}
+	var response struct {
+		Outbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"outbounds"`
+	}
+	if json.Unmarshal(output, &response) != nil || response.Outbounds == nil {
+		return false, errors.New("Xray outbound list is invalid")
+	}
+	for _, outbound := range response.Outbounds {
+		if outbound.Tag == tag {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (runtime *xraySelectorRuntime) removeOutbound(tag string) error {
@@ -458,6 +556,7 @@ func (runtime *xraySelectorRuntime) removeOutbound(tag string) error {
 		return errors.New("Xray outbound cleanup was not confirmed")
 	}
 	delete(runtime.loadedDynamic, tag)
+	delete(runtime.verifiedDynamic, tag)
 	for node, value := range runtime.activeByNode {
 		if value == tag {
 			delete(runtime.activeByNode, node)
@@ -492,7 +591,7 @@ func (runtime *xraySelectorRuntime) ProbeAvailability(candidate string) probeEvi
 }
 
 func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly bool) probeEvidence {
-	evidence := probeEvidence{Targets: make(map[string]*int)}
+	evidence := probeEvidence{Targets: make(map[string]*int), TargetFailures: make(map[string]probeFailureClass)}
 	// Reverse bridge outbounds exist only while the matching client has an
 	// online session. Selecting an offline bridge is accepted by the balancer
 	// API but every probe then reaches a non-existent outbound and Xray logs a
@@ -507,7 +606,7 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 		evidence.Failure = classifyProbeError(err)
 		return evidence
 	}
-	failure := probeFailureNone
+	failures := []probeFailureClass{}
 	for _, target := range healthTargets {
 		timeout := 5 * time.Second
 		if availabilityOnly {
@@ -519,9 +618,16 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 		if err != nil {
 			evidence.Targets[target.label] = nil
 			classified := classifyProbeError(err)
-			failure = strongerProbeFailure(failure, classified)
-			if failure == probeFailureFatal || failure == probeFailureTLS ||
-				(availabilityOnly && (classified == probeFailureTimeout || classified == probeFailureDNS)) {
+			evidence.TargetFailures[target.label] = classified
+			failures = append(failures, classified)
+			// A single public HTTPS target can fail independently of the VLESS
+			// node. Confirm an availability failure against another origin before
+			// the controller is allowed to move the live selector.
+			if availabilityOnly && len(failures) >= 2 {
+				break
+			}
+			if !availabilityOnly && len(failures) >= 2 &&
+				(classifyTargetFailures(failures) == probeFailureFatal || classifyTargetFailures(failures) == probeFailureTLS) {
 				break
 			}
 		} else {
@@ -538,12 +644,38 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 		evidence.OK = true
 		evidence.DelayMS = &value
 	} else {
-		if failure == probeFailureNone {
-			failure = probeFailureTransient
-		}
-		evidence.Failure = failure
+		evidence.Failure = classifyTargetFailures(failures)
 	}
 	return evidence
+}
+
+func classifyTargetFailures(failures []probeFailureClass) probeFailureClass {
+	if len(failures) == 0 {
+		return probeFailureTransient
+	}
+	first := failures[0]
+	allSame := true
+	for _, failure := range failures[1:] {
+		if failure != first {
+			allSame = false
+		}
+	}
+	if allSame {
+		return first
+	}
+	// Mixed errors do not prove a fatal node-level failure. In particular a
+	// certificate error from one public target must not bypass underlay checks.
+	for _, failure := range failures {
+		if failure == probeFailureTimeout {
+			return probeFailureTimeout
+		}
+	}
+	for _, failure := range failures {
+		if failure == probeFailureDNS {
+			return probeFailureDNS
+		}
+	}
+	return probeFailureTransient
 }
 
 func classifyProbeError(err error) probeFailureClass {
@@ -584,29 +716,6 @@ func classifyProbeError(err error) probeFailureClass {
 	default:
 		return probeFailureTransient
 	}
-}
-
-func strongerProbeFailure(current, candidate probeFailureClass) probeFailureClass {
-	rank := func(value probeFailureClass) int {
-		switch value {
-		case probeFailureTLS:
-			return 5
-		case probeFailureFatal:
-			return 4
-		case probeFailureDNS:
-			return 3
-		case probeFailureTimeout:
-			return 2
-		case probeFailureTransient:
-			return 1
-		default:
-			return 0
-		}
-	}
-	if rank(candidate) > rank(current) {
-		return candidate
-	}
-	return current
 }
 
 func (runtime *xraySelectorRuntime) UnderlayStatus() underlayEvidence {

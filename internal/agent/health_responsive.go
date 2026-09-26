@@ -28,6 +28,9 @@ type responsiveSelectorRuntime struct {
 	parallelEnabled bool
 	interrupted     error
 	generation      string
+	currentPool     healthPool
+	signals         <-chan xrayFailureSignal
+	acceptSignal    func(xrayFailureSignal) bool
 }
 
 func (runtime *responsiveSelectorRuntime) Reload() (healthPool, bool, error) {
@@ -42,6 +45,7 @@ func (runtime *responsiveSelectorRuntime) Reload() (healthPool, bool, error) {
 		return pool, reset, errHealthYield
 	}
 	runtime.generation = stamp
+	runtime.currentPool = pool
 	return pool, reset, err
 }
 
@@ -85,6 +89,10 @@ func generationStamp(paths []string) string {
 // contract. Route-list eligibility edits only replace the health pool; waking
 // the existing agent avoids restarting Xray, the watchdog, or ruleset workers.
 func waitForGenerationChange(ctx context.Context, timeout time.Duration, paths []string, pollInterval time.Duration) bool {
+	return waitForHealthWake(ctx, timeout, paths, pollInterval, nil, nil)
+}
+
+func waitForHealthWake(ctx context.Context, timeout time.Duration, paths []string, pollInterval time.Duration, signals <-chan xrayFailureSignal, accept func(xrayFailureSignal) bool) bool {
 	if timeout <= 0 {
 		select {
 		case <-ctx.Done():
@@ -111,6 +119,14 @@ func waitForGenerationChange(ctx context.Context, timeout time.Duration, paths [
 			if generationStamp(paths) != stamp {
 				return true
 			}
+		case signal, ok := <-signals:
+			if !ok {
+				signals = nil
+				continue
+			}
+			if accept != nil && accept(signal) {
+				return true
+			}
 		}
 	}
 }
@@ -119,6 +135,10 @@ func waitForGenerationChange(ctx context.Context, timeout time.Duration, paths [
 // a 15-second download or a whole multi-node batch. Always join the worker before
 // starting another job, including on Apply, shutdown and confirmed outage.
 func awaitProbeJob(ctx context.Context, cadence time.Duration, check func() error, operation func(context.Context) probeJobResult) probeJobResult {
+	return awaitProbeJobWithSignals(ctx, cadence, check, operation, nil, nil)
+}
+
+func awaitProbeJobWithSignals(ctx context.Context, cadence time.Duration, check func() error, operation func(context.Context) probeJobResult, signals <-chan xrayFailureSignal, accept func(xrayFailureSignal) bool) probeJobResult {
 	jobContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan probeJobResult, 1)
@@ -139,6 +159,18 @@ func awaitProbeJob(ctx context.Context, cadence time.Duration, check func() erro
 				<-done
 				return probeJobResult{err: err}
 			}
+		case signal, ok := <-signals:
+			if !ok {
+				signals = nil
+				continue
+			}
+			if accept != nil && accept(signal) {
+				if err := check(); err != nil {
+					cancel()
+					<-done
+					return probeJobResult{err: err}
+				}
+			}
 		}
 	}
 }
@@ -155,13 +187,13 @@ func (runtime *responsiveSelectorRuntime) run(operation func() probeJobResult) p
 		}
 		return runtime.check()
 	}
-	result := awaitProbeJob(runtime.ctx, time.Second, check, func(ctx context.Context) probeJobResult {
+	result := awaitProbeJobWithSignals(runtime.ctx, time.Second, check, func(ctx context.Context) probeJobResult {
 		runtime.background.probeContext = ctx
 		if _, _, err := runtime.background.Reload(); err != nil {
 			return probeJobResult{err: err, abort: true}
 		}
 		return operation()
-	})
+	}, runtime.signals, runtime.acceptSignal)
 	if generationStamp(runtime.generationPaths) != stamp || runtime.ctx.Err() != nil {
 		result.err = errHealthYield
 	}
@@ -198,8 +230,8 @@ func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates [
 		for _, candidate := range candidates {
 			evidence := runtime.selectorRuntime.ProbeAvailability(candidate)
 			measured[candidate] = evidence
-			if onResult != nil {
-				onResult(candidate, evidence)
+			if onResult != nil && onResult(candidate, evidence) {
+				break
 			}
 		}
 		return measured
@@ -236,7 +268,15 @@ func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates [
 				return
 			}
 			for candidate := range jobs {
-				results <- result{candidate: candidate, evidence: lane.ProbeAvailability(candidate)}
+				if ctx.Err() != nil {
+					return
+				}
+				evidence := lane.ProbeAvailability(candidate)
+				select {
+				case results <- result{candidate: candidate, evidence: evidence}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
@@ -253,8 +293,10 @@ func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates [
 		case value := <-results:
 			remaining--
 			measured[value.candidate] = value.evidence
-			if onResult != nil {
-				onResult(value.candidate, value.evidence)
+			if onResult != nil && onResult(value.candidate, value.evidence) {
+				cancel()
+				<-done
+				return measured
 			}
 		case <-ticker.C:
 			if generationStamp(runtime.generationPaths) != stamp {

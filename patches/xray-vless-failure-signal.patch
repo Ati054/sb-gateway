@@ -1,0 +1,152 @@
+diff --git a/proxy/vless/outbound/outbound.go b/proxy/vless/outbound/outbound.go
+--- a/proxy/vless/outbound/outbound.go
++++ b/proxy/vless/outbound/outbound.go
+@@ -4,5 +4,8 @@ import (
+ 	"bytes"
+ 	"context"
+ 	gotls "crypto/tls"
+ 	"encoding/base64"
++	"encoding/json"
++	stdnet "net"
++	"os"
+ 	"reflect"
+@@ -61,4 +64,56 @@ type Handler struct {
+ 	preConns chan *ConnExpire
+ }
++
++// A fixed-size limiter keeps a broken active server from creating a socket
++// operation for every client connection. Hash collisions only defer hints;
++// independent periodic HTTPS checks remain the correctness fallback.
++type sbFailureSlot struct {
++	sync.Mutex
++	last time.Time
++}
++
++var sbFailureSlots [64]sbFailureSlot
++
++// This best-effort local hint never selects an outbound. The gateway confirms
++// the active path and its underlay with independent HTTPS probes. No target
++// address, credentials, or user data are sent across the socket.
++func signalSBServerFailure(ctx context.Context, tag, stage string) {
++	if inbound := session.InboundFromContext(ctx); inbound != nil && strings.HasPrefix(inbound.Tag, "outbound-health-") {
++		return
++	}
++	path := os.Getenv("SB_XRAY_FAILURE_SOCKET")
++	if path == "" || tag == "" {
++		return
++	}
++	index := uint64(1469598103934665603)
++	for i := range len(tag) {
++		index = (index ^ uint64(tag[i])) * 1099511628211
++	}
++	slot := &sbFailureSlots[index%uint64(len(sbFailureSlots))]
++	now := time.Now()
++	slot.Lock()
++	if now.Sub(slot.last) < 250*time.Millisecond {
++		slot.Unlock()
++		return
++	}
++	slot.last = now
++	slot.Unlock()
++	message, err := json.Marshal(struct {
++		Version int    `json:"v"`
++		PID     int    `json:"pid"`
++		Tag     string `json:"tag"`
++		Stage   string `json:"stage"`
++	}{1, os.Getpid(), tag, stage})
++	if err != nil || len(message) > 512 {
++		return
++	}
++	connection, err := stdnet.DialTimeout("unixgram", path, 10*time.Millisecond)
++	if err != nil {
++		return
++	}
++	defer connection.Close()
++	_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
++	_, _ = connection.Write(message)
++}
+ 
+ type ConnExpire struct {
+@@ -193,4 +248,5 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer int
+ 			var err error
+ 			conn, err = dialer.Dial(ctx, rec.Destination)
+ 			if err != nil {
++				signalSBServerFailure(ctx, ob.Tag, "dial")
+ 				return err
+@@ -210,3 +266,4 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer int
+ 		var err error
+ 		if conn, err = h.encryption.Handshake(conn); err != nil {
++			signalSBServerFailure(ctx, ob.Tag, "handshake")
+ 			return errors.New("ML-KEM-768 handshake failed").Base(err).AtInfo()
+diff --git a/proxy/vless/outbound/failure_signal_test.go b/proxy/vless/outbound/failure_signal_test.go
+new file mode 100644
+--- /dev/null
++++ b/proxy/vless/outbound/failure_signal_test.go
+@@ -0,0 +1,67 @@
++package outbound
++
++import (
++	"context"
++	"encoding/json"
++	"net"
++	"os"
++	"path/filepath"
++	"runtime"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/session"
++)
++
++func TestSBServerFailureSignalIsLocalAndMinimal(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("unixgram is validated on the Linux target")
++	}
++	path := filepath.Join(t.TempDir(), "failures.sock")
++	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	t.Setenv("SB_XRAY_FAILURE_SOCKET", path)
++	signalSBServerFailure(context.Background(), "selected-tag", "dial")
++	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	var buffer [513]byte
++	count, _, err := listener.ReadFromUnix(buffer[:])
++	if err != nil {
++		t.Fatal(err)
++	}
++	var message map[string]any
++	if err := json.Unmarshal(buffer[:count], &message); err != nil {
++		t.Fatal(err)
++	}
++	if len(message) != 4 || message["v"] != float64(1) || message["pid"] != float64(os.Getpid()) || message["tag"] != "selected-tag" || message["stage"] != "dial" {
++		t.Fatalf("unexpected failure signal: %v", message)
++	}
++	signalSBServerFailure(context.Background(), "selected-tag", "dial")
++	if err := listener.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := listener.ReadFromUnix(buffer[:]); err == nil {
++		t.Fatal("repeated traffic failure bypassed the rate limit")
++	}
++	probe := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: "outbound-health-probe"})
++	signalSBServerFailure(probe, "probe-only-tag", "dial")
++	if err := listener.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := listener.ReadFromUnix(buffer[:]); err == nil {
++		t.Fatal("background probe created a traffic failure signal")
++	}
++}
++
++func TestSBServerFailureSignalNeverBlocksWithoutListener(t *testing.T) {
++	t.Setenv("SB_XRAY_FAILURE_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
++	start := time.Now()
++	signalSBServerFailure(context.Background(), "selected-tag", "dial")
++	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
++		t.Fatalf("missing listener delayed traffic by %s", elapsed)
++	}
++}

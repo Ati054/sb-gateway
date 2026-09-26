@@ -95,7 +95,7 @@ type Screen =
   | "operations"
   | "settings";
 
-type RuntimeLogSource = "error" | "process" | "system" | "nginx" | "lifecycle";
+type RuntimeLogSource = "error" | "process" | "system" | "routing" | "nginx" | "lifecycle";
 
 function runtimeLogTabId(source: RuntimeLogSource): string {
   return `gateway-log-tab-${source}`;
@@ -5191,7 +5191,7 @@ function RoutingMonitorSettings({
           <div className="routing-monitor-grid">
             {numberField("active_liveness_interval_seconds", "Доступность активного узла, сек.", 2, 30)}
             {numberField("failure_retry_interval_seconds", "Повтор после ошибки, сек.", 1, 10)}
-            {numberField("block_recovery_interval_seconds", "Поиск выхода из блокировки, сек.", 5, 60)}
+            {numberField("block_recovery_interval_seconds", "Повтор других узлов, сек.", 5, 60)}
             {numberField("active_quality_interval_seconds", "Качество активного узла, сек.", 10, 3600)}
             {numberField("reserve_check_interval_seconds", "Проверка резервов, сек.", 10, 86400)}
             {numberField("full_scan_interval_seconds", "Полный обход, сек.", 10, 86400)}
@@ -5206,7 +5206,15 @@ function RoutingMonitorSettings({
                 <option value={1}>1</option>
                 <option value={2}>2</option>
                 <option value={3}>3</option>
+                <option value={4}>4</option>
+                <option value={5}>5</option>
+                <option value={6}>6</option>
+                <option value={7}>7</option>
+                <option value={8}>8</option>
+                <option value={9}>9</option>
+                <option value={10}>10</option>
               </select>
+              <small>{tr("При аварии — одновременно; активный пул не меняется.")}</small>
             </label>
           </div>
           <div className="routing-monitor-actions">
@@ -5428,7 +5436,7 @@ function RoutingInfrastructureSettings({
       ["active_quality_interval_seconds", 10, 3600],
       ["reserve_check_interval_seconds", 10, 86400],
       ["full_scan_interval_seconds", 10, 86400],
-      ["probe_batch_size", 0, 3],
+      ["probe_batch_size", 0, 10],
     ];
     if (monitorRanges.some(([key, minimum, maximum]) =>
       !Number.isInteger(routingMonitor[key]) || routingMonitor[key] < minimum || routingMonitor[key] > maximum
@@ -9162,6 +9170,9 @@ function Operations({
                 </button>
                 <button id="gateway-log-tab-system" type="button" role="tab" aria-controls="xray-log-panel" aria-selected={xrayLogSource === "system"} className={xrayLogSource === "system" ? "is-active" : ""} onClick={() => setXrayLogSource("system")}>
                   {tr("Control plane")}
+                </button>
+                <button id="gateway-log-tab-routing" type="button" role="tab" aria-controls="xray-log-panel" aria-selected={xrayLogSource === "routing"} className={xrayLogSource === "routing" ? "is-active" : ""} onClick={() => setXrayLogSource("routing")}>
+                  {tr("Маршруты")}
                 </button>
                 <button id="gateway-log-tab-nginx" type="button" role="tab" aria-controls="xray-log-panel" aria-selected={xrayLogSource === "nginx"} className={xrayLogSource === "nginx" ? "is-active" : ""} onClick={() => setXrayLogSource("nginx")}>
                   nginx
