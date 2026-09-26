@@ -134,6 +134,37 @@ func TestHealthPoolPublishesSafeTransportMetadata(t *testing.T) {
 	}
 }
 
+func TestHealthPoolFingerprintTracksOutboundNotDisplayName(t *testing.T) {
+	config := map[string]any{"policies": []any{map[string]any{"id": "test", "enabled": true, "mode": "priority", "selection_order": []any{"country:PL"}}}}
+	node := map[string]any{"id": "stable-id", "subscription_id": "source", "label": "Old", "country": "PL", "protocol": "vless", "server": "192.0.2.10", "server_port": 443}
+	outbound := map[string]any{"tag": "stable-id", "protocol": "vless", "settings": map[string]any{"port": 443, "uuid": "secret-uuid"}}
+	read := func() (string, map[string]any) {
+		t.Helper()
+		body, err := BuildXrayHealthPool(config, []map[string]any{node}, map[string]any{"outbounds": []any{outbound}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pool map[string]any
+		if err := json.Unmarshal(body, &pool); err != nil {
+			t.Fatal(err)
+		}
+		meta := objectValue(objectValue(objectValue(pool["health_policies"])["test"])["nodes"])
+		return textValue(objectValue(meta["stable-id"])["fingerprint"]), objectValue(objectValue(pool["dial_targets"])["stable-id"])
+	}
+	before, target := read()
+	if len(before) != 64 || target["address"] != "192.0.2.10" || target["port"] != float64(443) {
+		t.Fatalf("missing endpoint metadata: fingerprint=%q target=%v", before, target)
+	}
+	node["label"] = "New cosmetic name"
+	if renamed, _ := read(); renamed != before {
+		t.Fatal("label change altered endpoint fingerprint")
+	}
+	outbound["settings"] = map[string]any{"port": 8443, "uuid": "secret-uuid"}
+	if changed, _ := read(); changed == before {
+		t.Fatal("outbound port change retained old fingerprint")
+	}
+}
+
 func TestHealthPoolMovesProviderOutboundsToDynamicContract(t *testing.T) {
 	config := map[string]any{"policies": []any{map[string]any{
 		"id": "europe", "enabled": true, "mode": "priority", "selection_order": []any{"country:DE"},

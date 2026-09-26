@@ -98,4 +98,6 @@ test("system log requests expose only a bounded fixed source", async () => {
 
   await getSystemLogs("lifecycle", 50_000);
   assert.equal(requestedURL, "/api/v1/runtime/system-logs?source=lifecycle&lines=500");
+  await getSystemLogs("routing", 300);
+  assert.equal(requestedURL, "/api/v1/runtime/system-logs?source=routing&lines=300");
 });

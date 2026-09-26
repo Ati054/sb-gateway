@@ -40,3 +40,21 @@ func TestSystemLogsExposeOnlyFixedBoundedSources(t *testing.T) {
 		t.Fatalf("custom path accepted: %d %s", invalid.Code, invalid.Body.String())
 	}
 }
+
+func TestRoutingLogShowsOnlyRecentHealthEvents(t *testing.T) {
+	server := newTestServer(t)
+	cookie, _ := bootstrapSession(t, server)
+	path := filepath.Join(t.TempDir(), "control-plane.log")
+	body := "agent: route-health {\"event\":\"probe-failed\",\"policy\":\"pc\"}\n" +
+		strings.Repeat("ordinary control-plane line\n", 700) +
+		"agent: route-health {\"event\":\"switch\",\"policy\":\"All\"}\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server.opts.Runtime.ControlPlaneLog = path
+	response := performRequest(t, server, http.MethodGet, apiPrefix+"/runtime/system-logs?source=routing&lines=2", nil, nil, cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "probe-failed") ||
+		!strings.Contains(response.Body.String(), "switch") || strings.Contains(response.Body.String(), "ordinary control-plane line") {
+		t.Fatalf("routing log filter: %d %s", response.Code, response.Body.String())
+	}
+}

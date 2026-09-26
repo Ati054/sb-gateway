@@ -22,7 +22,6 @@ const (
 	outageRetryInterval    = 15 * time.Second
 	failureRetryInterval   = 2 * time.Second
 	activeLivenessInterval = 3 * time.Second
-	outageProbeBatch       = 3
 )
 
 var healthTargets = []struct {
@@ -42,6 +41,7 @@ type healthPool struct {
 	PolicyPrefixes   map[string]string               `json:"policy_prefixes"`
 	BaseOutboundTags []string                        `json:"base_outbound_tags"`
 	Outbounds        map[string]json.RawMessage      `json:"outbounds"`
+	DialTargets      map[string]healthDialTarget     `json:"dial_targets"`
 }
 
 type healthPolicyContract struct {
@@ -63,6 +63,7 @@ type healthNode struct {
 	Country        string `json:"country"`
 	Protocol       string `json:"protocol,omitempty"`
 	Transport      string `json:"transport,omitempty"`
+	Fingerprint    string `json:"fingerprint,omitempty"`
 }
 
 type healthPolicy struct {
@@ -129,6 +130,7 @@ type policyHealthState struct {
 	HistoryDays            map[string]map[string]dayBucket   `json:"history_days"`
 	CooldownUntil          float64                           `json:"cooldown_until"`
 	LastProbeAt            map[string]float64                `json:"last_probe_at"`
+	LastGoodAt             map[string]float64                `json:"last_good_at,omitempty"`
 	SpeedSamplesBPS        map[string][]int64                `json:"speed_samples_bps"`
 	LastSpeedProbeAt       map[string]float64                `json:"last_speed_probe_at"`
 	CandidateSignature     string                            `json:"candidate_signature"`
@@ -177,6 +179,8 @@ type policyHealthState struct {
 	UnderlayFailure        string                            `json:"underlay_failure,omitempty"`
 	UnderlayCheckedAt      string                            `json:"underlay_checked_at,omitempty"`
 	OutageProbePending     bool                              `json:"-"`
+	LastPreflightAt        float64                           `json:"-"`
+	PreflightClosed        map[string]bool                   `json:"-"`
 }
 
 type healthSample struct {
@@ -241,7 +245,10 @@ type probeEvidence struct {
 	OK      bool
 	DelayMS *int
 	Targets map[string]*int
-	Failure probeFailureClass
+	// TargetFailures contains only fixed health-target labels and failure classes,
+	// never endpoint URLs or response bodies.
+	TargetFailures map[string]probeFailureClass
+	Failure        probeFailureClass
 }
 
 type selectorRuntime interface {
@@ -262,10 +269,19 @@ type healthController struct {
 	stateLoaded    bool
 	regularNext    map[string]time.Time
 	livenessAt     map[string]time.Time
+	forceLiveness  map[string]bool
+	lastSignalAt   map[string]time.Time
 	yielded        bool
+	eventSink      func(healthEvent)
 }
 
 func runHealth(ctx context.Context, opts Options) error {
+	signals, closeSignals, signalErr := listenXrayFailureSignals(ctx, opts.XrayFailureSocket)
+	if signalErr != nil {
+		log.Printf("agent: Xray failure signals unavailable; periodic health checks remain active: %v", signalErr)
+	} else {
+		defer closeSignals()
+	}
 	primary := newXraySelectorRuntime(opts)
 	primary.probeContext = ctx
 	controller := &healthController{
@@ -278,17 +294,21 @@ func runHealth(ctx context.Context, opts Options) error {
 	background := newXraySelectorRuntime(backgroundOptions)
 	background.probeSelector = "outbound-health-background"
 	backgrounds := []*xraySelectorRuntime{background}
-	for index, tag := range []string{"outbound-health-background-2", "outbound-health-background-3"} {
+	for index := 2; index <= 10; index++ {
 		laneOptions := opts
-		laneOptions.ProbeURL = fmt.Sprintf("http://127.0.0.1:%d", 19084+index)
+		laneOptions.ProbeURL = fmt.Sprintf("http://127.0.0.1:%d", 19082+index)
 		lane := newXraySelectorRuntime(laneOptions)
-		lane.probeSelector = tag
+		lane.probeSelector = fmt.Sprintf("outbound-health-background-%d", index)
 		backgrounds = append(backgrounds, lane)
 	}
 	controller.runtime = &responsiveSelectorRuntime{
 		selectorRuntime: primary, background: background, backgrounds: backgrounds, ctx: ctx,
 		generationPaths: []string{opts.HealthPoolFile, opts.XrayReadyFile},
 		check:           func() error { return controller.checkDuringProbe(time.Now(), primary.pool) },
+		signals:         signals,
+		acceptSignal: func(signal xrayFailureSignal) bool {
+			return controller.acceptXrayFailureSignal(time.Now(), signal, primary)
+		},
 	}
 	if !wait(ctx, 5*time.Second) {
 		return nil
@@ -302,7 +322,10 @@ func runHealth(ctx context.Context, opts Options) error {
 		} else if err := publishHotRuntimeReady(opts); err != nil {
 			log.Printf("agent: publish hot runtime readiness: %v", err)
 		}
-		if !waitForGenerationChange(ctx, controller.nextInterval(), []string{opts.HealthPoolFile, opts.XrayReadyFile}, 500*time.Millisecond) {
+		if !waitForHealthWake(ctx, controller.nextInterval(), []string{opts.HealthPoolFile, opts.XrayReadyFile}, 500*time.Millisecond, signals,
+			func(signal xrayFailureSignal) bool {
+				return controller.acceptXrayFailureSignal(time.Now(), signal, primary)
+			}) {
 			return nil
 		}
 	}
@@ -343,7 +366,8 @@ func (controller *healthController) nextInterval() time.Duration {
 		}
 		if item.Selected == "block" {
 			blockInterval := blockRecovery
-			if item.OutageProbePending && failureRetry < blockInterval {
+			eligible := withoutClosedCandidates(strings.Split(item.CandidateSignature, "\n"), item.PreflightClosed)
+			if (item.OutageProbePending || (len(eligible) > 0 && blockedRecoveryHasHistory(item))) && failureRetry < blockInterval {
 				blockInterval = failureRetry
 			}
 			if interval > blockInterval {
@@ -365,15 +389,66 @@ func configuredHealthDuration(seconds int, fallback time.Duration) time.Duration
 	return time.Duration(seconds) * time.Second
 }
 
-// Walk the whole pool fairly, including nodes outside the regular shortlist.
-// LastProbeAt already persists this order; no second queue/cache is needed.
+// In a blocked route, recheck recently working nodes without waiting for an
+// entire failed sweep to age out. Reserve a lane for the oldest eligible node
+// so a large subscription cannot starve candidates outside the former pool.
 func outageProbeTargets(now time.Time, candidates []string, item *policyHealthState, p effectivePolicySettings) []string {
-	result := make([]string, 0, minInt(p.batch, outageProbeBatch))
-	interval := minInt(p.backup, p.blockRecovery)
+	result := make([]string, 0, p.batch)
+	if cap(result) == 0 {
+		return result
+	}
+	interval := p.blockRecovery
+	if item.Selected != "block" {
+		interval = minInt(p.backup, p.blockRecovery)
+	}
+	if item.Selected == "block" && blockedRecoveryHasHistory(item) {
+		// Keep recent working paths warm, but give a large emergency batch
+		// enough lanes to discover never-tested subscription nodes promptly.
+		hotLimit := minInt(cap(result)-1, maxInt(2, cap(result)/3))
+		// A one-slot configuration alternates lanes only when an ordinary
+		// candidate is due; otherwise the fast lane keeps its whole slot.
+		if cap(result) == 1 {
+			fairDue := false
+			for _, candidate := range candidates {
+				if item.LastProbeAt[candidate] == 0 || float64(now.Unix())-item.LastProbeAt[candidate] >= float64(interval) {
+					fairDue = true
+					break
+				}
+			}
+			if !fairDue || (now.Unix()/int64(maxInt(p.failureRetry, 1)))%2 == 0 {
+				hotLimit = 1
+			}
+		}
+		lastWorking := ""
+		if item.LastWorkingSelection != nil &&
+			item.LastWorkingSelection.CandidateSignature == item.CandidateSignature &&
+			item.LastWorkingSelection.Mode == item.Mode {
+			lastWorking = item.LastWorkingSelection.Selected
+		}
+		for len(result) < hotLimit {
+			oldest := ""
+			for _, candidate := range candidates {
+				if (item.LastGoodAt[candidate] <= 0 && candidate != lastWorking) ||
+					contains(result, candidate) ||
+					float64(now.Unix())-item.LastProbeAt[candidate] < float64(p.failureRetry) {
+					continue
+				}
+				if oldest == "" || item.LastProbeAt[candidate] < item.LastProbeAt[oldest] ||
+					(item.LastProbeAt[candidate] == item.LastProbeAt[oldest] && item.LastGoodAt[candidate] > item.LastGoodAt[oldest]) {
+					oldest = candidate
+				}
+			}
+			if oldest == "" {
+				break
+			}
+			result = append(result, oldest)
+		}
+	}
 	for len(result) < cap(result) {
 		oldest := ""
 		for _, candidate := range candidates {
-			if contains(result, candidate) || float64(now.Unix())-item.LastProbeAt[candidate] < float64(interval) {
+			if contains(result, candidate) ||
+				(item.LastProbeAt[candidate] != 0 && float64(now.Unix())-item.LastProbeAt[candidate] < float64(interval)) {
 				continue
 			}
 			if oldest == "" || item.LastProbeAt[candidate] < item.LastProbeAt[oldest] {
@@ -386,6 +461,12 @@ func outageProbeTargets(now time.Time, candidates []string, item *policyHealthSt
 		result = append(result, oldest)
 	}
 	return result
+}
+
+func blockedRecoveryHasHistory(item *policyHealthState) bool {
+	return (item.LastWorkingSelection != nil &&
+		item.LastWorkingSelection.Mode == item.Mode &&
+		item.LastWorkingSelection.CandidateSignature == item.CandidateSignature) || len(item.LastGoodAt) > 0
 }
 
 func (controller *healthController) Tick(now time.Time) error {
@@ -442,8 +523,11 @@ func (controller *healthController) Tick(now time.Time) error {
 			item = newPolicyHealthState()
 		}
 		controller.state[policyID] = item
+		beforeSelected, beforeSwitchAt := item.Selected, item.LastSwitchAt
 		var err error
-		if !controller.warmStarted[policyID] || !now.Before(controller.regularNext[policyID]) || item.Selected == "block" {
+		if !controller.warmStarted[policyID] ||
+			(!controller.forceLiveness[policyID] && !now.Before(controller.regularNext[policyID])) || item.Selected == "block" {
+			delete(controller.forceLiveness, policyID)
 			err = controller.tickPolicy(now, policyID, contract, item)
 			if !errors.Is(err, errHealthYield) {
 				controller.regularNext[policyID] = now.Add(controller.regularInterval(contract))
@@ -466,6 +550,11 @@ func (controller *healthController) Tick(now time.Time) error {
 			item.RuntimeObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			failures = append(failures, fmt.Errorf("policy %s: %w", policyID, err))
 			dirty = true
+		}
+		if item.RuntimeConfirmed && item.Selected != beforeSelected && item.LastSwitchAt != beforeSwitchAt {
+			controller.emitHealthEvent(healthEvent{At: item.LastSwitchAt, Event: "switch", Policy: policyID,
+				From: beforeSelected, To: item.Selected, Reason: item.LastSwitchReason,
+				Failure: probeFailureClass(item.FailureClass[beforeSelected])})
 		}
 		managed[policyID] = item
 		if controller.yielded {
@@ -499,18 +588,25 @@ func newPolicyHealthState() *policyHealthState {
 	return &policyHealthState{
 		Failures: make(map[string]int), AvailabilityFailures: make(map[string]int), Recoveries: make(map[string]int),
 		Samples: make(map[string][]healthSample), DailySamples: make(map[string][]healthSample), HistoryDays: make(map[string]map[string]dayBucket),
-		LastProbeAt: make(map[string]float64), SpeedSamplesBPS: make(map[string][]int64), LastSpeedProbeAt: make(map[string]float64),
+		LastProbeAt: make(map[string]float64), LastGoodAt: make(map[string]float64),
+		SpeedSamplesBPS: make(map[string][]int64), LastSpeedProbeAt: make(map[string]float64),
 		FailureClass: make(map[string]string),
 	}
 }
 
 func (controller *healthController) tickPolicy(now time.Time, policyID string, contract healthPolicyContract, item *policyHealthState) error {
 	ensureHealthMaps(item)
+	candidates := uniqueCandidates(contract.Candidates)
+	changedOutbounds := invalidateChangedOutboundHealth(item, candidates, contract.Nodes)
+	if len(changedOutbounds) > 0 {
+		item.LastPreflightAt = 0
+		item.PreflightClosed = nil
+		item.ScanQueue = uniqueCandidates(append(changedOutbounds, item.ScanQueue...))
+	}
 	warm := !controller.warmStarted[policyID]
 	// Preserve confirmed legacy history before a transient API error can clear it.
 	rememberWorkingSelection(contract, item)
 	previousSelected, previousConfirmed := item.RuntimeSelected, item.RuntimeConfirmed
-	candidates := uniqueCandidates(contract.Candidates)
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -605,12 +701,23 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	protectRestoredSelection(now, selected, contract, item, p, warm)
 	// Publish confirmed membership before slow quality/speed probes. This is
 	// one extra atomic write on startup/change, not another polling cache.
-	if !controller.warmStarted[policyID] || !previousConfirmed || previousSelected != item.RuntimeSelected || item.CandidateSignature != signature {
+	if !controller.warmStarted[policyID] || !previousConfirmed || previousSelected != item.RuntimeSelected || item.CandidateSignature != signature || len(changedOutbounds) > 0 {
 		if err := writeJSONAtomic(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
 			return err
 		}
 	}
 	if item.CandidateSignature != signature {
+		item.LastPreflightAt = 0
+		item.PreflightClosed = nil
+		activeCandidates := make(map[string]bool, len(candidates))
+		for _, candidate := range candidates {
+			activeCandidates[candidate] = true
+		}
+		for candidate := range item.LastGoodAt {
+			if !activeCandidates[candidate] {
+				delete(item.LastGoodAt, candidate)
+			}
+		}
 		item.ScanQueue = append([]string(nil), candidates...)
 		item.NextFullScanAt = float64(now.Unix()) + float64(p.fullScan)
 	} else if len(item.ScanQueue) == 0 && float64(now.Unix()) >= item.NextFullScanAt {
@@ -668,12 +775,17 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if selected != "block" {
 			emergency.backup = minInt(p.backup, p.failureRetry)
 		}
-		probeTargets = outageProbeTargets(now, candidates, item, emergency)
+		probeTargets = controller.emergencyTargets(now, candidates, item, emergency)
 	} else if !emergencySwitched {
 		if warm {
 			probeTargets = append(probeTargets, selected)
-			for _, candidate := range candidates {
+			for _, candidate := range changedOutbounds {
 				if candidate != selected && len(probeTargets) < p.batch {
+					probeTargets = append(probeTargets, candidate)
+				}
+			}
+			for _, candidate := range candidates {
+				if candidate != selected && !contains(probeTargets, candidate) && len(probeTargets) < p.batch {
 					probeTargets = append(probeTargets, candidate)
 				}
 			}
@@ -742,10 +854,18 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if candidate == selected && !measured[candidate].OK {
 			item.FailureClass[selected] = string(measured[candidate].Failure)
 			if controller.suppressForUnderlayFailure(now, measured[candidate], item) {
+				controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID, Node: selected,
+					Failure: measured[candidate].Failure, Underlay: item.UnderlayFailure, Targets: probeTargetResults(measured[candidate])})
 				item.AvailabilityFailures[selected] = 0
 				delete(measured, candidate)
 				continue
 			}
+			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-failed", Policy: policyID, Node: selected,
+				Failure: measured[candidate].Failure, Count: item.AvailabilityFailures[selected] + 1,
+				Threshold: startupFailureConfirmationThreshold(measured[candidate], p.failureThreshold, warm), Targets: probeTargetResults(measured[candidate])})
+		} else if candidate == selected && measured[candidate].OK && item.AvailabilityFailures[selected] > 0 {
+			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-recovered", Policy: policyID, Node: selected,
+				Targets: probeTargetResults(measured[candidate])})
 		}
 		if candidate == selected && !measured[candidate].OK &&
 			item.AvailabilityFailures[selected]+1 >= startupFailureConfirmationThreshold(measured[candidate], p.failureThreshold, warm) {
@@ -770,12 +890,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			}
 			emergency := p
 			emergency.backup = minInt(p.backup, p.failureRetry)
-			for _, reserve := range outageProbeTargets(now, without(candidates, probeTargets), item, emergency) {
-				if len(probeTargets) >= minInt(p.batch, outageProbeBatch) {
-					break
-				}
-				probeTargets = append(probeTargets, reserve)
-			}
+			probeTargets = append([]string{selected}, controller.emergencyTargets(now, without(candidates, []string{selected}), item, emergency)...)
 			break
 		}
 	}
@@ -838,8 +953,11 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		}
 	}
 	// Commit timestamps with the batch results, never for an interrupted batch.
-	for candidate := range measured {
+	for candidate, evidence := range measured {
 		item.LastProbeAt[candidate] = float64(now.Unix())
+		if evidence.OK {
+			item.LastGoodAt[candidate] = float64(now.Unix())
+		}
 	}
 	for _, candidate := range speedTargets {
 		item.LastSpeedProbeAt[candidate] = float64(now.Unix())
@@ -1067,7 +1185,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	}
 	// Keep draining eligible, untested candidates at the emergency interval.
 	// The cheaper block recovery interval applies after that sweep is exhausted.
-	item.OutageProbePending = item.Selected == "block" && len(outageProbeTargets(now, candidates, item, p)) > 0
+	item.OutageProbePending = item.Selected == "block" && len(outageProbeTargets(now, withoutClosedCandidates(candidates, item.PreflightClosed), item, p)) > 0
 	item.QualityThresholds = qualityThresholds{p.qualityWindow, p.maxLoss, p.maxLatency, p.improvement, p.speedEnabled, p.speedImprovement, p.speedInterval, p.speedBytes, p.speedCandidates, p.failureThreshold, p.recoveryThreshold, p.cooldown}
 	item.CheckedAt = now.UTC().Format(time.RFC3339)
 	rememberWorkingSelection(contract, item)

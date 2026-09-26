@@ -21,14 +21,37 @@ var (
 	uuidPattern        = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
-var xrayHealthProbeLanes = []struct {
+type xrayHealthProbeLane struct {
 	Tag  string
 	Port int
-}{
+}
+
+var xrayHealthProbeLanes = []xrayHealthProbeLane{
 	{"outbound-health-probe", 19082},
 	{"outbound-health-background", 19083},
 	{"outbound-health-background-2", 19084},
 	{"outbound-health-background-3", 19085},
+}
+
+func xrayHealthProbeLanesForConfig(config map[string]any) []xrayHealthProbeLane {
+	backgrounds := 3
+	monitor := objectValue(objectValue(config["system"])["routing_monitor"])
+	if batch, ok := numericInt(monitor["probe_batch_size"]); ok && batch > backgrounds {
+		backgrounds = min(batch, 10)
+	} else if len(monitor) == 0 {
+		for _, policy := range objectSlice(config["policies"]) {
+			if batch, ok := numericInt(policy["probe_batch_size"]); ok && batch > backgrounds {
+				backgrounds = min(batch, 10)
+			}
+		}
+	}
+	lanes := append([]xrayHealthProbeLane(nil), xrayHealthProbeLanes...)
+	for index := 4; index <= backgrounds; index++ {
+		lanes = append(lanes, xrayHealthProbeLane{
+			Tag: fmt.Sprintf("outbound-health-background-%d", index), Port: 19082 + index,
+		})
+	}
+	return lanes
 }
 
 func BuildXrayInboundSource(config map[string]any, readSecret SecretReader, secretPath SecretPathResolver) (XrayInboundSourceArtifacts, error) {
@@ -135,7 +158,7 @@ func BuildXrayInboundSource(config map[string]any, readSecret SecretReader, secr
 		{"type": "mixed", "tag": "subscription-update-vpn", "listen": "127.0.0.1", "listen_port": 19080},
 		{"type": "mixed", "tag": "subscription-update-direct", "listen": "127.0.0.1", "listen_port": 19081},
 	}
-	for _, lane := range xrayHealthProbeLanes {
+	for _, lane := range xrayHealthProbeLanesForConfig(config) {
 		inbounds = append(inbounds, map[string]any{"type": "mixed", "tag": lane.Tag, "listen": "127.0.0.1", "listen_port": lane.Port})
 	}
 	selectedUsers := func(transportID string, vision bool) []map[string]any {

@@ -206,7 +206,7 @@ func addURLTestSelectors(config map[string]any, balancers []map[string]any) {
 	if len(prefixes) == 0 {
 		return
 	}
-	for _, lane := range xrayHealthProbeLanes {
+	for _, lane := range xrayHealthProbeLanesForConfig(config) {
 		tag := lane.Tag
 		if health := byTag[tag]; health != nil {
 			selectors := stringSlice(health["selector"])

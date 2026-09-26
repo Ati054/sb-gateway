@@ -218,10 +218,21 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 	}
 	dynamic, dynamicReader := open()
 	check(dynamic, dynamicReader, "127.0.0.4")
-	for _, source := range []string{"127.0.0.5", "127.0.0.6"} {
+	for _, source := range []string{"127.0.0.5", "127.0.0.4", "127.0.0.6"} {
 		runtime.pool.Outbounds["provider"] = json.RawMessage(`{"protocol":"freedom","sendThrough":"` + source + `"}`)
 		if err := runtime.Select("europe", "provider"); err != nil {
 			t.Fatal(err)
+		}
+		selectedTag := runtime.activeByPolicy["europe"]
+		present, presenceErr := runtime.outboundPresent(selectedTag)
+		if presenceErr != nil || !present {
+			t.Fatalf("selected outbound missing immediately after %s switch: tag=%q present=%t err=%v retired=%v", source, selectedTag, present, presenceErr, runtime.retiredByPolicy["europe"])
+		}
+		if source == "127.0.0.4" {
+			reselected := selectedTag
+			if contains(runtime.retiredByPolicy["europe"], reselected) {
+				t.Fatalf("A→B→A left active handler %q in retirement queue", reselected)
+			}
 		}
 		fresh, freshReader := open()
 		check(fresh, freshReader, source)
@@ -232,7 +243,21 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 		t.Fatalf("Xray PID changed during hot refresh: %d -> %d", pidBeforeHotRefresh, process.Process.Pid)
 	}
 	dynamic.Close()
-	t.Log("two provider generations switched through HandlerService; the first handler was removed while its established TCP stream survived")
+	t.Log("provider A→B→A→C retained the reselected handler and its established TCP stream")
+	activeTag := runtime.activeByPolicy["europe"]
+	if _, err := runtime.command(ctx, 5*time.Second, binary, "api", "rmo", "--server="+apiAddress, activeTag); err != nil {
+		t.Fatalf("remove selected outbound for recovery test: %v", err)
+	}
+	// A catalog refresh invalidates the local existence readback. Xray may
+	// retain its selector override after the underlying handler disappears.
+	runtime.verifiedDynamic = make(map[string]time.Time)
+	if current, err := runtime.Current("europe"); err != nil || current != "provider" {
+		t.Fatalf("selected handler was not restored: current=%q err=%v", current, err)
+	}
+	recovered, recoveredReader := open()
+	check(recovered, recoveredReader, "127.0.0.6")
+	recovered.Close()
+	t.Log("selected outbound removed under a live selector was restored before confirmation")
 
 	// A full core restart cannot preserve sockets, but must restore the saved
 	// leaf before new traffic is admitted, without waiting for a fresh scan.

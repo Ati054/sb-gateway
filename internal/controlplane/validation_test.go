@@ -43,7 +43,7 @@ func TestValidateRoutingMonitorSettings(t *testing.T) {
 	monitor["active_quality_interval_seconds"] = 120
 	monitor["reserve_check_interval_seconds"] = 60
 	monitor["full_scan_interval_seconds"] = 30
-	monitor["probe_batch_size"] = 4
+	monitor["probe_batch_size"] = 11
 	result := validateCurrentConfig(config)
 	for _, path := range []string{
 		"system.routing_monitor.active_liveness_interval_seconds",
@@ -55,6 +55,15 @@ func TestValidateRoutingMonitorSettings(t *testing.T) {
 		if !hasValidationPath(result.Errors, path) {
 			t.Fatalf("missing validation error for %s: %#v", path, result.Errors)
 		}
+	}
+}
+
+func TestValidateRoutingMonitorAllowsTenChecksPerCycle(t *testing.T) {
+	config := currentConfigFixture(t)
+	monitor := objectAt(config, "system")["routing_monitor"].(map[string]any)
+	monitor["probe_batch_size"] = 10
+	if result := validateCurrentConfig(config); !result.Valid {
+		t.Fatalf("configured ten-check batch rejected: %#v", result.Errors)
 	}
 }
 

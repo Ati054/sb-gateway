@@ -187,6 +187,7 @@ func Run(ctx context.Context, opts Options) error {
 	go server.runSubscriptionScheduler(runContext)
 	go server.runApplyRecoveryScheduler(runContext)
 	go server.runRouterOSLiveNetworkScheduler(runContext)
+	go server.runRouterOSFetchLogScheduler(runContext)
 	go server.runCDNFeedScheduler(runContext)
 	go server.runACMEScheduler(runContext)
 	if server.runtime != nil {

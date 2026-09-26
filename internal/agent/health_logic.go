@@ -177,6 +177,9 @@ func ensureHealthMaps(item *policyHealthState) {
 	if item.LastProbeAt == nil {
 		item.LastProbeAt = make(map[string]float64)
 	}
+	if item.LastGoodAt == nil {
+		item.LastGoodAt = make(map[string]float64)
+	}
 	if item.SpeedSamplesBPS == nil {
 		item.SpeedSamplesBPS = make(map[string][]int64)
 	}
@@ -324,7 +327,12 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 		// selected after active-unavailable is held through the cooldown so noisy
 		// quality samples cannot create ping-pong. A real availability failure is
 		// handled by the outage branch above and is never delayed here.
-		degradedMayBypass := reason == "active-degraded" && item.LastSwitchReason != "active-unavailable"
+		// A priority path that has just recovered needs the same anti-flap
+		// protection as a newly chosen failover reserve. Otherwise three noisy
+		// quality samples can immediately undo the recovery while the path is
+		// still reachable, producing France -> reserve -> France -> reserve.
+		degradedMayBypass := reason == "active-degraded" &&
+			item.LastSwitchReason != "active-unavailable" && item.LastSwitchReason != "higher-priority-recovered"
 		if desired != selected && !degradedMayBypass && float64(now.Unix()) < item.CooldownUntil {
 			desired, reason = selected, ""
 		}

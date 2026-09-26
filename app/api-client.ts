@@ -686,7 +686,7 @@ export function getXrayLogs<T = JsonObject>(
 }
 
 export function getSystemLogs<T = JsonObject>(
-  source: "system" | "nginx" | "lifecycle",
+  source: "system" | "routing" | "nginx" | "lifecycle",
   lines = 200,
 ): Promise<T> {
   return apiRequest<T>(
