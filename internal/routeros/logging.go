@@ -36,9 +36,10 @@ func (client *Client) SuppressFetchInfoLogs(ctx context.Context) (bool, error) {
 	return changed, nil
 }
 
-// RouterOS topic lists are conjunctive. Only broad info and fetch rules can
-// record fetch,info without another required topic; leave custom topic filters
-// and all severity-specific rules untouched.
+// RouterOS topic lists are conjunctive. A rule requiring only info/fetch and
+// excluding unrelated topics can still record fetch,info; preserve its other
+// exclusions while excluding fetch from that rule. Rules requiring another
+// positive topic, or already excluding info/fetch, cannot record this chatter.
 func withoutFetchInfoTopic(value string) (string, bool) {
 	if value == "" {
 		return "", false
@@ -52,8 +53,12 @@ func withoutFetchInfoTopic(value string) (string, bool) {
 			positiveInfo = true
 		case "fetch":
 			positiveFetch = true
-		default:
+		case "!info", "!fetch":
 			return "", false
+		default:
+			if len(topic) < 2 || topic[0] != '!' {
+				return "", false
+			}
 		}
 	}
 	if !positiveInfo && !positiveFetch {
