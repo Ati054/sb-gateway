@@ -62,8 +62,9 @@ func (runtime *xraySelectorRuntime) probeSelectorName() string {
 type xrayCommandRunner func(context.Context, time.Duration, string, ...string) ([]byte, error)
 
 var (
-	underlayWANTargets       = []string{"1.1.1.1:443", "9.9.9.9:443", "www.gstatic.com:443"}
-	availabilityProbeTimeout = 2 * time.Second
+	underlayWANTargets          = []string{"1.1.1.1:443", "9.9.9.9:443", "www.gstatic.com:443"}
+	availabilityProbeTimeout    = 2 * time.Second
+	availabilityFallbackTimeout = 3 * time.Second
 )
 
 func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
@@ -606,14 +607,13 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 		evidence.Failure = classifyProbeError(err)
 		return evidence
 	}
+	if availabilityOnly {
+		return runtime.probeAvailabilityTargets(evidence)
+	}
 	failures := []probeFailureClass{}
 	for _, target := range healthTargets {
-		timeout := 5 * time.Second
-		if availabilityOnly {
-			timeout = availabilityProbeTimeout
-		}
 		started := time.Now()
-		_, err := downloadThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, timeout, 1024, target.status)
+		_, err := downloadThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, 5*time.Second, 1024, target.status)
 		delay := maxInt(1, int(time.Since(started).Milliseconds()))
 		if err != nil {
 			evidence.Targets[target.label] = nil
@@ -623,10 +623,7 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 			// A single public HTTPS target can fail independently of the VLESS
 			// node. Confirm an availability failure against another origin before
 			// the controller is allowed to move the live selector.
-			if availabilityOnly && len(failures) >= 2 {
-				break
-			}
-			if !availabilityOnly && len(failures) >= 2 &&
+			if len(failures) >= 2 &&
 				(classifyTargetFailures(failures) == probeFailureFatal || classifyTargetFailures(failures) == probeFailureTLS) {
 				break
 			}
@@ -634,9 +631,6 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 			copy := delay
 			evidence.Targets[target.label] = &copy
 			delays = append(delays, delay)
-			if availabilityOnly {
-				break
-			}
 		}
 	}
 	if len(delays) > 0 {
@@ -644,6 +638,69 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 		evidence.OK = true
 		evidence.DelayMS = &value
 	} else {
+		evidence.Failure = classifyTargetFailures(failures)
+	}
+	return evidence
+}
+
+// Keep the healthy fast path to one request. If it fails, give both remaining
+// independent origins a bounded chance in parallel. A slow public endpoint
+// must not make a working outbound look dead, and a real outage must not wait
+// for three serial HTTP timeouts. Join canceled requests before the selector
+// can be reused for another candidate.
+func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvidence) probeEvidence {
+	type targetResult struct {
+		label   string
+		delayMS int
+		err     error
+	}
+	probe := func(ctx context.Context, index int, timeout time.Duration) targetResult {
+		target := healthTargets[index]
+		started := time.Now()
+		_, err := downloadThroughProxyContext(ctx, runtime.opts.ProbeURL, target.url, timeout, 1024, target.status)
+		return targetResult{label: target.label, delayMS: maxInt(1, int(time.Since(started).Milliseconds())), err: err}
+	}
+	failures := make([]probeFailureClass, 0, len(healthTargets))
+	record := func(result targetResult) bool {
+		if result.err == nil {
+			delay := result.delayMS
+			evidence.Targets[result.label] = &delay
+			evidence.OK = true
+			evidence.DelayMS = &delay
+			return true
+		}
+		evidence.Targets[result.label] = nil
+		failure := classifyProbeError(result.err)
+		evidence.TargetFailures[result.label] = failure
+		failures = append(failures, failure)
+		return false
+	}
+	if len(healthTargets) == 0 {
+		evidence.Failure = probeFailureTransient
+		return evidence
+	}
+	if record(probe(runtime.requestContext(), 0, availabilityProbeTimeout)) {
+		return evidence
+	}
+
+	// Production has two fallbacks. Cap fanout if more targets are added later.
+	count := minInt(len(healthTargets)-1, 2)
+	ctx, cancel := context.WithCancel(runtime.requestContext())
+	defer cancel()
+	results := make(chan targetResult, count)
+	for index := 1; index <= count; index++ {
+		go func(index int) { results <- probe(ctx, index, availabilityFallbackTimeout) }(index)
+	}
+	for received := 0; received < count; received++ {
+		result := <-results
+		if evidence.OK {
+			continue // Canceled sibling is not a failed target.
+		}
+		if record(result) {
+			cancel()
+		}
+	}
+	if !evidence.OK {
 		evidence.Failure = classifyTargetFailures(failures)
 	}
 	return evidence

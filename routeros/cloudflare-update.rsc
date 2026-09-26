@@ -33,7 +33,7 @@
   :while ([:len $v4data] > 0) do={
     :local newline [:find $v4data "\n"]
     :local line ""
-    :if ($newline = nil) do={ :set line $v4data; :set v4data "" } else={
+    :if ([:typeof $newline] = "nil") do={ :set line $v4data; :set v4data "" } else={
       :set line [:pick $v4data 0 $newline]
       :set v4data [:pick $v4data ($newline + 1) [:len $v4data]]
     }
@@ -49,7 +49,7 @@
   :while ([:len $v6data] > 0) do={
     :local newline [:find $v6data "\n"]
     :local line ""
-    :if ($newline = nil) do={ :set line $v6data; :set v6data "" } else={
+    :if ([:typeof $newline] = "nil") do={ :set line $v6data; :set v6data "" } else={
       :set line [:pick $v6data 0 $newline]
       :set v6data [:pick $v6data ($newline + 1) [:len $v6data]]
     }

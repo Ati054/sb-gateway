@@ -86,10 +86,10 @@ func TestAvailabilityProbeStopsAtFirstSuccessAndFallsBack(t *testing.T) {
 		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
 	}
 	for _, failFirst := range []bool{false, true} {
-		calls := 0
+		var calls atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			calls++
-			if failFirst && calls == 1 {
+			call := calls.Add(1)
+			if failFirst && call == 1 {
 				conn, _, err := w.(http.Hijacker).Hijack()
 				if err == nil {
 					conn.Close()
@@ -106,12 +106,9 @@ func TestAvailabilityProbeStopsAtFirstSuccessAndFallsBack(t *testing.T) {
 		runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
 		evidence := runtime.ProbeAvailability("direct-wan")
 		server.Close()
-		want := 1
-		if failFirst {
-			want = 2
-		}
-		if !evidence.OK || calls != want {
-			t.Fatalf("availability fallback: OK=%t calls=%d want=%d", evidence.OK, calls, want)
+		got := calls.Load()
+		if !evidence.OK || (!failFirst && got != 1) || (failFirst && (got < 2 || got > 3)) {
+			t.Fatalf("availability fallback: OK=%t calls=%d failFirst=%t", evidence.OK, got, failFirst)
 		}
 	}
 }
@@ -142,34 +139,143 @@ func TestAvailabilityProbeChecksIndependentTargetAfterTimeout(t *testing.T) {
 	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
 	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
 	evidence := runtime.ProbeAvailability("direct-wan")
-	if !evidence.OK || calls.Load() != 2 || evidence.TargetFailures["gstatic-204"] != probeFailureTimeout {
+	if !evidence.OK || calls.Load() < 2 || calls.Load() > 3 || evidence.TargetFailures["gstatic-204"] != probeFailureTimeout {
 		t.Fatalf("availability fallback: evidence=%#v calls=%d, want independent success", evidence, calls.Load())
 	}
 }
 
-func TestAvailabilityProbeRequiresTwoIndependentFailedTargets(t *testing.T) {
-	originalTargets := healthTargets
-	originalTimeout := availabilityProbeTimeout
+func TestAvailabilityProbeUsesThirdOriginAfterTwoFailures(t *testing.T) {
+	originalTargets, originalTimeout, originalFallback := healthTargets, availabilityProbeTimeout, availabilityFallbackTimeout
 	defer func() {
-		healthTargets = originalTargets
-		availabilityProbeTimeout = originalTimeout
+		healthTargets, availabilityProbeTimeout, availabilityFallbackTimeout = originalTargets, originalTimeout, originalFallback
 	}()
 	healthTargets = append(healthTargets[:0:0], originalTargets...)
 	for i := range healthTargets {
 		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
 	}
 	availabilityProbeTimeout = 20 * time.Millisecond
-	var calls atomic.Int32
+	availabilityFallbackTimeout = 50 * time.Millisecond
+	secondCalled := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		switch r.URL.Path {
+		case "/gstatic-204":
+			<-r.Context().Done()
+		case "/cloudflare-trace":
+			close(secondCalled)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		default:
+			select {
+			case <-secondCalled:
+			case <-r.Context().Done():
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
+	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
+	evidence := runtime.ProbeAvailability("direct-wan")
+	if !evidence.OK || evidence.TargetFailures["gstatic-204"] != probeFailureTimeout ||
+		evidence.Targets["example-web"] == nil {
+		t.Fatalf("third independent origin did not preserve a working route: %#v", evidence)
+	}
+}
+
+func TestAvailabilityProbeAcceptsSlowFallbackWithinThreeSecondBudget(t *testing.T) {
+	originalTargets, originalTimeout, originalFallback := healthTargets, availabilityProbeTimeout, availabilityFallbackTimeout
+	defer func() {
+		healthTargets, availabilityProbeTimeout, availabilityFallbackTimeout = originalTargets, originalTimeout, originalFallback
+	}()
+	healthTargets = append(healthTargets[:0:0], originalTargets...)
+	for i := range healthTargets {
+		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
+	}
+	availabilityProbeTimeout = 20 * time.Millisecond
+	availabilityFallbackTimeout = 60 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(35 * time.Millisecond)
+		if r.URL.Path == "/gstatic-204" {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
+	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
+	evidence := runtime.ProbeAvailability("direct-wan")
+	if !evidence.OK || evidence.TargetFailures["gstatic-204"] != probeFailureTimeout {
+		t.Fatalf("2–3 second path was incorrectly treated as unavailable: %#v", evidence)
+	}
+}
+
+func TestAvailabilityProbeCancelsAndJoinsFallbackAfterSuccess(t *testing.T) {
+	originalTargets := healthTargets
+	defer func() { healthTargets = originalTargets }()
+	healthTargets = append(healthTargets[:0:0], originalTargets...)
+	for i := range healthTargets {
+		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
+	}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gstatic-204":
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		case "/cloudflare-trace":
+			<-started
+			w.WriteHeader(http.StatusOK)
+		default:
+			close(started)
+			<-r.Context().Done()
+			close(canceled)
+		}
+	}))
+	defer server.Close()
+	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
+	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
+	evidence := runtime.ProbeAvailability("direct-wan")
+	if !evidence.OK || evidence.Targets["example-web"] != nil {
+		t.Fatalf("canceled sibling was recorded as a failed target: %#v", evidence)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("fallback request continued after the probe returned")
+	}
+}
+
+func TestAvailabilityProbeRequiresThreeIndependentFailedTargets(t *testing.T) {
+	originalTargets := healthTargets
+	originalTimeout := availabilityProbeTimeout
+	originalFallback := availabilityFallbackTimeout
+	defer func() {
+		healthTargets = originalTargets
+		availabilityProbeTimeout = originalTimeout
+		availabilityFallbackTimeout = originalFallback
+	}()
+	healthTargets = append(healthTargets[:0:0], originalTargets...)
+	for i := range healthTargets {
+		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
+	}
+	availabilityProbeTimeout = 20 * time.Millisecond
+	availabilityFallbackTimeout = 20 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 	}))
 	defer server.Close()
 	runtime := newXraySelectorRuntime(Options{ProbeURL: server.URL})
 	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
 	evidence := runtime.ProbeAvailability("direct-wan")
-	if evidence.OK || evidence.Failure != probeFailureTimeout || calls.Load() != 2 || len(evidence.TargetFailures) != 2 {
-		t.Fatalf("availability failure: evidence=%#v calls=%d, want two different failed targets", evidence, calls.Load())
+	if evidence.OK || evidence.Failure != probeFailureTimeout || len(evidence.TargetFailures) != 3 {
+		t.Fatalf("availability failure: evidence=%#v, want three different failed targets", evidence)
 	}
 }
 
