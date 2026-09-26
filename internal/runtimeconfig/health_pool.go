@@ -1,8 +1,11 @@
 package runtimeconfig
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -28,6 +31,42 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 				dynamicNodeIDs[id] = struct{}{}
 			}
 		}
+	}
+	// Fingerprint the actual rendered outbound, not a mutable label or a
+	// subscription ID. A provider may keep an ID while changing its endpoint.
+	endpointFingerprints := make(map[string]string)
+	outboundBodies := make(map[string]json.RawMessage)
+	for _, outbound := range objectSlice(xray["outbounds"]) {
+		tag := textValue(outbound["tag"])
+		if tag == "" {
+			continue
+		}
+		body, marshalErr := marshalCanonical(outbound)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		sum := sha256.Sum256(body)
+		endpointFingerprints[tag] = hex.EncodeToString(sum[:])
+		outboundBodies[tag] = json.RawMessage(body)
+	}
+	dialTargets := make(map[string]any)
+	for id, node := range nodesByID {
+		if textValue(node["protocol"]) != "vless" {
+			continue
+		}
+		transport := textDefault(objectValue(node["transport"])["type"], "tcp")
+		if transport == "kcp" || transport == "quic" {
+			continue
+		}
+		address := textValue(node["server"])
+		if _, parseErr := netip.ParseAddr(address); parseErr != nil {
+			continue
+		}
+		port, valid := numericInt(node["server_port"])
+		if !valid || port < 1 || port > 65535 || endpointFingerprints[id] == "" {
+			continue
+		}
+		dialTargets[id] = map[string]any{"address": address, "port": port}
 	}
 
 	policyMembers := make(map[string][]string)
@@ -85,7 +124,11 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 					protocol = "reality"
 				}
 			}
-			inventory[member] = map[string]any{"label": label, "country": country, "protocol": protocol, "transport": transport, "subscription_id": textValue(nodesByID[member]["subscription_id"])}
+			metadata := map[string]any{"label": label, "country": country, "protocol": protocol, "transport": transport, "subscription_id": textValue(nodesByID[member]["subscription_id"])}
+			if fingerprint := endpointFingerprints[member]; fingerprint != "" {
+				metadata["fingerprint"] = fingerprint
+			}
+			inventory[member] = metadata
 		}
 		resolvedPolicy := cloneJSONMap(policy)
 		if len(routingMonitor) != 0 {
@@ -132,11 +175,7 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 			continue
 		}
 		if _, dynamic := dynamicNodeIDs[tag]; dynamic {
-			body, marshalErr := marshalCanonical(outbound)
-			if marshalErr != nil {
-				return nil, marshalErr
-			}
-			dynamicOutbounds[tag] = json.RawMessage(body)
+			dynamicOutbounds[tag] = outboundBodies[tag]
 			continue
 		}
 		baseSet[tag] = struct{}{}
@@ -160,7 +199,7 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 	pool := map[string]any{
 		"version": 4, "policies": policyMembers, "health_policies": healthPolicies,
 		"policy_prefixes": policyPrefixes, "base_outbound_tags": baseTags,
-		"outbounds": dynamicOutbounds,
+		"outbounds": dynamicOutbounds, "dial_targets": dialTargets,
 	}
 	body, err := marshalCanonical(pool)
 	if err != nil {

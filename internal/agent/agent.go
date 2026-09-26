@@ -15,6 +15,7 @@ type Options struct {
 	XrayBinary          string
 	XrayAPIServer       string
 	XrayReadyFile       string
+	XrayFailureSocket   string
 	NFTBinary           string
 	InitialDelay        time.Duration
 	ActiveInterval      time.Duration
@@ -36,6 +37,7 @@ func OptionsFromEnvironment() Options {
 		XrayBinary:          envOr("SB_XRAY_BIN", "xray"),
 		XrayAPIServer:       envOr("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
 		XrayReadyFile:       envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
+		XrayFailureSocket:   envOr("SB_XRAY_FAILURE_SOCKET", "/run/sb-gateway/xray-failures.sock"),
 		NFTBinary:           envOr("SB_NFT_BIN", "nft"),
 		InitialDelay:        boundedDuration("SB_CLIENT_TELEMETRY_INITIAL_DELAY_SECONDS", 3, 0, 300),
 		ActiveInterval:      active,

@@ -22,14 +22,17 @@ func (server *Server) systemLogs(response http.ResponseWriter, request *http.Req
 	source := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("source")))
 	path := server.opts.Runtime.ControlPlaneLog
 	filterLifecycle := false
+	filterRouting := false
 	switch source {
 	case "system":
+	case "routing":
+		filterRouting = true
 	case "nginx":
 		path = server.opts.Runtime.NginxErrorLog
 	case "lifecycle":
 		filterLifecycle = true
 	default:
-		server.writeErrorResponse(response, request, http.StatusUnprocessableEntity, "invalid_log_source", "Log source must be system, nginx or lifecycle.")
+		server.writeErrorResponse(response, request, http.StatusUnprocessableEntity, "invalid_log_source", "Log source must be system, routing, nginx or lifecycle.")
 		return
 	}
 	lineLimit := defaultSystemLogLines
@@ -39,6 +42,11 @@ func (server *Server) systemLogs(response http.ResponseWriter, request *http.Req
 	readLimit := lineLimit
 	if filterLifecycle {
 		readLimit = maximumSystemLogLines
+	}
+	if filterRouting {
+		// Filter before applying the visible line limit. A busy control-plane
+		// log must not hide still-recent route decisions from this view.
+		readLimit = maximumSystemLogBytes
 	}
 	lines, info, truncated, err := readLogTail(path, readLimit, maximumSystemLogBytes)
 	if errors.Is(err, os.ErrNotExist) {
@@ -52,9 +60,15 @@ func (server *Server) systemLogs(response http.ResponseWriter, request *http.Req
 		server.internalStateError(response, request, err)
 		return
 	}
-	if filterLifecycle {
+	if filterLifecycle || filterRouting {
 		filtered := make([]string, 0, len(lines))
 		for _, line := range lines {
+			if filterRouting {
+				if strings.Contains(line, "agent: route-health ") {
+					filtered = append(filtered, line)
+				}
+				continue
+			}
 			lower := strings.ToLower(line)
 			if strings.Contains(lower, "image update") || strings.Contains(lower, "lifecycle") || strings.Contains(lower, "recovery archive") {
 				filtered = append(filtered, line)

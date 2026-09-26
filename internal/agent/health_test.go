@@ -211,8 +211,8 @@ func TestOutageProbeRotationCoversWholePoolWithBoundedBatch(t *testing.T) {
 		t.Fatalf("nodes outside shortlist were starved: %v", checked)
 	}
 	p.batch = 10
-	if got := outageProbeTargets(time.Unix(2000, 0), candidates, item, p); len(got) != 3 {
-		t.Fatalf("outage must cap even a large configured batch: %v", got)
+	if got := outageProbeTargets(time.Unix(2000, 0), candidates, item, p); len(got) != len(candidates) {
+		t.Fatalf("outage must honor the configured batch without exceeding the pool: %v", got)
 	}
 }
 
@@ -912,15 +912,17 @@ func TestBestModeDoesNotBounceBetweenReachableDegradedPaths(t *testing.T) {
 func TestDegradedPathSwitchRequiresStableReserveButBypassesCooldown(t *testing.T) {
 	for _, test := range []struct {
 		name       string
+		mode       string
 		recoveries int
 		cooldown   float64
 		lastReason string
 		want       string
 	}{
-		{"unconfirmed reserve", 1, 0, "", "de"},
-		{"normal cooldown does not pin degraded active", 3, 2000, "meaningfully-faster", "nl"},
-		{"failover cooldown prevents ping-pong", 3, 2000, "active-unavailable", "de"},
-		{"stable reserve after cooldown", 3, 0, "active-unavailable", "nl"},
+		{"unconfirmed reserve", "best", 1, 0, "", "de"},
+		{"normal cooldown does not pin degraded active", "best", 3, 2000, "meaningfully-faster", "nl"},
+		{"failover cooldown prevents ping-pong", "best", 3, 2000, "active-unavailable", "de"},
+		{"priority recovery cooldown prevents ping-pong", "priority", 3, 2000, "higher-priority-recovered", "de"},
+		{"stable reserve after cooldown", "best", 3, 0, "active-unavailable", "nl"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			item := newPolicyHealthState()
@@ -928,9 +930,9 @@ func TestDegradedPathSwitchRequiresStableReserveButBypassesCooldown(t *testing.T
 			item.Recoveries["nl"] = test.recoveries
 			item.CooldownUntil = test.cooldown
 			item.LastSwitchReason = test.lastReason
-			settings := policySettings(healthPolicy{}, "best")
+			settings := policySettings(healthPolicy{}, test.mode)
 			delay := 50
-			desired, _ := selectDesired(time.Unix(1000, 0), "best", "de", []string{"de", "nl"},
+			desired, _ := selectDesired(time.Unix(1000, 0), test.mode, "de", []string{"de", "nl"},
 				nil, nil, map[string]*int{"nl": &delay}, nil, nil,
 				map[string]bool{"nl": true}, map[string]bool{"de": true, "nl": true}, item, settings)
 			if desired != test.want {

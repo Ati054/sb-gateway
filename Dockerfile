@@ -7,7 +7,7 @@ ARG RUNTIME_IMAGE=alpine:3.23
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG SB_GATEWAY_VERSION=1.6.22
+ARG SB_GATEWAY_VERSION=1.6.24
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -37,13 +37,16 @@ RUN apk add --no-cache git patch
 WORKDIR /src
 COPY patches/xray-reality-x25519-compat.patch /tmp/xray-reality-x25519-compat.patch
 COPY patches/xray-vision-padding-overflow.patch /tmp/xray-vision-padding-overflow.patch
+COPY patches/xray-vless-failure-signal.patch /tmp/xray-vless-failure-signal.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
     && git checkout --detach FETCH_HEAD \
     && test "$(git rev-parse HEAD)" = "${XRAY_COMMIT}" \
     && patch -p1 --fuzz=0 < /tmp/xray-vision-padding-overflow.patch \
-    && go test ./proxy
+    && git apply --check /tmp/xray-vless-failure-signal.patch \
+    && git apply /tmp/xray-vless-failure-signal.patch \
+    && go test ./proxy ./proxy/vless/outbound
 RUN set -eux; \
     git clone --filter=blob:none --no-checkout https://github.com/XTLS/REALITY.git /src/reality; \
     git -C /src/reality fetch --depth=1 origin "${XRAY_REALITY_COMMIT}"; \
@@ -97,7 +100,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.9.9
 ARG XRAY_COMMIT=52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.22
+ARG SB_GATEWAY_VERSION=1.6.24
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \

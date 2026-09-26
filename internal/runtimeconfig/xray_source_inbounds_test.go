@@ -3,6 +3,7 @@ package runtimeconfig
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -439,6 +440,65 @@ func inboundSourceBaseConfig() map[string]any {
 			"tun_address": "198.18.0.1/30", "container_address": "198.18.0.2/29", "tun_mtu": 1400,
 			"tun_stack": "system", "remote_ipv6_mode": "proxy_only",
 		}},
+	}
+}
+
+func TestConfiguredTenProbeLanesRemainIsolatedAcrossXraySource(t *testing.T) {
+	config := inboundSourceBaseConfig()
+	config["system"].(map[string]any)["routing_monitor"] = map[string]any{"probe_batch_size": 10}
+	config["policies"] = []any{map[string]any{
+		"id": "route", "enabled": true, "mode": "priority", "selection_order": []any{"node"},
+	}}
+	nodes := []map[string]any{{
+		"id": "node", "protocol": "vless", "server": "edge.example", "server_port": 443,
+		"uuid_secret_ref": "node/uuid",
+	}}
+	source, err := BuildXraySourceModel(config, nodes,
+		inboundSecretReader(map[string]string{"node/uuid": "123e4567-e89b-42d3-a456-426614174000"}),
+		inboundSecretPath, "/config/rulesets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbounds := inboundSourceByTag(objectSlice(source.Model["inbounds"]))
+	outbounds := make(map[string]map[string]any)
+	for _, outbound := range objectSlice(source.Model["outbounds"]) {
+		outbounds[textValue(outbound["tag"])] = outbound
+	}
+	rules := objectSlice(objectValue(source.Model["route"])["rules"])
+	for index := 1; index <= 10; index++ {
+		tag := "outbound-health-background"
+		if index > 1 {
+			tag += "-" + strconv.Itoa(index)
+		}
+		inbound := inbounds[tag]
+		if inbound == nil || inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != 19082+index {
+			t.Fatalf("background lane %d inbound = %#v", index, inbound)
+		}
+		if outbound := outbounds[tag]; outbound == nil || !containsText(stringSlice(outbound["outbounds"]), "node") {
+			t.Fatalf("background lane %d outbound = %#v", index, outbound)
+		}
+		if findXraySourceRule(rules, func(rule map[string]any) bool {
+			return containsText(stringSlice(rule["inbound"]), tag) && textValue(rule["outbound"]) == tag
+		}) == nil || !containsText(stringSlice(rules[2]["inbound"]), tag) {
+			t.Fatalf("background lane %d lost route or private destination guard", index)
+		}
+	}
+}
+
+func TestTenProbeLanesCarryURLTestSelectorPrefix(t *testing.T) {
+	config := map[string]any{
+		"system":   map[string]any{"routing_monitor": map[string]any{"probe_batch_size": 10}},
+		"policies": []any{map[string]any{"id": "route", "enabled": true, "mode": "best"}},
+	}
+	balancers := []map[string]any{{"tag": "route"}}
+	for _, lane := range xrayHealthProbeLanesForConfig(config) {
+		balancers = append(balancers, map[string]any{"tag": lane.Tag})
+	}
+	addURLTestSelectors(config, balancers)
+	for _, balancer := range balancers[1:] {
+		if !containsText(stringSlice(balancer["selector"]), "sb-urltest-") {
+			t.Fatalf("URLTest health lane %s lost selector prefix: %#v", balancer["tag"], balancer)
+		}
 	}
 }
 

@@ -81,6 +81,9 @@ test("route monitoring is one global form with concise scheduling controls", () 
   assert.match(page, /Мониторинг маршрутов/);
   assert.match(page, /Доступность активного узла, сек\./);
   assert.match(page, /Максимум проверок за цикл/);
+  assert.match(page, /<option value=\{10\}>10<\/option>/);
+  assert.match(page, /\["probe_batch_size", 0, 10\]/);
+  assert.match(page, /При аварии — одновременно; активный пул не меняется\./);
   assert.match(page, /routing_monitor: routingMonitor/);
   assert.match(page, /const monitorRanges/);
   assert.doesNotMatch(page, /Сохранить мониторинг/);

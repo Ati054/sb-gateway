@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -118,6 +119,218 @@ func TestBlockedSevenNodeSweepUsesEmergencyRetryUntilExhausted(t *testing.T) {
 				t.Fatalf("exhausted outage sweep did not return to economical polling: selected=%s interval=%s", item.Selected, controller.nextInterval())
 			}
 		})
+	}
+}
+
+func TestBlockedRecoveryRechecksPreviouslyWorkingNodesBeforeOldFailures(t *testing.T) {
+	for _, mode := range []string{"priority", "best"} {
+		for _, size := range []int{3, 7, 30, 100} {
+			t.Run(fmt.Sprintf("mode=%s/nodes=%d", mode, size), func(t *testing.T) {
+				pool := healthFixture(false)
+				contract := pool.HealthPolicies["europe"]
+				contract.Mode = mode
+				contract.Candidates = nil
+				contract.Groups = nil
+				contract.Policy.ProbeBatchSize = 3
+				contract.Policy.FailureRetrySeconds = 2
+				contract.Policy.BlockRecoverySeconds = 15
+				probes := make(map[string]probeEvidence)
+				for index := 1; index <= size; index++ {
+					candidate := fmt.Sprintf("n%d", index)
+					contract.Candidates = append(contract.Candidates, candidate)
+					probes[candidate] = failedEvidence()
+				}
+				lastWorking := fmt.Sprintf("n%d", size-1)
+				otherRecovered := fmt.Sprintf("n%d", size)
+				probes[lastWorking] = successfulEvidence(50)
+				probes[otherRecovered] = successfulEvidence(55)
+				pool.HealthPolicies["europe"] = contract
+
+				item := newPolicyHealthState()
+				item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "block", "block", true
+				item.Mode = contract.Mode
+				item.CandidateSignature = strings.Join(contract.Candidates, "\n")
+				item.LastWorkingSelection = &workingSelection{Selected: lastWorking, Mode: contract.Mode, CandidateSignature: item.CandidateSignature}
+				item.LastGoodAt[lastWorking] = 999
+				item.LastGoodAt[otherRecovered] = 998
+				item.ProbeLimits = probeLimits{FailureRetrySeconds: 2, BlockRecoverySeconds: 15}
+				for _, candidate := range contract.Candidates {
+					item.LastProbeAt[candidate] = 1004 // A full failed sweep just ended.
+				}
+				runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "block"}, probes: probes}
+				stateRoot := t.TempDir()
+				controller := &healthController{
+					opts: Options{StateRoot: stateRoot, HealthInterval: time.Minute}, runtime: runtime,
+					warmStarted: map[string]bool{"europe": true}, stateLoaded: true, state: healthState{"europe": item},
+				}
+				if got := controller.nextInterval(); got != 2*time.Second {
+					t.Fatalf("previously working nodes must be retried promptly: interval=%s", got)
+				}
+				if err := controller.Tick(time.Unix(1006, 0)); err != nil {
+					t.Fatal(err)
+				}
+				if item.Selected != lastWorking && item.Selected != otherRecovered {
+					t.Fatalf("recovered node was skipped behind old failures: selected=%s probes=%v", item.Selected, runtime.availabilityCalls)
+				}
+				if len(runtime.availabilityCalls) > 3 {
+					t.Fatalf("emergency batch exceeded CPU budget: %v", runtime.availabilityCalls)
+				}
+				var saved healthState
+				if err := readJSON(filepath.Join(stateRoot, "selector-health.json"), &saved); err != nil {
+					t.Fatal(err)
+				}
+				if saved["europe"].LastGoodAt[item.Selected] != 1006 {
+					t.Fatalf("fresh successful history was not persisted: %#v", saved["europe"].LastGoodAt)
+				}
+			})
+		}
+	}
+}
+
+func TestBlockedRecoveryChecksRecentReserveWhenOldActiveStaysDown(t *testing.T) {
+	item := newPolicyHealthState()
+	item.Selected, item.Mode = "block", "priority"
+	item.CandidateSignature = "a\nb\nc\nd\ne\nf\ng"
+	item.LastWorkingSelection = &workingSelection{Selected: "f", Mode: "priority", CandidateSignature: item.CandidateSignature}
+	item.LastGoodAt["f"], item.LastGoodAt["g"] = 999, 998
+	for _, candidate := range strings.Split(item.CandidateSignature, "\n") {
+		item.LastProbeAt[candidate] = 1004
+	}
+	p := policySettings(healthPolicy{ProbeBatchSize: 3, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	got := outageProbeTargets(time.Unix(1006, 0), strings.Split(item.CandidateSignature, "\n"), item, p)
+	if !reflect.DeepEqual(got, []string{"f", "g"}) {
+		t.Fatalf("a recent reserve was delayed behind failed candidates: %v", got)
+	}
+	// The rechecks never consume the whole batch once a fair candidate is due.
+	got = outageProbeTargets(time.Unix(1019, 0), strings.Split(item.CandidateSignature, "\n"), item, p)
+	if !reflect.DeepEqual(got, []string{"f", "g", "a"}) {
+		t.Fatalf("fair lane was starved by recent nodes: %v", got)
+	}
+	item.LastProbeAt["f"], item.LastProbeAt["g"], item.LastProbeAt["a"] = 1019, 1019, 1019
+	got = outageProbeTargets(time.Unix(1021, 0), strings.Split(item.CandidateSignature, "\n"), item, p)
+	if !reflect.DeepEqual(got, []string{"f", "g", "b"}) {
+		t.Fatalf("fair lane failed to advance: %v", got)
+	}
+}
+
+func TestBlockedRecoverySingleSlotAlternatesHotAndFairLanes(t *testing.T) {
+	item := newPolicyHealthState()
+	item.Selected, item.Mode, item.CandidateSignature = "block", "priority", "old\nreserve"
+	item.LastWorkingSelection = &workingSelection{Selected: "reserve", Mode: "priority", CandidateSignature: item.CandidateSignature}
+	item.LastProbeAt["old"], item.LastProbeAt["reserve"] = 1000, 1000
+	p := policySettings(healthPolicy{ProbeBatchSize: 1, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	if got := outageProbeTargets(time.Unix(1018, 0), []string{"old", "reserve"}, item, p); !reflect.DeepEqual(got, []string{"old"}) {
+		t.Fatalf("fair single-slot turn: %v", got)
+	}
+	if got := outageProbeTargets(time.Unix(1020, 0), []string{"old", "reserve"}, item, p); !reflect.DeepEqual(got, []string{"reserve"}) {
+		t.Fatalf("hot single-slot turn: %v", got)
+	}
+	item.LastProbeAt["old"], item.LastProbeAt["reserve"] = 1018, 1018
+	if got := outageProbeTargets(time.Unix(1022, 0), []string{"old", "reserve"}, item, p); !reflect.DeepEqual(got, []string{"reserve"}) {
+		t.Fatalf("hot single-slot must not idle while fair lane is not due: %v", got)
+	}
+}
+
+func TestBlockedRecoveryRotatesAcrossManyPreviouslyWorkingNodes(t *testing.T) {
+	item := newPolicyHealthState()
+	item.Selected, item.Mode = "block", "priority"
+	candidates := make([]string, 30)
+	for index := range candidates {
+		candidate := fmt.Sprintf("n%d", index+1)
+		candidates[index] = candidate
+		item.LastGoodAt[candidate] = float64(900 - index)
+		item.LastProbeAt[candidate] = 1004
+	}
+	item.CandidateSignature = strings.Join(candidates, "\n")
+	item.LastWorkingSelection = &workingSelection{Selected: "n1", Mode: "priority", CandidateSignature: item.CandidateSignature}
+	p := policySettings(healthPolicy{ProbeBatchSize: 3, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	for _, step := range []struct {
+		second int64
+		want   []string
+	}{
+		{1006, []string{"n1", "n2"}},
+		{1008, []string{"n3", "n4"}},
+		{1010, []string{"n5", "n6"}},
+	} {
+		got := outageProbeTargets(time.Unix(step.second, 0), candidates, item, p)
+		if !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("at %d, hot lane did not rotate: got %v, want %v", step.second, got, step.want)
+		}
+		for _, candidate := range got {
+			item.LastProbeAt[candidate] = float64(step.second)
+		}
+	}
+}
+
+func TestBlockedRecoveryUsesConfiguredTenProbeBatch(t *testing.T) {
+	item := newPolicyHealthState()
+	item.Selected, item.Mode = "block", "priority"
+	candidates := make([]string, 30)
+	for index := range candidates {
+		candidates[index] = fmt.Sprintf("n%d", index+1)
+	}
+	p := policySettings(healthPolicy{ProbeBatchSize: 10, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	if got := outageProbeTargets(time.Unix(1000, 0), candidates, item, p); !reflect.DeepEqual(got, candidates[:10]) {
+		t.Fatalf("configured emergency batch was silently capped: %v", got)
+	}
+	for _, candidate := range candidates[:10] {
+		item.LastProbeAt[candidate] = 1000
+	}
+	if got := outageProbeTargets(time.Unix(1002, 0), candidates, item, p); !reflect.DeepEqual(got, candidates[10:20]) {
+		t.Fatalf("large emergency sweep did not advance: %v", got)
+	}
+}
+
+func TestBlockedRecoveryFindsLastOf128WithHistoricalFailures(t *testing.T) {
+	item := newPolicyHealthState()
+	item.Selected, item.Mode = "block", "priority"
+	candidates := make([]string, 128)
+	for index := range candidates {
+		candidate := fmt.Sprintf("n%d", index+1)
+		candidates[index] = candidate
+		if index < 28 {
+			item.LastGoodAt[candidate] = 900
+			item.LastProbeAt[candidate] = 1000
+		}
+	}
+	item.CandidateSignature = strings.Join(candidates, "\n")
+	item.LastWorkingSelection = &workingSelection{Selected: "n1", Mode: "priority", CandidateSignature: item.CandidateSignature}
+	p := policySettings(healthPolicy{ProbeBatchSize: 10, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	foundAt := -1
+	for cycle := 0; cycle < 18; cycle++ {
+		now := time.Unix(1002+int64(cycle)*2, 0)
+		batch := outageProbeTargets(now, candidates, item, p)
+		if len(batch) > 10 {
+			t.Fatalf("cycle %d exceeded ten configured lanes: %v", cycle, batch)
+		}
+		for _, candidate := range batch {
+			item.LastProbeAt[candidate] = float64(now.Unix())
+			if candidate == "n128" {
+				foundAt = cycle
+			}
+		}
+		if foundAt >= 0 {
+			break
+		}
+	}
+	if foundAt < 0 || foundAt > 14 {
+		t.Fatalf("last reserve was delayed behind historical failures: cycle=%d", foundAt)
+	}
+}
+
+func TestBlockedRetryDoesNotInheritFasterReserveCheckInterval(t *testing.T) {
+	item := newPolicyHealthState()
+	item.Selected = "block"
+	item.LastProbeAt["n1"] = 1000
+	p := policySettings(healthPolicy{
+		ProbeBatchSize: 3, ActiveCheckSeconds: 10, BackupCheckSeconds: 10,
+		BlockRecoverySeconds: 15,
+	}, "priority")
+	if got := outageProbeTargets(time.Unix(1010, 0), []string{"n1"}, item, p); len(got) != 0 {
+		t.Fatalf("blocked retry ran at reserve-check interval: %v", got)
+	}
+	if got := outageProbeTargets(time.Unix(1015, 0), []string{"n1"}, item, p); !reflect.DeepEqual(got, []string{"n1"}) {
+		t.Fatalf("blocked retry missed its own interval: %v", got)
 	}
 }
 
@@ -301,7 +514,7 @@ func TestResponsiveRuntimeKeepsV3SingleBackgroundLane(t *testing.T) {
 	}
 }
 
-func TestEmergencyAvailabilityUsesParallelLanesAndKeepsAllResults(t *testing.T) {
+func TestEmergencyAvailabilityReturnsAfterFirstUsableParallelResult(t *testing.T) {
 	oldTargets := healthTargets
 	defer func() { healthTargets = oldTargets }()
 	healthTargets = append(healthTargets[:0:0], oldTargets[0])
@@ -314,8 +527,8 @@ func TestEmergencyAvailabilityUsesParallelLanesAndKeepsAllResults(t *testing.T) 
 		}))
 	}
 	fast := proxy(40 * time.Millisecond)
-	slowA := proxy(300 * time.Millisecond)
-	slowB := proxy(300 * time.Millisecond)
+	slowA := proxy(900 * time.Millisecond)
+	slowB := proxy(900 * time.Millisecond)
 	defer fast.Close()
 	defer slowA.Close()
 	defer slowB.Close()
@@ -357,14 +570,78 @@ func TestEmergencyAvailabilityUsesParallelLanesAndKeepsAllResults(t *testing.T) 
 		return evidence.OK
 	})
 	elapsed := time.Since(started)
-	if len(measured) != 3 || !measured["a"].OK || !measured["b"].OK || !measured["c"].OK {
-		t.Fatalf("parallel map incomplete: %#v", measured)
+	if len(measured) != 1 || firstResult == 0 {
+		t.Fatalf("emergency result did not stop after the first working path: %#v", measured)
 	}
-	if firstResult <= 0 || firstResult >= 180*time.Millisecond {
+	if firstResult >= 650*time.Millisecond {
 		t.Fatalf("first usable result was delayed: %v", firstResult)
 	}
-	if elapsed < 250*time.Millisecond || elapsed >= 550*time.Millisecond {
-		t.Fatalf("parallel probes took %v; expected one slow-lane duration", elapsed)
+	if elapsed >= 750*time.Millisecond {
+		t.Fatalf("first working path waited for slow peers: %v", elapsed)
+	}
+}
+
+func TestConfiguredTenEmergencyLanesProbeConcurrently(t *testing.T) {
+	oldTargets := healthTargets
+	defer func() { healthTargets = oldTargets }()
+	healthTargets = append(healthTargets[:0:0], oldTargets[0])
+	healthTargets[0].url = "http://probe.invalid/generate_204"
+	var active, peak atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		for previous := peak.Load(); current > previous; previous = peak.Load() {
+			if peak.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		if current == 10 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-time.After(3 * time.Second):
+		}
+		active.Add(-1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	pool := healthFixture(false)
+	pool.Version = 4
+	candidates := make([]string, 10)
+	for index := range candidates {
+		candidates[index] = fmt.Sprintf("n%d", index+1)
+	}
+	pool.BaseOutboundTags = candidates
+	path := filepath.Join(t.TempDir(), "pool.json")
+	if err := writeJSONAtomic(path, pool); err != nil {
+		t.Fatal(err)
+	}
+	lanes := make([]*xraySelectorRuntime, 0, len(candidates))
+	for index := range candidates {
+		lane := newXraySelectorRuntime(Options{HealthPoolFile: path, ProbeURL: server.URL})
+		lane.probeSelector = "outbound-health-background"
+		if index > 0 {
+			lane.probeSelector = fmt.Sprintf("outbound-health-background-%d", index+1)
+		}
+		selected := ""
+		lane.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+			if len(args) > 1 && args[1] == "bo" {
+				selected = args[len(args)-1]
+				return nil, nil
+			}
+			return selectorInfo(selected), nil
+		}
+		lanes = append(lanes, lane)
+	}
+	runtime := &responsiveSelectorRuntime{
+		selectorRuntime: &fakeSelectorRuntime{}, backgrounds: lanes, ctx: context.Background(), enabled: true,
+		parallelEnabled: true, generationPaths: []string{path}, check: func() error { return nil },
+	}
+	runtime.generation = generationStamp(runtime.generationPaths)
+	measured := runtime.ProbeAvailabilityParallel(candidates, nil)
+	if peak.Load() != 10 || len(measured) != 10 {
+		t.Fatalf("configured ten-probe batch was serialized: peak=%d results=%d", peak.Load(), len(measured))
 	}
 }
 
