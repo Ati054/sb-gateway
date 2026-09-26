@@ -175,7 +175,7 @@ func BuildXrayOutboundSource(config map[string]any, nodes []map[string]any, read
 	}
 	health := sortedNodeTags(nodeTags, refreshOnly, map[string]struct{}{"block": {}, "direct-wan": {}})
 	if len(health) != 0 {
-		for _, lane := range xrayHealthProbeLanes {
+		for _, lane := range xrayHealthProbeLanesForConfig(config) {
 			result = append(result, map[string]any{
 				"type": "selector", "tag": lane.Tag, "outbounds": health, "interrupt_exist_connections": false,
 			})

@@ -177,4 +177,18 @@ func TestPublicIngressCannotOccupyInternalPorts(t *testing.T) {
 			t.Fatal("internal port accepted", port)
 		}
 	}
+	for _, port := range []int{19086, 19092} {
+		config := sharedIngressFixture()
+		config["system"].(map[string]any)["routing_monitor"] = map[string]any{"probe_batch_size": 10}
+		deployment := config["transports"].([]any)[0].(map[string]any)["cdn_deployments"].([]any)[0].(map[string]any)
+		deployment["origin_port"] = port
+		if ValidateSharedIngress(config) == nil {
+			t.Fatal("configured health-probe port accepted", port)
+		}
+	}
+	config := sharedIngressFixture()
+	config["transports"].([]any)[0].(map[string]any)["cdn_deployments"].([]any)[0].(map[string]any)["origin_port"] = 19092
+	if err := ValidateSharedIngress(config); err != nil {
+		t.Fatalf("unused probe port became reserved at the default batch: %v", err)
+	}
 }

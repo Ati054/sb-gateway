@@ -192,7 +192,7 @@ func (result *configValidation) validateSystemSettings(config map[string]any) {
 				{"active_quality_interval_seconds", 10, 3600},
 				{"reserve_check_interval_seconds", 10, 86400},
 				{"full_scan_interval_seconds", 10, 86400},
-				{"probe_batch_size", 0, 3},
+				{"probe_batch_size", 0, 10},
 			} {
 				result.optionalIntegerRange(settings, field.name, "system.routing_monitor", field.minimum, field.maximum)
 			}

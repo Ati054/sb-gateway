@@ -131,7 +131,9 @@ func (controller *healthController) probeEmergencyCandidates(policyID string, ca
 		for _, candidate := range candidates {
 			evidence := controller.runtime.ProbeAvailability(candidate)
 			measured[candidate] = evidence
-			accept(candidate, evidence)
+			if accept(candidate, evidence) {
+				break
+			}
 		}
 	}
 	if err := takeProbeInterruption(controller.runtime); err != nil {

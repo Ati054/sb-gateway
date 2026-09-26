@@ -1,30 +1,32 @@
 # Changelog
 
-## 1.6.22
+## 1.6.24
 
 ## Русский
 
-### Описание
-
-Версия 1.6.22 ускоряет поиск рабочего резервного узла при полном отказе и
-ограничивает накопление служебных данных подписок и Xray.
-
 ### Изменения
 
-- Пока в маршрутном листе остаются непроверенные резервные узлы, аварийный
-  обход продолжает проверять их короткими порциями. Интервал поиска при полном
-  `block` применяется только после безуспешной проверки всего набора.
-- Устаревшие снимки подписки удаляются даже для набора без файлов учётных
-  данных. При ошибке чтения активного состояния или отката очистка не
-  выполняется.
-- Для основных маршрутов и сервисных правил Xray сохраняет один предыдущий
-  обработчик. Более старые удаляются после подтверждения выбора; неудачное
-  удаление повторяется, а повторно выбранный обработчик защищён.
-- Канал обновления подписок ведёт журнал отложенной очистки. Он удаляет
-  обработчики, которые были созданы, но не выбраны после ошибки, и сохраняет
-  задачу удаления старого обработчика при временном отказе Xray API.
-- Обновление с 1.6.21 сохраняет конфигурацию, подписки, секреты и историю
-  качества узлов. Пользовательские настройки менять не требуется.
+- Сигнал ошибки соединения с активным VLESS-сервером запускает внеочередную
+  проверку, но не переключает маршрут без подтверждения. Проверки WAN/DNS и
+  резерва остаются обязательными.
+- После отказа быстрый TCP-отбор работает и на коротких, и на больших списках;
+  ответ порта лишь меняет порядок проверки. Рабочий узел подтверждается HTTPS
+  через Xray. Аварийную порцию можно настроить от 1 до 10 узлов.
+- При изменении адреса, порта, транспорта или учётных данных узла подписки
+  старая история его доступности сбрасывается. Выбранный outbound проверяется
+  на фактическое наличие в Xray и при необходимости восстанавливается;
+  устаревшие обработчики удаляются безопасно.
+- Отказ одной из двух контрольных HTTPS-целей не меняет маршрут. Timeout
+  активного узла подтверждается следующим быстрым циклом. После возврата на
+  приоритетный узел пауза выбора защищает от немедленного обратного прыжка
+  из-за шумных измерений качества.
+- В **Эксплуатация → Журналы SB Gateway** добавлена вкладка **Маршруты** с
+  причинами переключений и классами проверок без URL, адресов серверов и
+  паролей. После обновления успешные `fetch,info` опросы не засоряют общий
+  журнал RouterOS.
+- Обновление с публичной 1.6.22 сохраняет конфигурацию, подписки, секреты и
+  историю качества. 1.6.23 использовалась как лабораторный кандидат и не
+  публиковалась.
 
 ### Проверка
 
@@ -32,50 +34,42 @@
 
 ### Установка и обновление
 
-Для чистой установки используйте `sb-gateway-1.6.22-routeros-bundle.zip` и
-[инструкцию](../INSTALL-RU.md).
-
-Для обновления загрузите `sb-gateway-1.6.22-linux-arm64.tar` в разделе
-**Эксплуатация → Обновление контейнера**. Панель проверяет архитектуру, версию
-и SHA-256 до остановки текущего контейнера.
+Для новой установки используйте `sb-gateway-1.6.24-routeros-bundle.zip` и
+[инструкцию](../INSTALL-RU.md). Для обновления загрузите
+`sb-gateway-1.6.24-linux-arm64.tar` в разделе **Эксплуатация → Обновление
+контейнера**. Панель проверяет архитектуру, версию и SHA-256 до остановки
+текущего контейнера.
 
 ## English
 
-### Overview
-
-Version 1.6.22 speeds up reserve discovery during a complete route outage and
-bounds subscription and Xray runtime artifacts.
-
 ### Changes
 
-- During a complete outage, the route monitor checks remaining untested nodes
-  in short emergency batches. The blocked-route interval applies only after
-  the full set has been checked without finding a working node.
-- Obsolete subscription snapshots are removed even when the current set has no
-  generated credential files. Cleanup stops if the active or rollback pointer
-  cannot be read.
-- Main and service routes retain one previous Xray handler. Older handlers are
-  removed after selector confirmation; failed cleanup is retried, and a
-  reselected handler cannot be removed as stale.
-- The subscription update route journals deferred cleanup, including handlers
-  added but never selected after an error. A temporary Xray API failure does
-  not discard the old handler's cleanup task.
-- Upgrading from 1.6.21 preserves configuration, subscriptions, secrets, and
-  node quality history. No setting changes are required.
+- A VLESS server connection-failure signal triggers an extra active-node
+  probe, never an unconfirmed route switch. WAN/DNS and reserve checks remain
+  mandatory.
+- After an outage, fast TCP triage covers both small and large node lists.
+  An open port only prioritizes a candidate; HTTPS through Xray confirms it.
+  The emergency batch size is configurable from 1 to 10.
+- Subscription endpoint changes invalidate stale node health history. The
+  selected outbound must exist in Xray and is restored when possible; stale
+  handlers are retired safely.
+- Failure of one of two independent HTTPS targets does not change the route.
+  Active-node timeouts are confirmed in the next fast cycle. A recovered
+  priority node is protected from immediate quality-driven ping-pong.
+- **Operations → SB Gateway logs → Routes** now shows switch reasons and
+  probe classes without server addresses, URLs or passwords. Successful
+  `fetch,info` polling is excluded from the RouterOS general log after update.
+- Upgrading from public 1.6.22 preserves configuration, subscriptions,
+  secrets and quality history. 1.6.23 was a lab candidate, not a public release.
 
 ### Verification
 
-The build and Go and UI test suites passed. Container update, routing and DNS,
-container outage and recovery, and node failover passed on an isolated ARM64
-CHR. A test subscription refresh loaded 317 nodes and activated the updated
-runtime automatically. Xray API cleanup failures were covered by unit tests,
-not by fault injection on the CHR.
+
 
 ### Installation and update
 
-For a clean installation, use `sb-gateway-1.6.22-routeros-bundle.zip` and the
-[installation guide](../INSTALL.md).
-
-To update, upload `sb-gateway-1.6.22-linux-arm64.tar` under
-**Operations → Container update**. The panel verifies architecture, version,
-and SHA-256 before stopping the current container.
+For a clean installation use `sb-gateway-1.6.24-routeros-bundle.zip` and the
+[installation guide](../INSTALL.md). For an update, upload
+`sb-gateway-1.6.24-linux-arm64.tar` under **Operations → Container update**.
+The panel verifies architecture, version and SHA-256 before stopping the
+current container.

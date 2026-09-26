@@ -26,9 +26,11 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	if full := time.Unix(int64(item.LastProbeAt[selected]), 0); full.After(last) {
 		last = full
 	}
-	if now.Sub(last) < interval {
+	forced := controller.forceLiveness[policyID]
+	if !forced && now.Sub(last) < interval {
 		return false, nil
 	}
+	delete(controller.forceLiveness, policyID)
 	savedChanged := rememberWorkingSelection(contract, item)
 	actual, err := controller.runtime.Current(policyID)
 	if err != nil {
@@ -54,6 +56,9 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	controller.livenessAt[policyID] = now
 	wasFailed := item.AvailabilityFailures[selected] > 0
 	if evidence.OK {
+		if wasFailed {
+			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-recovered", Policy: policyID, Node: selected, Targets: probeTargetResults(evidence)})
+		}
 		item.AvailabilityFailures[selected] = 0
 		delete(item.FailureClass, selected)
 		savedChanged = clearUnderlayFailure(item) || savedChanged
@@ -61,25 +66,10 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 		// Quality/recovery confirmations are deliberately not accelerated.
 		return wasFailed || statusChanged || savedChanged, nil
 	}
-	failureCount := 1
-	if evidence.Failure == probeFailureTimeout && !wasFailed {
-		// A timeout is not deterministic enough for an immediate route change,
-		// but waiting for another scheduler cycle needlessly extends an outage.
-		// Confirm it with a second independent request in the same fast-lane tick.
-		confirmation := controller.runtime.ProbeAvailability(selected)
-		if confirmation.OK {
-			item.AvailabilityFailures[selected] = 0
-			delete(item.FailureClass, selected)
-			savedChanged = clearUnderlayFailure(item) || savedChanged
-			savedChanged = rememberWorkingSelection(contract, item) || savedChanged
-			return statusChanged || savedChanged, nil
-		}
-		evidence.Failure = strongerProbeFailure(evidence.Failure, confirmation.Failure)
-		failureCount++
-	}
 	item.FailureClass[selected] = string(evidence.Failure)
 	recoveringFromUnderlay := item.UnderlayFailure != ""
 	if controller.suppressForUnderlayFailure(now, evidence, item) {
+		controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID, Node: selected, Failure: evidence.Failure, Underlay: item.UnderlayFailure, Targets: probeTargetResults(evidence)})
 		item.AvailabilityFailures[selected] = 0
 		return true, nil
 	}
@@ -89,11 +79,13 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 		// marker, keep the active route, and require the next independent fast
 		// probe to confirm a real node failure.  TLS failures remain immediate:
 		// they are deterministic properties of the selected endpoint.
+		controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID, Node: selected, Failure: evidence.Failure, Reason: "underlay-recovered", Targets: probeTargetResults(evidence)})
 		item.AvailabilityFailures[selected] = 0
 		return true, nil
 	}
-	item.AvailabilityFailures[selected] += failureCount
+	item.AvailabilityFailures[selected]++
 	threshold := failureConfirmationThreshold(evidence, p.failureThreshold)
+	controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-failed", Policy: policyID, Node: selected, Failure: evidence.Failure, Count: item.AvailabilityFailures[selected], Threshold: threshold, Targets: probeTargetResults(evidence)})
 	if item.AvailabilityFailures[selected] >= threshold {
 		item.AvailabilityFailures[selected] = p.failureThreshold
 		// The failed active must not consume the emergency reserve batch again.
