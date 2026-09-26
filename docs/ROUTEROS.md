@@ -349,6 +349,16 @@ byte counters для включённых local source CIDR, hook forward с `po
 
 ## Watchdog и fail-open
 
+После запуска контейнер проверяет правила `/system/logging` и исключает
+`fetch,info` из тех правил, которые иначе записали бы успешные опросы
+watchdog. Существующие отрицания тем (например, `info,!wireguard`) сохраняются;
+правила с дополнительной обязательной темой, `fetch,warning` и `fetch,error`
+не меняются. При недоступном RouterOS REST проверка повторяется, а частота
+и работа watchdog остаются прежними. Для диагностики проверьте
+`/system/logging/print detail`: каждое включённое правило, способное писать
+`fetch,info`, должно содержать `!fetch` или `!info`. Уже записанные строки
+журнала не удаляются.
+
 Контейнер настроен с `start-on-boot=yes`, `restart-policy=always` и
 `restart-interval=10s`; на старых RouterOS используется совместимый
 `auto-restart-interval=10s`.
