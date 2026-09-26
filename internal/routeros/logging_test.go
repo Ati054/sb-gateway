@@ -18,7 +18,13 @@ func TestWithoutFetchInfoTopicPreservesOtherLogMessages(t *testing.T) {
 	}{
 		{"info", "info,!fetch", true},
 		{"fetch", "fetch,!info", true},
-		{"info,!script", "", false},
+		{"info,!script", "info,!script,!fetch", true},
+		{"info,!wireguard", "info,!wireguard,!fetch", true},
+		{"fetch,!script", "fetch,!script,!info", true},
+		{"info,fetch,!script", "info,fetch,!script,!fetch", true},
+		{"info,script", "", false},
+		{"info,!info", "", false},
+		{"fetch,!fetch", "", false},
 		{"info,fetch", "info,fetch,!fetch", true},
 		{"info,!fetch", "", false},
 		{"fetch,!info", "", false},
@@ -41,6 +47,7 @@ func TestSuppressFetchInfoLogsPatchesExistingRulesAndIsIdempotent(t *testing.T) 
 		{".id": "*3", "topics": "error", "disabled": "false"},
 		{".id": "*4", "topics": "fetch", "disabled": "false"},
 		{".id": "*5", "topics": "info", "disabled": "true"},
+		{".id": "*6", "topics": "info,!wireguard", "disabled": "false"},
 	}
 	patches := make([]string, 0)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -49,7 +56,8 @@ func TestSuppressFetchInfoLogsPatchesExistingRulesAndIsIdempotent(t *testing.T) 
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/logging":
 			_ = json.NewEncoder(response).Encode(rules)
 		case request.Method == http.MethodPatch && request.URL.Path == "/rest/system/logging/*1",
-			request.Method == http.MethodPatch && request.URL.Path == "/rest/system/logging/*4":
+			request.Method == http.MethodPatch && request.URL.Path == "/rest/system/logging/*4",
+			request.Method == http.MethodPatch && request.URL.Path == "/rest/system/logging/*6":
 			var payload map[string]string
 			if json.NewDecoder(request.Body).Decode(&payload) != nil {
 				http.Error(response, "invalid payload", http.StatusBadRequest)
@@ -82,7 +90,7 @@ func TestSuppressFetchInfoLogsPatchesExistingRulesAndIsIdempotent(t *testing.T) 
 	if err != nil || changed {
 		t.Fatalf("second run: changed=%t err=%v", changed, err)
 	}
-	want := []string{"/rest/system/logging/*1 info,!fetch", "/rest/system/logging/*4 fetch,!info"}
+	want := []string{"/rest/system/logging/*1 info,!fetch", "/rest/system/logging/*4 fetch,!info", "/rest/system/logging/*6 info,!wireguard,!fetch"}
 	if !reflect.DeepEqual(patches, want) {
 		t.Fatalf("patches=%v want=%v", patches, want)
 	}

@@ -1,32 +1,22 @@
 # Changelog
 
-## 1.6.24
+## 1.6.25
 
 ## Русский
 
 ### Изменения
 
-- Сигнал ошибки соединения с активным VLESS-сервером запускает внеочередную
-  проверку, но не переключает маршрут без подтверждения. Проверки WAN/DNS и
-  резерва остаются обязательными.
-- После отказа быстрый TCP-отбор работает и на коротких, и на больших списках;
-  ответ порта лишь меняет порядок проверки. Рабочий узел подтверждается HTTPS
-  через Xray. Аварийную порцию можно настроить от 1 до 10 узлов.
-- При изменении адреса, порта, транспорта или учётных данных узла подписки
-  старая история его доступности сбрасывается. Выбранный outbound проверяется
-  на фактическое наличие в Xray и при необходимости восстанавливается;
-  устаревшие обработчики удаляются безопасно.
-- Отказ одной из двух контрольных HTTPS-целей не меняет маршрут. Timeout
-  активного узла подтверждается следующим быстрым циклом. После возврата на
-  приоритетный узел пауза выбора защищает от немедленного обратного прыжка
-  из-за шумных измерений качества.
-- В **Эксплуатация → Журналы SB Gateway** добавлена вкладка **Маршруты** с
-  причинами переключений и классами проверок без URL, адресов серверов и
-  паролей. После обновления успешные `fetch,info` опросы не засоряют общий
-  журнал RouterOS.
-- Обновление с публичной 1.6.22 сохраняет конфигурацию, подписки, секреты и
-  историю качества. 1.6.23 использовалась как лабораторный кандидат и не
-  публиковалась.
+- Отказ одной контрольной HTTPS-цели больше не считается отказом VLESS-узла:
+  активный маршрут проверяется на трёх независимых целях, а переключение
+  требует подтверждённого отказа и рабочего резерва. Общая авария WAN/DNS
+  по-прежнему не вызывает перебор узлов.
+- При обновлении контейнера правило журнала RouterOS `info,!wireguard`
+  сохраняет исключение WireGuard и получает `!fetch`; успешные опросы
+  `fetch,info` больше не заполняют журнал.
+- Необязательный скрипт Cloudflare теперь учитывает последнюю строку обоих
+  официальных фидов даже без завершающего перевода строки. Для его обновления
+  повторно импортируйте `routeros/cloudflare-update.rsc` из нового bundle.
+  Обычное обновление контейнера не заменяет уже установленный RouterOS script.
 
 ### Проверка
 
@@ -34,42 +24,39 @@
 
 ### Установка и обновление
 
-Для новой установки используйте `sb-gateway-1.6.24-routeros-bundle.zip` и
+Для новой установки используйте `sb-gateway-1.6.25-routeros-bundle.zip` и
 [инструкцию](../INSTALL-RU.md). Для обновления загрузите
-`sb-gateway-1.6.24-linux-arm64.tar` в разделе **Эксплуатация → Обновление
-контейнера**. Панель проверяет архитектуру, версию и SHA-256 до остановки
-текущего контейнера.
+`sb-gateway-1.6.25-linux-arm64.tar` в разделе **Эксплуатация → Обновление
+контейнера**. Если используется необязательный Cloudflare updater, отдельно
+повторно импортируйте его скрипт из bundle.
 
 ## English
 
 ### Changes
 
-- A VLESS server connection-failure signal triggers an extra active-node
-  probe, never an unconfirmed route switch. WAN/DNS and reserve checks remain
-  mandatory.
-- After an outage, fast TCP triage covers both small and large node lists.
-  An open port only prioritizes a candidate; HTTPS through Xray confirms it.
-  The emergency batch size is configurable from 1 to 10.
-- Subscription endpoint changes invalidate stale node health history. The
-  selected outbound must exist in Xray and is restored when possible; stale
-  handlers are retired safely.
-- Failure of one of two independent HTTPS targets does not change the route.
-  Active-node timeouts are confirmed in the next fast cycle. A recovered
-  priority node is protected from immediate quality-driven ping-pong.
-- **Operations → SB Gateway logs → Routes** now shows switch reasons and
-  probe classes without server addresses, URLs or passwords. Successful
-  `fetch,info` polling is excluded from the RouterOS general log after update.
-- Upgrading from public 1.6.22 preserves configuration, subscriptions,
-  secrets and quality history. 1.6.23 was a lab candidate, not a public release.
+- One failed HTTPS target no longer marks a VLESS node down. The active route
+  checks three independent targets; failover still requires confirmed failure
+  and a working reserve. A shared WAN/DNS outage does not trigger node cycling.
+- On container update, a RouterOS `info,!wireguard` logging rule keeps its
+  WireGuard exclusion and gains `!fetch`, suppressing successful fetch polling.
+- The optional Cloudflare updater now keeps the final line of both official
+  feeds without a trailing newline. Re-import `routeros/cloudflare-update.rsc`
+  from the new bundle; updating the container alone does not replace an
+  installed RouterOS script.
 
 ### Verification
 
-
+Go and UI tests passed. ARM64 CHR checks covered RouterOS script syntax,
+routing and DNS, active-node failure, short flaps, shared-WAN outage, container
+outage, and restoration of the original configuration. No false switch occurred
+in controlled URLTest scenarios; this does not rule out other causes in a live
+network. CHR also verified `fetch` exclusion with `info,!wireguard` and
+Cloudflare feed updates to 15 IPv4 and 7 IPv6 prefixes. Virtual CPU failover
+timings are not physical-router performance measurements.
 
 ### Installation and update
 
-For a clean installation use `sb-gateway-1.6.24-routeros-bundle.zip` and the
+For a clean installation use `sb-gateway-1.6.25-routeros-bundle.zip` and the
 [installation guide](../INSTALL.md). For an update, upload
-`sb-gateway-1.6.24-linux-arm64.tar` under **Operations → Container update**.
-The panel verifies architecture, version and SHA-256 before stopping the
-current container.
+`sb-gateway-1.6.25-linux-arm64.tar` under **Operations → Container update**.
+If using the optional Cloudflare updater, re-import its script from the bundle.
