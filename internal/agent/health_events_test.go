@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,5 +50,27 @@ func TestProbeTargetResultsNeverIncludeRawEndpoint(t *testing.T) {
 	})
 	if results["gstatic-204"] != "fatal-tls" || results["cloudflare-trace"] != "ok" || len(results) != 2 {
 		t.Fatalf("unexpected sanitized targets: %#v", results)
+	}
+}
+
+func TestDegradedSwitchJournalIncludesOnlyNumericDecisionEvidence(t *testing.T) {
+	item := newPolicyHealthState()
+	from, to := 2500, 500
+	item.MedianDelayMS = map[string]*int{"active": &from, "reserve": &to}
+	item.PacketLossPercent = map[string]float64{"active": 40, "reserve": 0}
+	item.Failures["active"] = 3
+	item.LastProbeAt["reserve"] = 970
+	quality := switchQualityEvidence(time.Unix(1000, 0), item, "active", "reserve", "active-degraded")
+	if quality == nil || quality.FromBadProbes != 3 || quality.ToProbeAgeSeconds != 30 ||
+		*quality.FromMedianMS != from || *quality.ToMedianMS != to {
+		t.Fatalf("missing switch evidence: %+v", quality)
+	}
+	body, err := json.Marshal(healthEvent{Event: "switch", Quality: quality})
+	if err != nil || !strings.Contains(string(body), `"from_loss_percent":40`) ||
+		strings.Contains(string(body), "candidate_nodes") {
+		t.Fatalf("unsafe or incomplete event: %s (%v)", body, err)
+	}
+	if switchQualityEvidence(time.Unix(1000, 0), item, "active", "reserve", "active-unavailable") != nil {
+		t.Fatal("outage switch gained unrelated quality payload")
 	}
 }

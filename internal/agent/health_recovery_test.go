@@ -62,6 +62,177 @@ func TestConfirmedFailureProbesReserveWithoutBackupWait(t *testing.T) {
 	}
 }
 
+func TestCorrelatedReserveFailureDoesNotCauseIntermediateHop(t *testing.T) {
+	for _, mode := range []string{"priority", "best"} {
+		t.Run(mode, func(t *testing.T) {
+			controller, runtime, item := livenessFixture(t, mode)
+			contract := runtime.pool.HealthPolicies["europe"]
+			contract.Candidates = []string{"de", "nl", "fr"}
+			contract.Groups = append(contract.Groups, healthGroup{Selector: "country:FR", Members: []string{"fr"}})
+			contract.Nodes["fr"] = healthNode{Label: "France", Country: "FR"}
+			contract.Policy.ProbeBatchSize = 3
+			runtime.pool.HealthPolicies["europe"] = contract
+			item.CandidateSignature = "de\nnl\nfr"
+			item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
+			item.Recoveries["nl"] = 3
+			reserveDelay := 90
+			item.MedianDelayMS["nl"] = &reserveDelay
+			item.LastProbeAt["nl"] = 1000
+			// The previously healthy reserve has failed with the active path.
+			runtime.probes["de"] = probeEvidence{Failure: probeFailureTimeout}
+			runtime.probes["nl"] = probeEvidence{Failure: probeFailureTimeout}
+			runtime.probes["fr"] = successfulEvidence(120)
+			for _, second := range []int64{1010, 1012} {
+				if err := controller.Tick(time.Unix(second, 0)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if item.Selected != "fr" || item.LastSwitchReason != "active-unavailable" ||
+				hasSelection(runtime.selections, "europe", "nl") || !hasSelection(runtime.selections, "europe", "fr") {
+				t.Fatalf("outage hopped through dead cached reserve: selected=%s switches=%v probes=%v", item.Selected, runtime.selections, runtime.availabilityCalls)
+			}
+			if len(runtime.availabilityCalls) > 2+contract.Policy.ProbeBatchSize {
+				t.Fatalf("emergency probes exceeded configured batch: %v", runtime.availabilityCalls)
+			}
+		})
+	}
+}
+
+func TestFailedBackgroundProbeIsNotRepeatedDuringEmergency(t *testing.T) {
+	controller, runtime, item := livenessFixture(t, "priority")
+	contract := runtime.pool.HealthPolicies["europe"]
+	contract.Candidates = []string{"de", "nl", "fr"}
+	contract.Groups = append(contract.Groups, healthGroup{Selector: "country:FR", Members: []string{"fr"}})
+	contract.Nodes["fr"] = healthNode{Label: "France", Country: "FR"}
+	contract.Policy.ProbeBatchSize = 2
+	runtime.pool.HealthPolicies["europe"] = contract
+	item.CandidateSignature = "de\nnl\nfr"
+	item.LastProbeAt["de"], item.LastProbeAt["nl"] = 1000, 500
+	item.AvailabilityFailures["de"] = 1
+	controller.regularNext["europe"] = time.Time{}
+	item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
+	item.Recoveries["nl"] = 3
+	reserveDelay := 90
+	item.MedianDelayMS["nl"] = &reserveDelay
+	runtime.probes["de"] = probeEvidence{Failure: probeFailureTimeout}
+	runtime.probes["nl"] = probeEvidence{Failure: probeFailureTimeout}
+	runtime.probes["fr"] = successfulEvidence(120)
+	if err := controller.Tick(time.Unix(1012, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if item.Selected != "fr" || len(runtime.probeCalls) < 2 || strings.Join(runtime.probeCalls[len(runtime.probeCalls)-2:], ",") != "nl,de" ||
+		len(runtime.availabilityCalls) != 1 || runtime.availabilityCalls[0] != "fr" {
+		t.Fatalf("already failed reserve was retried: selected=%s full=%v availability=%v", item.Selected, runtime.probeCalls, runtime.availabilityCalls)
+	}
+}
+
+func TestFailedCachedReserveCannotPreventFailClosed(t *testing.T) {
+	controller, runtime, item := livenessFixture(t, "priority")
+	contract := runtime.pool.HealthPolicies["europe"]
+	contract.Policy.ProbeBatchSize = 1
+	runtime.pool.HealthPolicies["europe"] = contract
+	item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
+	item.Recoveries["nl"] = 3
+	reserveDelay := 90
+	item.MedianDelayMS["nl"] = &reserveDelay
+	item.LastProbeAt["nl"] = 1000
+	runtime.probes["de"] = probeEvidence{Failure: probeFailureTimeout}
+	runtime.probes["nl"] = probeEvidence{Failure: probeFailureTimeout}
+	for _, second := range []int64{1010, 1012} {
+		if err := controller.Tick(time.Unix(second, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.Selected != "block" || hasSelection(runtime.selections, "europe", "nl") {
+		t.Fatalf("dead cached reserve was selected: selected=%s switches=%v", item.Selected, runtime.selections)
+	}
+	if len(runtime.availabilityCalls) != 3 {
+		t.Fatalf("single-slot emergency exceeded budget: %v", runtime.availabilityCalls)
+	}
+}
+
+func TestClosedCachedReserveDoesNotHideNextWorkingReserve(t *testing.T) {
+	controller, runtime, item := livenessFixture(t, "priority")
+	contract := runtime.pool.HealthPolicies["europe"]
+	contract.Candidates = []string{"de", "nl", "es", "fr"}
+	contract.Groups = append(contract.Groups, healthGroup{Selector: "country:FR", Members: []string{"fr"}})
+	contract.Nodes["es"] = healthNode{Label: "Spain", Country: "ES"}
+	contract.Nodes["fr"] = healthNode{Label: "France", Country: "FR"}
+	contract.Policy.ProbeBatchSize = 1
+	runtime.pool.HealthPolicies["europe"] = contract
+	item.CandidateSignature = "de\nnl\nes\nfr"
+	reserveDelay := 90
+	for _, id := range []string{"nl", "fr"} {
+		item.AvailabilityOK[id], item.QualityOK[id] = true, true
+		item.Recoveries[id] = 3
+		item.LastProbeAt[id] = 1000
+		item.MedianDelayMS[id] = &reserveDelay
+	}
+	runtime.probes["de"] = probeEvidence{Failure: probeFailureTimeout}
+	runtime.probes["es"] = probeEvidence{Failure: probeFailureTimeout}
+	runtime.probes["fr"] = successfulEvidence(90)
+	controller.runtime = &preflightFixture{fakeSelectorRuntime: runtime, closed: map[string]bool{"nl": true}}
+	for _, second := range []int64{1010, 1012} {
+		if err := controller.Tick(time.Unix(second, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.Selected != "fr" || hasSelection(runtime.selections, "europe", "nl") ||
+		len(runtime.availabilityCalls) == 0 || runtime.availabilityCalls[len(runtime.availabilityCalls)-1] != "fr" {
+		t.Fatalf("closed top reserve hid the next cached reserve: selected=%s switches=%v probes=%v", item.Selected, runtime.selections, runtime.availabilityCalls)
+	}
+}
+
+func TestEmergencyReservePriorityRespectsBatchAndPreflight(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets []string
+		reserve string
+		closed  map[string]bool
+		batch   int
+		want    string
+	}{
+		{"reserve first", []string{"first", "cached", "last"}, "cached", nil, 3, "cached,first,last"},
+		{"single slot", []string{"first", "last"}, "cached", nil, 1, "cached"},
+		{"closed reserve", []string{"first", "last"}, "cached", map[string]bool{"cached": true}, 2, "first,last"},
+		{"no cached reserve", []string{"first", "last"}, "", nil, 2, "first,last"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := prioritizeEmergencyReserve(test.targets, test.reserve, test.closed, test.batch)
+			if strings.Join(got, ",") != test.want {
+				t.Fatalf("priority/batch = %v, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+type reverseParallelRuntime struct{ *fakeSelectorRuntime }
+
+func (runtime *reverseParallelRuntime) ProbeAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool) map[string]probeEvidence {
+	measured := make(map[string]probeEvidence, len(candidates))
+	for index := len(candidates) - 1; index >= 0; index-- {
+		candidate := candidates[index]
+		measured[candidate] = runtime.ProbeAvailability(candidate)
+		if onResult(candidate, measured[candidate]) {
+			break
+		}
+	}
+	return measured
+}
+
+func TestEmergencyParallelChoosesFirstFreshSuccess(t *testing.T) {
+	base := &fakeSelectorRuntime{probes: map[string]probeEvidence{
+		"preferred": successfulEvidence(100), "fast-response": successfulEvidence(150),
+	}}
+	controller := &healthController{runtime: &reverseParallelRuntime{base}}
+	measured, selected, err := controller.probeEmergencyCandidates("route", []string{"preferred", "fast-response"}, effectivePolicySettings{})
+	if err != nil || selected != "fast-response" || !measured["fast-response"].OK ||
+		len(base.selections) != 1 || base.selections[0][1] != "fast-response" {
+		t.Fatalf("first confirmed response was not selected once: selected=%s switches=%v measured=%v err=%v", selected, base.selections, measured, err)
+	}
+}
+
 func TestSingleFailureDoesNotSwitchAndRestoresNormalCadence(t *testing.T) {
 	pool := healthFixture(false)
 	contract := pool.HealthPolicies["europe"]
@@ -199,7 +370,7 @@ func TestRecoveredUnderlayRequiresFreshFastLaneFailureBeforeSwitching(t *testing
 	}
 }
 
-func TestMassOutagePrefersConfirmedReserveAndRecoversWithoutCooldown(t *testing.T) {
+func TestMassOutageRequiresCurrentReserveSuccessAndRecoversWithoutCooldown(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	settings := effectivePolicySettings{failureThreshold: 3, recoveryThreshold: 3, backup: 300}
 	for _, mode := range []string{"priority", "best"} {
@@ -222,8 +393,19 @@ func TestMassOutagePrefersConfirmedReserveAndRecoversWithoutCooldown(t *testing.
 				map[string]probeEvidence{"dead-a": failedEvidence(), "flapping": successfulEvidence(flappingDelay), "dead-b": failedEvidence()},
 				quality, available, item, settings,
 			)
+			if desired != "flapping" || reason != "active-unavailable" {
+				t.Fatalf("cached reserve displaced a current success: %q (%s)", desired, reason)
+			}
+
+			desired, reason = selectDesired(
+				now, mode, "active", candidates,
+				map[string]int{"active": 0, "dead-a": 0, "flapping": 0, "dead-b": 1, "stable": 2}, nil,
+				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay}, nil,
+				map[string]probeEvidence{"flapping": successfulEvidence(flappingDelay), "stable": successfulEvidence(stableDelay)},
+				quality, available, item, settings,
+			)
 			if desired != "stable" || reason != "active-unavailable" {
-				t.Fatalf("mass outage selected %q (%s), want confirmed reserve", desired, reason)
+				t.Fatalf("fresh confirmed reserve not preferred: %q (%s)", desired, reason)
 			}
 
 			item.AvailabilityFailures["stable"] = settings.failureThreshold

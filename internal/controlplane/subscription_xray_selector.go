@@ -20,6 +20,8 @@ const subscriptionUpdateDynamicPrefix = "sb-subscription-update-"
 
 const subscriptionUpdateRetirementState = "subscription-update-retired"
 
+const maxSubscriptionCleanupBacklog = 8
+
 var subscriptionUpdateDynamicTag = regexp.MustCompile(`^sb-subscription-update-[a-f0-9]{12}$`)
 
 type subscriptionOutboundRetirement struct {
@@ -69,6 +71,10 @@ func selectSubscriptionXrayOutbound(ctx context.Context, options RuntimeOptions,
 			return nil
 		}
 		if repository != nil {
+			retirement.cleanup(ctx, options, previous, command)
+			if !slices.Contains(retirement.pending, runtimeTag) && !slices.Contains(retirement.tags, runtimeTag) && retirement.backlog() >= maxSubscriptionCleanupBacklog {
+				return errors.New("Xray subscription outbound cleanup backlog is full")
+			}
 			// ado can succeed even when its response is lost. Record the new
 			// handler before creating it so an unselected candidate is reclaimed.
 			if err := retirement.rememberPending(runtimeTag); err != nil {
@@ -173,6 +179,14 @@ func (state *subscriptionOutboundRetirement) rememberPending(tag string) error {
 	return state.save()
 }
 
+func (state *subscriptionOutboundRetirement) backlog() int {
+	count := len(state.pending)
+	if len(state.tags) > 1 {
+		count += len(state.tags) - 1
+	}
+	return count
+}
+
 func (state *subscriptionOutboundRetirement) cleanup(ctx context.Context, options RuntimeOptions, selected string, command subscriptionXrayCommand) {
 	if state.repository == nil {
 		return
@@ -182,9 +196,8 @@ func (state *subscriptionOutboundRetirement) cleanup(ctx context.Context, option
 		if tag == selected {
 			continue
 		}
-		output, err := command(ctx, options.XrayBinary, "api", "rmo", "--server="+options.XrayAPIServer, tag)
-		if err != nil && !subscriptionOutboundAlreadyAbsent(output) {
-			log.Printf("subscription update unselected outbound cleanup deferred: %v", err)
+		if !removeSubscriptionOutboundConfirmed(ctx, options, tag, command) {
+			log.Printf("subscription update unselected outbound cleanup deferred")
 			unconfirmed = append(unconfirmed, tag)
 		}
 	}
@@ -198,23 +211,45 @@ func (state *subscriptionOutboundRetirement) cleanup(ctx context.Context, option
 	state.tags = retained
 	// One previous generation remains available to connections opened before
 	// the switch. Older generations are removed, oldest first.
-	for len(state.tags) > 1 {
-		tag := state.tags[0]
-		output, err := command(ctx, options.XrayBinary, "api", "rmo", "--server="+options.XrayAPIServer, tag)
-		if err != nil && !subscriptionOutboundAlreadyAbsent(output) {
-			log.Printf("subscription update outbound cleanup deferred: %v", err)
-			break
+	if len(state.tags) > 1 {
+		older := state.tags[:len(state.tags)-1]
+		budget := min(len(older), 4)
+		failed := make([]string, 0, budget)
+		for _, tag := range older[:budget] {
+			if !removeSubscriptionOutboundConfirmed(ctx, options, tag, command) {
+				log.Printf("subscription update outbound cleanup deferred")
+				failed = append(failed, tag)
+			}
 		}
-		state.tags = state.tags[1:]
+		state.tags = append(append(append([]string{}, older[budget:]...), failed...), state.tags[len(state.tags)-1])
 	}
 	if err := state.save(); err != nil {
 		log.Printf("subscription update outbound cleanup state deferred: %v", err)
 	}
 }
 
-func subscriptionOutboundAlreadyAbsent(output []byte) bool {
-	message := strings.ToLower(string(output))
-	return strings.Contains(message, "not found") || strings.Contains(message, "non existing")
+func removeSubscriptionOutboundConfirmed(ctx context.Context, options RuntimeOptions, tag string, command subscriptionXrayCommand) bool {
+	if _, err := command(ctx, options.XrayBinary, "api", "rmo", "--server="+options.XrayAPIServer, tag); err == nil {
+		return true
+	}
+	output, err := command(ctx, options.XrayBinary, "api", "lso", "--server="+options.XrayAPIServer)
+	if err != nil {
+		return false
+	}
+	var listing struct {
+		Outbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"outbounds"`
+	}
+	if json.Unmarshal(output, &listing) != nil || listing.Outbounds == nil {
+		return false
+	}
+	for _, outbound := range listing.Outbounds {
+		if outbound.Tag == tag {
+			return false
+		}
+	}
+	return true
 }
 
 func addSubscriptionXrayOutbound(ctx context.Context, options RuntimeOptions, tag string, raw json.RawMessage, command subscriptionXrayCommand) error {

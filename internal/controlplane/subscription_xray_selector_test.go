@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -175,6 +176,14 @@ func TestSubscriptionUpdateSelectorRetriesRetiredHandlerCleanupAcrossCalls(t *te
 			}
 			delete(loaded, tag)
 			return nil, nil
+		case "lso":
+			outbounds := make([]map[string]string, 0, len(loaded))
+			for tag, present := range loaded {
+				if present {
+					outbounds = append(outbounds, map[string]string{"tag": tag})
+				}
+			}
+			return json.Marshal(map[string]any{"outbounds": outbounds})
 		default:
 			t.Fatalf("unexpected command: %v", args)
 			return nil, nil
@@ -264,5 +273,80 @@ func TestSubscriptionUpdateSelectorReclaimsUnselectedHandlerAfterLostAddResponse
 	}
 	if loaded[candidate] || !loaded[selected] {
 		t.Fatalf("unselected handler was not reclaimed: %v", loaded)
+	}
+}
+
+func TestSubscriptionCleanupRotatesFailureAndConfirmsLostRemoveResponse(t *testing.T) {
+	repository, err := newStateRepository(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &subscriptionOutboundRetirement{repository: repository, tags: []string{"old-failed", "old-removed", "newest"}}
+	options := RuntimeOptions{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"}
+	command := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "rmo":
+			if args[len(args)-1] == "old-failed" {
+				return nil, errors.New("still installed")
+			}
+			return nil, errors.New("ack lost")
+		case "lso":
+			return []byte(`{"outbounds":[{"tag":"old-failed"},{"tag":"newest"}]}`), nil
+		default:
+			t.Fatalf("unexpected command %v", args)
+			return nil, nil
+		}
+	}
+	state.cleanup(context.Background(), options, "live", command)
+	if !reflect.DeepEqual(state.tags, []string{"old-failed", "newest"}) {
+		t.Fatalf("failed head blocked a confirmed removal: %v", state.tags)
+	}
+}
+
+func TestSubscriptionCleanupBacklogBlocksNewHandler(t *testing.T) {
+	root := t.TempDir()
+	repository, err := newStateRepository(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolPath := filepath.Join(root, "pool.json")
+	if err := os.WriteFile(poolPath, []byte(`{"version":3,"outbounds":{"provider":{"protocol":"freedom"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readyPath := filepath.Join(root, "xray-ready")
+	if err := os.WriteFile(readyPath, []byte("123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tags := make([]any, maxSubscriptionCleanupBacklog+1)
+	for index := range tags {
+		tags[index] = fmt.Sprintf("sb-subscription-update-%012x", index+1)
+	}
+	if err := repository.saveAuxiliary(subscriptionUpdateRetirementState, map[string]any{"xray_pid": "123", "tags": tags, "pending": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	options := RuntimeOptions{XrayHealthPool: poolPath, XrayReadyFile: readyPath, XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"}
+	selected := "direct-wan"
+	command := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "bi":
+			return []byte("  - Selecting Override:\n    1   " + selected + "\n  - Selects:\n"), nil
+		case "rmo":
+			return nil, errors.New("API unavailable")
+		case "lso":
+			outbounds := make([]map[string]string, len(tags))
+			for index, tag := range tags {
+				outbounds[index] = map[string]string{"tag": tag.(string)}
+			}
+			return json.Marshal(map[string]any{"outbounds": outbounds})
+		default:
+			t.Fatalf("cleanup backlog must block handler mutation: %v", args)
+			return nil, nil
+		}
+	}
+	if err := selectSubscriptionXrayOutbound(context.Background(), options, "provider", command, repository); err == nil || !strings.Contains(err.Error(), "cleanup backlog") {
+		t.Fatalf("unbounded new handler was not blocked: %v", err)
+	}
+	if selected != "direct-wan" {
+		t.Fatalf("blocked update changed selected handler: %q", selected)
 	}
 }
