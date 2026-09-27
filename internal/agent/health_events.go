@@ -22,6 +22,33 @@ type healthEvent struct {
 	Threshold int               `json:"threshold,omitempty"`
 	Underlay  string            `json:"underlay,omitempty"`
 	Targets   map[string]string `json:"targets,omitempty"`
+	Quality   *switchQuality    `json:"quality,omitempty"`
+}
+
+// Numeric decision evidence is emitted only on a switch. It contains no
+// endpoint addresses or probe URLs and does not trigger another probe.
+type switchQuality struct {
+	FromMedianMS      *int    `json:"from_median_ms,omitempty"`
+	FromLossPercent   float64 `json:"from_loss_percent"`
+	FromBadProbes     int     `json:"from_bad_probes"`
+	ToMedianMS        *int    `json:"to_median_ms,omitempty"`
+	ToLossPercent     float64 `json:"to_loss_percent"`
+	ToProbeAgeSeconds int     `json:"to_probe_age_seconds"`
+}
+
+func switchQualityEvidence(now time.Time, item *policyHealthState, from, to, reason string) *switchQuality {
+	if reason != "active-degraded" {
+		return nil
+	}
+	age := int(now.Unix() - int64(item.LastProbeAt[to]))
+	if age < 0 {
+		age = 0
+	}
+	return &switchQuality{
+		FromMedianMS: item.MedianDelayMS[from], FromLossPercent: item.PacketLossPercent[from],
+		FromBadProbes: item.Failures[from], ToMedianMS: item.MedianDelayMS[to],
+		ToLossPercent: item.PacketLossPercent[to], ToProbeAgeSeconds: age,
+	}
 }
 
 func (controller *healthController) emitHealthEvent(event healthEvent) {

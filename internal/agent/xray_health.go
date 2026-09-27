@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,11 +36,28 @@ type xraySelectorRuntime struct {
 	activeByPolicy    map[string]string
 	activeByNode      map[string]string
 	retiredByPolicy   map[string][]string
+	pendingDynamic    map[string]pendingOutbound
+	unknownDynamic    map[string]bool
+	inventoryLoaded   bool
 	selectorMembers   map[string]string
 	probeRuntimeTag   string
 	probeSelector     string
 	probeContext      context.Context
 }
+
+type pendingOutbound struct {
+	selector string
+	nodeID   string
+}
+
+const (
+	maxCleanupBacklogPerPolicy = 8
+	maxCleanupBacklogGlobal    = 64
+	maxLiveDynamicPerPolicy    = 10
+	maxLiveDynamicGlobal       = 128
+)
+
+var agentDynamicTag = regexp.MustCompile(`^(?:sb-urltest-[a-f0-9]{12}-[a-f0-9]{12}|sb-urltest-probe-[a-f0-9]{12}|sb-health-[a-f0-9]{8}-[a-f0-9]{12})$`)
 
 func (runtime *xraySelectorRuntime) requestContext() context.Context {
 	ctx := context.Background()
@@ -76,6 +94,8 @@ func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
 		activeByPolicy:  make(map[string]string),
 		activeByNode:    make(map[string]string),
 		retiredByPolicy: make(map[string][]string),
+		pendingDynamic:  make(map[string]pendingOutbound),
+		unknownDynamic:  make(map[string]bool),
 		selectorMembers: make(map[string]string),
 	}
 }
@@ -129,6 +149,9 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 		runtime.activeByPolicy = make(map[string]string)
 		runtime.activeByNode = make(map[string]string)
 		runtime.retiredByPolicy = make(map[string][]string)
+		runtime.pendingDynamic = make(map[string]pendingOutbound)
+		runtime.unknownDynamic = make(map[string]bool)
+		runtime.inventoryLoaded = false
 		runtime.selectorMembers = make(map[string]string)
 		runtime.probeRuntimeTag = ""
 	} else if contractChanged {
@@ -136,6 +159,17 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 		// Never carry an existence readback across that boundary.
 		runtime.verifiedDynamic = make(map[string]time.Time)
 	}
+	// A restarted monitor has lost its in-memory ownership map while Xray can
+	// still hold earlier handlers. Count them before admitting new generations;
+	// unknown handlers are never removed based on their name alone.
+	if pid > 0 && !runtime.inventoryLoaded {
+		if err := runtime.loadDynamicInventory(); err != nil {
+			return healthPool{}, false, err
+		}
+	}
+	// Reconcile additions whose selector acknowledgement was lost before
+	// retrying retired handler removal. An uncertain add may have succeeded.
+	runtime.reconcilePendingOutbounds()
 	// Retry deferred handler removal during the ordinary health loop, even
 	// when the selected node remains stable after a transient Xray API error.
 	for policyID := range runtime.retiredByPolicy {
@@ -213,9 +247,12 @@ func (runtime *xraySelectorRuntime) Select(selector, member string) error {
 			if present {
 				runtime.loadedDynamic[expected] = true
 				runtime.verifiedDynamic[expected] = time.Now()
-			} else if err := runtime.ensureOutbound(member, expected); err != nil {
-				// The selector kept its override but its handler disappeared.
-				return err
+			} else {
+				runtime.markPendingOutbound(expected, selector, member)
+				if err := runtime.ensureOutbound(member, expected); err != nil {
+					// The selector kept its override but its handler disappeared.
+					return err
+				}
 			}
 			runtimeMember = expected
 		} else {
@@ -230,6 +267,7 @@ func (runtime *xraySelectorRuntime) Select(selector, member string) error {
 		if policySelector {
 			return runtime.commitPolicySelection(selector, member, runtimeMember)
 		}
+		delete(runtime.pendingDynamic, runtimeMember)
 		return nil
 	}
 	if _, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "bo", "--server="+runtime.opts.XrayAPIServer, "-b", selector, runtimeMember); err != nil {
@@ -249,6 +287,8 @@ func (runtime *xraySelectorRuntime) Select(selector, member string) error {
 		if err := runtime.commitPolicySelection(selector, member, runtimeMember); err != nil {
 			return err
 		}
+	} else {
+		delete(runtime.pendingDynamic, runtimeMember)
 	}
 	return nil
 }
@@ -342,21 +382,107 @@ func (runtime *xraySelectorRuntime) policyTag(policyID, nodeID string) (string, 
 		runtime.activeByNode[nodeID] = nodeID
 		return nodeID, nil
 	}
+	if !runtime.loadedDynamic[tag] && !runtime.unknownDynamic[tag] {
+		if _, pending := runtime.pendingDynamic[tag]; !pending {
+			perPolicy, global := runtime.cleanupBacklog(policyID)
+			if perPolicy >= maxCleanupBacklogPerPolicy || global >= maxCleanupBacklogGlobal {
+				return "", errors.New("Xray dynamic outbound cleanup backlog is full")
+			}
+			if err := runtime.admitDynamicTag(tag, runtime.policyPrefix(policyID)); err != nil {
+				return "", err
+			}
+		}
+	}
+	runtime.markPendingOutbound(tag, policyID, nodeID)
 	if err := runtime.ensureOutbound(nodeID, tag); err != nil {
 		return "", err
 	}
 	return tag, nil
 }
 
+// Failed removals stay owned and are retried. Refuse to create unlimited new
+// generations while Xray cannot confirm cleanup; existing tags remain usable.
+func (runtime *xraySelectorRuntime) cleanupBacklog(policyID string) (int, int) {
+	counts := make(map[string]int, len(runtime.retiredByPolicy))
+	for selector, retired := range runtime.retiredByPolicy {
+		if len(retired) > 1 {
+			counts[selector] = len(retired) - 1
+		}
+	}
+	for tag, pending := range runtime.pendingDynamic {
+		if tag != runtime.activeByPolicy[pending.selector] && !contains(runtime.retiredByPolicy[pending.selector], tag) {
+			counts[pending.selector]++
+		}
+	}
+	global := 0
+	for _, count := range counts {
+		global += count
+	}
+	return counts[policyID], global
+}
+
+func (runtime *xraySelectorRuntime) loadDynamicInventory() error {
+	tags, err := runtime.outboundTags()
+	if err != nil {
+		return err
+	}
+	runtime.unknownDynamic = make(map[string]bool)
+	for tag := range tags {
+		if agentDynamicTag.MatchString(tag) && !runtime.loadedDynamic[tag] {
+			runtime.unknownDynamic[tag] = true
+		}
+	}
+	runtime.inventoryLoaded = true
+	return nil
+}
+
+// Include handlers left by an earlier monitor process in the admission cap.
+// Only the owning process may remove them; a tag alone proves no reference state.
+func (runtime *xraySelectorRuntime) admitDynamicTag(tag, prefix string) error {
+	if runtime.xrayPID > 0 && !runtime.inventoryLoaded {
+		return errors.New("Xray dynamic outbound inventory is unavailable")
+	}
+	known := make(map[string]bool, len(runtime.unknownDynamic)+len(runtime.loadedDynamic)+len(runtime.pendingDynamic))
+	for existing := range runtime.unknownDynamic {
+		known[existing] = true
+	}
+	for existing := range runtime.loadedDynamic {
+		known[existing] = true
+	}
+	for existing := range runtime.pendingDynamic {
+		known[existing] = true
+	}
+	if known[tag] {
+		return nil
+	}
+	global, perPolicy := 0, 0
+	for existing := range known {
+		if !agentDynamicTag.MatchString(existing) {
+			continue
+		}
+		global++
+		if prefix != "" && strings.HasPrefix(existing, prefix) {
+			perPolicy++
+		}
+	}
+	if global >= maxLiveDynamicGlobal || (prefix != "" && perPolicy >= maxLiveDynamicPerPolicy) {
+		return errors.New("Xray dynamic outbound inventory limit is full")
+	}
+	return nil
+}
+
 func (runtime *xraySelectorRuntime) policyRuntimeTag(policyID, nodeID string) string {
 	if runtime.isBase(nodeID) || runtime.pool.Outbounds[nodeID] == nil {
 		return nodeID
 	}
-	prefix := runtime.pool.PolicyPrefixes[policyID]
-	if prefix == "" {
-		prefix = "sb-urltest-" + shortHash(policyID, 12) + "-"
+	return runtime.dynamicTag(runtime.policyPrefix(policyID), nodeID)
+}
+
+func (runtime *xraySelectorRuntime) policyPrefix(policyID string) string {
+	if prefix := runtime.pool.PolicyPrefixes[policyID]; prefix != "" {
+		return prefix
 	}
-	return runtime.dynamicTag(prefix, nodeID)
+	return "sb-urltest-" + shortHash(policyID, 12) + "-"
 }
 
 // commitPolicySelection retires an old handler only after Xray confirms that
@@ -390,6 +516,7 @@ func (runtime *xraySelectorRuntime) commitPolicySelection(policyID, nodeID, runt
 		}
 	}
 	runtime.retiredByPolicy[policyID] = retired
+	delete(runtime.pendingDynamic, runtimeTag)
 	runtime.pruneRetiredOutbounds(policyID)
 	return nil
 }
@@ -397,14 +524,75 @@ func (runtime *xraySelectorRuntime) commitPolicySelection(policyID, nodeID, runt
 func (runtime *xraySelectorRuntime) pruneRetiredOutbounds(policyID string) {
 	retired := runtime.retiredByPolicy[policyID]
 	// Keep the newest retired handler for existing connections. An older
-	// removal failure retains ownership and is retried on the next health tick.
-	for len(retired) > 1 {
-		if err := runtime.removeOutbound(retired[0]); err != nil {
-			break
-		}
-		retired = retired[1:]
+	// removal failure must not prevent cleanup of unrelated older handlers.
+	// Rotate a bounded number of failures so repeated API errors do not make
+	// every health tick scan the entire backlog.
+	if len(retired) <= 1 {
+		return
 	}
-	runtime.retiredByPolicy[policyID] = retired
+	older := retired[:len(retired)-1]
+	budget := min(len(older), 4)
+	failed := make([]string, 0, budget)
+	for _, tag := range older[:budget] {
+		if tag == runtime.activeByPolicy[policyID] {
+			continue
+		}
+		if err := runtime.removeOutbound(tag); err != nil {
+			failed = append(failed, tag)
+		}
+	}
+	remaining := make([]string, 0, len(retired))
+	remaining = append(remaining, older[budget:]...)
+	remaining = append(remaining, failed...)
+	remaining = append(remaining, retired[len(retired)-1])
+	runtime.retiredByPolicy[policyID] = remaining
+}
+
+func (runtime *xraySelectorRuntime) markPendingOutbound(tag, selector, nodeID string) {
+	if runtime.pendingDynamic == nil {
+		runtime.pendingDynamic = make(map[string]pendingOutbound)
+	}
+	runtime.pendingDynamic[tag] = pendingOutbound{selector: selector, nodeID: nodeID}
+}
+
+// AddOutbound can succeed even when its CLI acknowledgement is lost. A later
+// selector failure can likewise leave the new handler installed but untracked.
+// Resolve that uncertainty before dropping ownership or adding another tag.
+func (runtime *xraySelectorRuntime) reconcilePendingOutbounds() {
+	for tag, pending := range runtime.pendingDynamic {
+		selected, err := runtime.selectedRuntimeMember(pending.selector)
+		if err != nil {
+			continue
+		}
+		present, err := runtime.outboundPresent(tag)
+		if err != nil {
+			continue
+		}
+		if !present {
+			delete(runtime.pendingDynamic, tag)
+			delete(runtime.loadedDynamic, tag)
+			delete(runtime.verifiedDynamic, tag)
+			continue
+		}
+		runtime.loadedDynamic[tag] = true
+		runtime.verifiedDynamic[tag] = time.Now()
+		if selected == tag {
+			if _, policy := runtime.pool.Policies[pending.selector]; policy {
+				runtime.selectorMembers[pending.selector] = tag
+				_ = runtime.commitPolicySelection(pending.selector, pending.nodeID, tag)
+				continue
+			}
+			if pending.selector == runtime.probeSelectorName() {
+				runtime.selectorMembers[pending.selector] = tag
+				runtime.probeRuntimeTag = tag
+				delete(runtime.pendingDynamic, tag)
+				continue
+			}
+		}
+		if err := runtime.removeOutbound(tag); err == nil {
+			delete(runtime.pendingDynamic, tag)
+		}
+	}
 }
 
 func (runtime *xraySelectorRuntime) probeTag(nodeID string) (string, error) {
@@ -448,6 +636,12 @@ func (runtime *xraySelectorRuntime) probeTag(nodeID string) (string, error) {
 			return "", err
 		}
 	}
+	if !runtime.loadedDynamic[tag] && !runtime.unknownDynamic[tag] {
+		if err := runtime.admitDynamicTag(tag, ""); err != nil {
+			return "", err
+		}
+	}
+	runtime.markPendingOutbound(tag, runtime.probeSelectorName(), nodeID)
 	if err := runtime.ensureOutbound(nodeID, tag); err != nil {
 		return "", err
 	}
@@ -508,26 +702,35 @@ func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	output, commandErr := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "ado", "--server="+runtime.opts.XrayAPIServer, path)
-	if commandErr != nil && !strings.Contains(strings.ToLower(string(output)), "already") {
-		return errors.New("Xray rejected dynamic outbound")
-	}
+	_, commandErr := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "ado", "--server="+runtime.opts.XrayAPIServer, path)
 	if repair || commandErr != nil {
 		present, err := runtime.outboundPresent(tag)
-		if err != nil || !present {
+		if err != nil {
+			return errors.New("Xray dynamic outbound presence is unconfirmed after add")
+		}
+		if !present {
 			return errors.New("Xray dynamic outbound was not confirmed after add")
 		}
 	}
 	runtime.loadedDynamic[tag] = true
+	delete(runtime.unknownDynamic, tag)
 	runtime.verifiedDynamic[tag] = time.Now()
 	return nil
 }
 
 func (runtime *xraySelectorRuntime) outboundPresent(tag string) (bool, error) {
+	tags, err := runtime.outboundTags()
+	if err != nil {
+		return false, err
+	}
+	return tags[tag], nil
+}
+
+func (runtime *xraySelectorRuntime) outboundTags() (map[string]bool, error) {
 	output, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary,
 		"api", "lso", "--server="+runtime.opts.XrayAPIServer)
 	if err != nil {
-		return false, errors.New("Xray outbound list is unavailable")
+		return nil, errors.New("Xray outbound list is unavailable")
 	}
 	var response struct {
 		Outbounds []struct {
@@ -535,14 +738,13 @@ func (runtime *xraySelectorRuntime) outboundPresent(tag string) (bool, error) {
 		} `json:"outbounds"`
 	}
 	if json.Unmarshal(output, &response) != nil || response.Outbounds == nil {
-		return false, errors.New("Xray outbound list is invalid")
+		return nil, errors.New("Xray outbound list is invalid")
 	}
+	tags := make(map[string]bool, len(response.Outbounds))
 	for _, outbound := range response.Outbounds {
-		if outbound.Tag == tag {
-			return true, nil
-		}
+		tags[outbound.Tag] = true
 	}
-	return false, nil
+	return tags, nil
 }
 
 func (runtime *xraySelectorRuntime) removeOutbound(tag string) error {
@@ -553,10 +755,16 @@ func (runtime *xraySelectorRuntime) removeOutbound(tag string) error {
 		return nil
 	}
 	if _, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "rmo", "--server="+runtime.opts.XrayAPIServer, tag); err != nil {
-		// Retain ownership so the next job retries cleanup after cancellation.
-		return errors.New("Xray outbound cleanup was not confirmed")
+		// RemoveOutbound can succeed after its acknowledgement is lost. A list
+		// readback distinguishes that case from a still-live handler; if the
+		// readback also fails, retain ownership for the next cleanup tick.
+		present, readErr := runtime.outboundPresent(tag)
+		if readErr != nil || present {
+			return errors.New("Xray outbound cleanup was not confirmed")
+		}
 	}
 	delete(runtime.loadedDynamic, tag)
+	delete(runtime.unknownDynamic, tag)
 	delete(runtime.verifiedDynamic, tag)
 	for node, value := range runtime.activeByNode {
 		if value == tag {
@@ -571,6 +779,7 @@ func (runtime *xraySelectorRuntime) removeOutbound(tag string) error {
 	if runtime.probeRuntimeTag == tag {
 		runtime.probeRuntimeTag = ""
 	}
+	delete(runtime.pendingDynamic, tag)
 	return nil
 }
 
@@ -821,16 +1030,32 @@ func (runtime *xraySelectorRuntime) Throughput(candidate string, byteLimit int) 
 		return 0, err
 	}
 	byteLimit = maxInt(256*1024, minInt(byteLimit, 10*1024*1024))
+	return measureThroughputOverProxy(runtime.requestContext(), runtime.opts.ProbeURL,
+		"https://speed.cloudflare.com/__down?bytes="+strconv.Itoa(byteLimit), byteLimit, 15*time.Second)
+}
+
+func measureThroughputOverProxy(parent context.Context, proxyURL, target string, byteLimit int, window time.Duration) (int64, error) {
 	started := time.Now()
-	received, err := downloadThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, "https://speed.cloudflare.com/__down?bytes="+strconv.Itoa(byteLimit), 15*time.Second, byteLimit, http.StatusOK)
-	if err != nil {
-		return 0, err
+	ctx, cancel := context.WithTimeoutCause(parent, window, errSpeedWindowComplete)
+	defer cancel()
+	received, err := downloadThroughProxyContext(ctx, proxyURL, target, 0, byteLimit, http.StatusOK)
+	return finishThroughputProbe(received, time.Since(started), byteLimit, err, context.Cause(ctx))
+}
+
+func finishThroughputProbe(received int, elapsed time.Duration, byteLimit int, probeErr, cause error) (int64, error) {
+	windowComplete := (errors.Is(probeErr, context.DeadlineExceeded) || errors.Is(probeErr, errSpeedWindowComplete)) &&
+		errors.Is(cause, errSpeedWindowComplete) && received >= 256*1024
+	if probeErr != nil && !windowComplete {
+		return 0, probeErr
 	}
-	elapsed := time.Since(started).Seconds()
 	if received < minInt(byteLimit, 256*1024) || elapsed <= 0 {
 		return 0, errors.New("throughput probe returned too little data")
 	}
-	return int64(float64(received*8) / elapsed), nil
+	speed := int64(float64(received*8) / elapsed.Seconds())
+	if windowComplete {
+		return speed, errSpeedWindowComplete
+	}
+	return speed, nil
 }
 
 func (runtime *xraySelectorRuntime) isReverse(candidate string) bool {

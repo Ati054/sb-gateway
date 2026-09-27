@@ -1,14 +1,18 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +33,54 @@ func TestClassifyProbeErrorSeparatesFailoverDecisions(t *testing.T) {
 		if got := classifyProbeError(errors.New(test.message)); got != test.want {
 			t.Fatalf("classify %q = %q, want %q", test.message, got, test.want)
 		}
+	}
+}
+
+func TestThroughputWindowAcceptsOnlyOwnTimedPartialDownload(t *testing.T) {
+	const limit = 2 * 1024 * 1024
+	for _, test := range []struct {
+		name     string
+		bytes    int
+		probeErr error
+		cause    error
+		wantBPS  int64
+		wantErr  error
+	}{
+		{"complete", limit, nil, nil, 2 * limit * 8, nil},
+		{"own deadline after minimum", 256 * 1024, context.DeadlineExceeded, errSpeedWindowComplete, 2 * 256 * 1024 * 8, errSpeedWindowComplete},
+		{"too little at own deadline", 256*1024 - 1, context.DeadlineExceeded, errSpeedWindowComplete, 0, context.DeadlineExceeded},
+		{"parent deadline", 256 * 1024, context.DeadlineExceeded, context.DeadlineExceeded, 0, context.DeadlineExceeded},
+		{"reset at own deadline", 256 * 1024, errors.New("connection reset"), errSpeedWindowComplete, 0, nil},
+		{"unexpected EOF", 256 * 1024, io.ErrUnexpectedEOF, nil, 0, io.ErrUnexpectedEOF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := finishThroughputProbe(test.bytes, 500*time.Millisecond, limit, test.probeErr, test.cause)
+			if got != test.wantBPS {
+				t.Fatalf("speed = %d, want %d", got, test.wantBPS)
+			}
+			if test.name == "reset at own deadline" {
+				if err == nil || err.Error() != "connection reset" {
+					t.Fatalf("reset error = %v", err)
+				}
+			} else if !errors.Is(err, test.wantErr) || (test.wantErr == nil && err != nil) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestThroughputWindowMeasuresValidPartialHTTPDownload(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte{'x'}, 256*1024))
+		w.(http.Flusher).Flush()
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer proxy.Close()
+	speed, err := measureThroughputOverProxy(context.Background(), proxy.URL,
+		"http://speed.invalid/__down?bytes=2097152", 2*1024*1024, 80*time.Millisecond)
+	if !errors.Is(err, errSpeedWindowComplete) || speed <= 0 {
+		t.Fatalf("partial HTTP 200 probe = (%d, %v), want a time-limited speed", speed, err)
 	}
 }
 
@@ -760,6 +812,9 @@ func TestPolicyRetirementNeverRemovesReactivatedHandlerAndRetriesCleanup(t *test
 	removed := make([]string, 0)
 	failRemoval := true
 	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		if args[1] == "lso" {
+			return outboundTagsJSON(b), nil
+		}
 		if args[1] != "rmo" {
 			t.Fatalf("unexpected Xray command: %v", args)
 		}
@@ -795,6 +850,277 @@ func TestPolicyRetirementNeverRemovesReactivatedHandlerAndRetriesCleanup(t *test
 	}
 	if !reflect.DeepEqual(removed, []string{b, b}) || runtime.loadedDynamic[b] || !runtime.loadedDynamic[a] || !runtime.loadedDynamic[c] || !reflect.DeepEqual(runtime.retiredByPolicy[policy], []string{a}) {
 		t.Fatalf("retry did not keep only the newest retired handler: removed=%v retired=%v loaded=%v", removed, runtime.retiredByPolicy[policy], runtime.loadedDynamic)
+	}
+}
+
+func TestPendingOutboundReconcilesLostSelectorAcknowledgement(t *testing.T) {
+	for _, selectedDespiteError := range []bool{false, true} {
+		t.Run(fmt.Sprintf("selected=%t", selectedDespiteError), func(t *testing.T) {
+			runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+			runtime.pool = healthPool{
+				Policies:       map[string][]string{"europe": {"de"}},
+				PolicyPrefixes: map[string]string{"europe": "sb-urltest-europe-"},
+				Outbounds: map[string]json.RawMessage{
+					"de": json.RawMessage(`{"protocol":"freedom"}`),
+				},
+			}
+			tag := runtime.policyRuntimeTag("europe", "de")
+			selected := "block"
+			installed := make(map[string]bool)
+			removed := make([]string, 0)
+			runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+				switch args[1] {
+				case "bi":
+					return selectorInfo(selected), nil
+				case "lso":
+					if installed[tag] {
+						return outboundTagsJSON(tag), nil
+					}
+					return outboundTagsJSON(), nil
+				case "ado":
+					installed[tag] = true
+					return nil, nil
+				case "bo":
+					if selectedDespiteError {
+						selected = tag
+					}
+					return nil, errors.New("selector acknowledgement lost")
+				case "rmo":
+					removed = append(removed, args[len(args)-1])
+					delete(installed, tag)
+					return nil, nil
+				default:
+					t.Fatalf("unexpected Xray command: %v", args)
+					return nil, nil
+				}
+			}
+			if err := runtime.Select("europe", "de"); err == nil || !installed[tag] || len(runtime.pendingDynamic) != 1 {
+				t.Fatalf("uncertain add was lost: installed=%v pending=%v err=%v", installed, runtime.pendingDynamic, err)
+			}
+			runtime.reconcilePendingOutbounds()
+			if len(runtime.pendingDynamic) != 0 {
+				t.Fatalf("uncertain add was not reconciled: %v", runtime.pendingDynamic)
+			}
+			if selectedDespiteError {
+				if !installed[tag] || runtime.activeByPolicy["europe"] != tag || len(removed) != 0 {
+					t.Fatalf("confirmed selected handler was removed: installed=%v active=%q removed=%v", installed, runtime.activeByPolicy["europe"], removed)
+				}
+			} else if installed[tag] || !reflect.DeepEqual(removed, []string{tag}) {
+				t.Fatalf("unused handler survived failed selector update: installed=%v removed=%v", installed, removed)
+			}
+		})
+	}
+}
+
+func TestPendingOutboundReconcilesLostAddAcknowledgement(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	runtime.pool = healthPool{
+		Policies:       map[string][]string{"europe": {"de"}},
+		PolicyPrefixes: map[string]string{"europe": "sb-urltest-europe-"},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	tag := runtime.policyRuntimeTag("europe", "de")
+	installed, listCalls, removals := false, 0, 0
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "bi":
+			return selectorInfo("block"), nil
+		case "ado":
+			installed = true
+			return nil, errors.New("add acknowledgement lost")
+		case "lso":
+			listCalls++
+			if listCalls == 1 {
+				return nil, errors.New("list temporarily unavailable")
+			}
+			return outboundTagsJSON(tag), nil
+		case "rmo":
+			removals++
+			installed = false
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if err := runtime.Select("europe", "de"); err == nil || !installed || len(runtime.pendingDynamic) != 1 {
+		t.Fatalf("uncertain add lost ownership: installed=%t pending=%v err=%v", installed, runtime.pendingDynamic, err)
+	}
+	runtime.reconcilePendingOutbounds()
+	if installed || removals != 1 || len(runtime.pendingDynamic) != 0 {
+		t.Fatalf("orphan was not removed after API recovery: installed=%t removals=%d pending=%v", installed, removals, runtime.pendingDynamic)
+	}
+}
+
+func TestRetiredOutboundFailureDoesNotBlockOtherCleanup(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	runtime.retiredByPolicy["europe"] = []string{"bad", "good", "newest"}
+	for _, tag := range runtime.retiredByPolicy["europe"] {
+		runtime.loadedDynamic[tag] = true
+	}
+	var attempted []string
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		if args[1] == "lso" {
+			return outboundTagsJSON("bad"), nil
+		}
+		if args[1] != "rmo" {
+			t.Fatalf("unexpected Xray command: %v", args)
+		}
+		tag := args[len(args)-1]
+		attempted = append(attempted, tag)
+		if tag == "bad" {
+			return nil, errors.New("selective removal failure")
+		}
+		return nil, nil
+	}
+	runtime.pruneRetiredOutbounds("europe")
+	if !reflect.DeepEqual(attempted, []string{"bad", "good"}) || !reflect.DeepEqual(runtime.retiredByPolicy["europe"], []string{"bad", "newest"}) || runtime.loadedDynamic["good"] {
+		t.Fatalf("head-of-line failure retained unrelated outbound: attempts=%v retired=%v loaded=%v", attempted, runtime.retiredByPolicy["europe"], runtime.loadedDynamic)
+	}
+}
+
+func TestRemovedOutboundAcknowledgementLossIsConfirmedByReadback(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	tag := "sb-urltest-retired"
+	runtime.loadedDynamic[tag] = true
+	runtime.activeByNode["old-node"] = tag
+	runtime.pendingDynamic[tag] = pendingOutbound{selector: "europe", nodeID: "old-node"}
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "rmo":
+			return nil, errors.New("remove acknowledgement lost")
+		case "lso":
+			return outboundTagsJSON(), nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if err := runtime.removeOutbound(tag); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.loadedDynamic[tag] || runtime.activeByNode["old-node"] != "" || len(runtime.pendingDynamic) != 0 {
+		t.Fatalf("confirmed removal retained state: loaded=%v active=%v pending=%v", runtime.loadedDynamic, runtime.activeByNode, runtime.pendingDynamic)
+	}
+}
+
+func TestCleanupBacklogBlocksNewGenerationsWithoutChangingSelectedHandler(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	runtime.pool = healthPool{
+		Policies:       map[string][]string{"europe": {"de"}},
+		PolicyPrefixes: map[string]string{"europe": "sb-urltest-europe-"},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	runtime.activeByPolicy["europe"] = "current"
+	runtime.selectorMembers["europe"] = "current"
+	for index := range maxCleanupBacklogPerPolicy + 1 {
+		tag := fmt.Sprintf("retired-%d", index)
+		runtime.retiredByPolicy["europe"] = append(runtime.retiredByPolicy["europe"], tag)
+		runtime.loadedDynamic[tag] = true
+	}
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		t.Fatalf("cleanup backlog must block mutation, got %v", args)
+		return nil, nil
+	}
+	if err := runtime.Select("europe", "de"); err == nil || !strings.Contains(err.Error(), "cleanup backlog") {
+		t.Fatalf("new generation was not blocked: %v", err)
+	}
+	if runtime.activeByPolicy["europe"] != "current" || len(runtime.pendingDynamic) != 0 {
+		t.Fatalf("blocked creation changed live state: active=%v pending=%v", runtime.activeByPolicy, runtime.pendingDynamic)
+	}
+
+	delete(runtime.loadedDynamic, runtime.retiredByPolicy["europe"][0])
+	runtime.retiredByPolicy["europe"] = runtime.retiredByPolicy["europe"][1:]
+	adds := 0
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "ado":
+			adds++
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Xray command: %v", args)
+			return nil, nil
+		}
+	}
+	if _, err := runtime.policyTag("europe", "de"); err != nil || adds != 1 {
+		t.Fatalf("cleanup space did not admit one new tag: adds=%d err=%v", adds, err)
+	}
+}
+
+func TestCleanupBacklogHasGlobalLimitAcrossPolicies(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	for policy := range maxCleanupBacklogGlobal / maxCleanupBacklogPerPolicy {
+		id := fmt.Sprintf("policy-%d", policy)
+		for index := range maxCleanupBacklogPerPolicy + 1 {
+			runtime.retiredByPolicy[id] = append(runtime.retiredByPolicy[id], fmt.Sprintf("retired-%d-%d", policy, index))
+		}
+	}
+	perPolicy, global := runtime.cleanupBacklog("new-policy")
+	if perPolicy != 0 || global != maxCleanupBacklogGlobal {
+		t.Fatalf("wrong cleanup backlog: policy=%d global=%d", perPolicy, global)
+	}
+	runtime.pool.PolicyPrefixes = map[string]string{"new-policy": "sb-urltest-new-"}
+	runtime.pool.Outbounds = map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)}
+	if _, err := runtime.policyTag("new-policy", "de"); err == nil || !strings.Contains(err.Error(), "cleanup backlog") {
+		t.Fatalf("global cleanup cap did not block a new tag: %v", err)
+	}
+}
+
+func TestRestartInventoryBoundsUnknownHandlersWithoutRemovingThem(t *testing.T) {
+	const prefix = "sb-urltest-0123456789ab-"
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	runtime.pool = healthPool{
+		PolicyPrefixes: map[string]string{"europe": prefix},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom"}`)},
+	}
+	var tags []string
+	for index := range maxLiveDynamicPerPolicy {
+		tags = append(tags, fmt.Sprintf("%s%012x", prefix, index))
+	}
+	removed := false
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "lso":
+			return outboundTagsJSON(tags...), nil
+		case "rmo":
+			removed = true
+			return nil, nil
+		default:
+			t.Fatalf("inventory cap must block mutation, got %v", args)
+			return nil, nil
+		}
+	}
+	if err := runtime.loadDynamicInventory(); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.unknownDynamic) != maxLiveDynamicPerPolicy {
+		t.Fatalf("unknown handlers = %d, want %d", len(runtime.unknownDynamic), maxLiveDynamicPerPolicy)
+	}
+	if _, err := runtime.policyTag("europe", "de"); err == nil || !strings.Contains(err.Error(), "inventory limit") {
+		t.Fatalf("new handler was not blocked by prior monitor generations: %v", err)
+	}
+	if removed {
+		t.Fatal("ownership-unknown handler was removed")
+	}
+	if err := runtime.admitDynamicTag(tags[0], prefix); err != nil {
+		t.Fatalf("existing handler should remain usable at limit: %v", err)
+	}
+}
+
+func TestRestartInventoryRequiresSuccessfulReadback(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	runtime.xrayPID = 123
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		if args[1] != "lso" {
+			t.Fatalf("unexpected mutation before inventory: %v", args)
+		}
+		return nil, errors.New("Xray API unavailable")
+	}
+	if err := runtime.loadDynamicInventory(); err == nil || runtime.inventoryLoaded {
+		t.Fatalf("failed inventory was accepted: loaded=%t err=%v", runtime.inventoryLoaded, err)
+	}
+	if err := runtime.admitDynamicTag("sb-urltest-0123456789ab-000000000000", "sb-urltest-0123456789ab-"); err == nil {
+		t.Fatal("new outbound admitted without a restart inventory")
 	}
 }
 

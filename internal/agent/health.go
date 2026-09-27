@@ -24,6 +24,8 @@ const (
 	activeLivenessInterval = 3 * time.Second
 )
 
+var errSpeedWindowComplete = errors.New("speed measurement window complete")
+
 var healthTargets = []struct {
 	label  string
 	url    string
@@ -133,6 +135,8 @@ type policyHealthState struct {
 	LastGoodAt             map[string]float64                `json:"last_good_at,omitempty"`
 	SpeedSamplesBPS        map[string][]int64                `json:"speed_samples_bps"`
 	LastSpeedProbeAt       map[string]float64                `json:"last_speed_probe_at"`
+	LastSpeedSuccessAt     map[string]float64                `json:"last_speed_success_at,omitempty"`
+	LastSpeedProbeStatus   map[string]string                 `json:"last_speed_probe_status,omitempty"`
 	CandidateSignature     string                            `json:"candidate_signature"`
 	ScanQueue              []string                          `json:"scan_queue"`
 	ProbeLane              int                               `json:"probe_lane,omitempty"`
@@ -144,6 +148,9 @@ type policyHealthState struct {
 	OptimizationChecks     int                               `json:"optimization_checks,omitempty"`
 	OptimizationNextAt     float64                           `json:"optimization_next_at,omitempty"`
 	OptimizationRetryAfter float64                           `json:"optimization_retry_after,omitempty"`
+	OptimizationIncomplete int                               `json:"optimization_incomplete,omitempty"`
+	OptimizationBackoff    map[string]float64                `json:"optimization_backoff,omitempty"`
+	OptimizationLastResult *optimizationComparison           `json:"optimization_last_result,omitempty"`
 	OptimizationActiveAt   float64                           `json:"optimization_active_at,omitempty"`
 	OptimizationActiveMS   *int                              `json:"optimization_active_ms,omitempty"`
 	OptimizationActiveBPS  *int64                            `json:"optimization_active_bps,omitempty"`
@@ -554,7 +561,8 @@ func (controller *healthController) Tick(now time.Time) error {
 		if item.RuntimeConfirmed && item.Selected != beforeSelected && item.LastSwitchAt != beforeSwitchAt {
 			controller.emitHealthEvent(healthEvent{At: item.LastSwitchAt, Event: "switch", Policy: policyID,
 				From: beforeSelected, To: item.Selected, Reason: item.LastSwitchReason,
-				Failure: probeFailureClass(item.FailureClass[beforeSelected])})
+				Failure: probeFailureClass(item.FailureClass[beforeSelected]),
+				Quality: switchQualityEvidence(now, item, beforeSelected, item.Selected, item.LastSwitchReason)})
 		}
 		managed[policyID] = item
 		if controller.yielded {
@@ -590,7 +598,9 @@ func newPolicyHealthState() *policyHealthState {
 		Samples: make(map[string][]healthSample), DailySamples: make(map[string][]healthSample), HistoryDays: make(map[string]map[string]dayBucket),
 		LastProbeAt: make(map[string]float64), LastGoodAt: make(map[string]float64),
 		SpeedSamplesBPS: make(map[string][]int64), LastSpeedProbeAt: make(map[string]float64),
-		FailureClass: make(map[string]string),
+		LastSpeedSuccessAt: make(map[string]float64), LastSpeedProbeStatus: make(map[string]string),
+		OptimizationBackoff: make(map[string]float64),
+		FailureClass:        make(map[string]string),
 	}
 }
 
@@ -691,12 +701,22 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		clearOptimizationCandidate(item)
 		item.OptimizationRetryAfter = 0
 	}
+	for candidate, until := range item.OptimizationBackoff {
+		if until <= float64(now.Unix()) || !contains(candidates, candidate) {
+			delete(item.OptimizationBackoff, candidate)
+		}
+	}
+	if item.CandidateSignature != signature {
+		pruneRemovedCandidateHealth(item, candidates)
+	}
 	labels := make(map[string]string, len(candidates))
+	nodes := make(map[string]healthNode, len(candidates))
 	for _, candidate := range candidates {
 		labels[candidate] = firstNonEmpty(contract.Nodes[candidate].Label, candidate)
+		nodes[candidate] = contract.Nodes[candidate]
 	}
 	item.CandidateLabels = labels
-	item.CandidateNodes = contract.Nodes
+	item.CandidateNodes = nodes
 	item.CandidateCount = len(candidates)
 	protectRestoredSelection(now, selected, contract, item, p, warm)
 	// Publish confirmed membership before slow quality/speed probes. This is
@@ -709,15 +729,6 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	if item.CandidateSignature != signature {
 		item.LastPreflightAt = 0
 		item.PreflightClosed = nil
-		activeCandidates := make(map[string]bool, len(candidates))
-		for _, candidate := range candidates {
-			activeCandidates[candidate] = true
-		}
-		for candidate := range item.LastGoodAt {
-			if !activeCandidates[candidate] {
-				delete(item.LastGoodAt, candidate)
-			}
-		}
 		item.ScanQueue = append([]string(nil), candidates...)
 		item.NextFullScanAt = float64(now.Unix()) + float64(p.fullScan)
 	} else if len(item.ScanQueue) == 0 && float64(now.Unix()) >= item.NextFullScanAt {
@@ -751,31 +762,13 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	}
 	if outage {
 		emergencyAttempted = true
-		if reserve := knownFreshReserve(now, selected, candidates, contract.Mode, groupIndex, item, p); reserve != "" {
-			if err := controller.runtime.Select(policyID, reserve); err != nil {
-				return err
-			}
-			emergencySwitched = true
-			emergencyReason = "active-unavailable"
-			if selected == "block" {
-				emergencyReason = "fresh-path-available"
-			}
-			selected = reserve
-			item.Selected = reserve
-			item.RuntimeSelected = reserve
-			item.RuntimeConfirmed = true
-			item.LastSwitchAt = now.UTC().Format(time.RFC3339)
-			item.LastSwitchReason = emergencyReason
-			item.CooldownUntil = switchCooldownUntil(now, emergencyReason, p.cooldown)
-			outage = false
-		}
-	}
-	if outage {
 		emergency := p
 		if selected != "block" {
 			emergency.backup = minInt(p.backup, p.failureRetry)
 		}
 		probeTargets = controller.emergencyTargets(now, candidates, item, emergency)
+		probeTargets = prioritizeEmergencyReserve(probeTargets,
+			knownFreshReserve(now, selected, withoutClosedCandidates(candidates, item.PreflightClosed), contract.Mode, groupIndex, item, p), item.PreflightClosed, p.batch)
 	} else if !emergencySwitched {
 		if warm {
 			probeTargets = append(probeTargets, selected)
@@ -796,8 +789,8 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if item.OptimizationCandidate != "" {
 			if !item.AvailabilityOK[item.OptimizationCandidate] ||
 				item.Recoveries[item.OptimizationCandidate] < p.recoveryThreshold {
+				item.OptimizationBackoff[item.OptimizationCandidate] = float64(now.Unix() + int64(maxInt(p.cooldown, 300)))
 				clearOptimizationCandidate(item)
-				item.OptimizationRetryAfter = float64(now.Unix() + int64(p.cooldown))
 			} else if float64(now.Unix()) >= item.OptimizationNextAt {
 				// A planned optimization gets one bounded comparison lane: the active
 				// path plus one candidate. It replaces this tick's normal batch instead
@@ -872,25 +865,23 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			// Confirmed outage: probe reserves now, not after the backup timer.
 			outage = true
 			item.AvailabilityFailures[selected] = p.failureThreshold
-			if reserve := knownFreshReserve(now, selected, candidates, contract.Mode, groupIndex, item, p); reserve != "" {
-				if err := controller.runtime.Select(policyID, reserve); err != nil {
-					return err
-				}
-				emergencySwitched = true
-				emergencyReason = "active-unavailable"
-				selected = reserve
-				item.Selected = reserve
-				item.RuntimeSelected = reserve
-				item.RuntimeConfirmed = true
-				item.LastSwitchAt = now.UTC().Format(time.RFC3339)
-				item.LastSwitchReason = emergencyReason
-				item.CooldownUntil = switchCooldownUntil(now, emergencyReason, p.cooldown)
-				outage = false
-				break
-			}
 			emergency := p
 			emergency.backup = minInt(p.backup, p.failureRetry)
-			probeTargets = append([]string{selected}, controller.emergencyTargets(now, without(candidates, []string{selected}), item, emergency)...)
+			eligibleReserves := make([]string, 0, len(candidates)-1)
+			for _, reserve := range candidates {
+				if reserve == selected {
+					continue
+				}
+				if evidence, checked := measured[reserve]; checked && !evidence.OK {
+					// A failed full probe in this tick is already fresh evidence.
+					continue
+				}
+				eligibleReserves = append(eligibleReserves, reserve)
+			}
+			reserves := controller.emergencyTargets(now, eligibleReserves, item, emergency)
+			reserves = prioritizeEmergencyReserve(reserves,
+				knownFreshReserve(now, selected, withoutClosedCandidates(eligibleReserves, item.PreflightClosed), contract.Mode, groupIndex, item, p), item.PreflightClosed, p.batch)
+			probeTargets = append([]string{selected}, reserves...)
 			break
 		}
 	}
@@ -927,6 +918,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 
 	measuredSpeed := make(map[string]int64)
 	speedTargets := []string{}
+	speedStatus := make(map[string]string)
 	selectedEvidence, selectedMeasured := measured[selected]
 	if p.speedEnabled && !outage && !emergencySwitched && item.AvailabilityFailures[selected] == 0 && (!selectedMeasured || selectedEvidence.OK) {
 		candidatesForSpeed := speedProbeCandidates(now, selected, candidates, measured, item, p)
@@ -947,8 +939,19 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				item.ScanQueue = uniqueCandidates(append(probeTargets, item.ScanQueue...))
 				return err
 			}
-			if speedErr == nil && speed > 0 {
+			if (speedErr == nil || errors.Is(speedErr, errSpeedWindowComplete)) && speed > 0 {
 				measuredSpeed[candidate] = speed
+				speedStatus[candidate] = "ok"
+				if errors.Is(speedErr, errSpeedWindowComplete) {
+					speedStatus[candidate] = "time-limited"
+				}
+			} else {
+				speedStatus[candidate] = "failed"
+				if len(optimizationProbeTargets) > 0 && candidate == selected {
+					// A missing baseline cannot confirm this pair. Do not spend
+					// another download on the candidate in this tick.
+					break
+				}
 			}
 		}
 	}
@@ -961,6 +964,10 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	}
 	for _, candidate := range speedTargets {
 		item.LastSpeedProbeAt[candidate] = float64(now.Unix())
+		item.LastSpeedProbeStatus[candidate] = speedStatus[candidate]
+		if speedStatus[candidate] == "ok" || speedStatus[candidate] == "time-limited" {
+			item.LastSpeedSuccessAt[candidate] = float64(now.Unix())
+		}
 	}
 	speedMedians := make(map[string]*int64)
 	for _, candidate := range candidates {
@@ -1034,8 +1041,12 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			} else {
 				item.FailureClass[candidate] = string(evidence.Failure)
 			}
-			probeQuality := evidence.OK && latencyOK
-			if probeQuality && loss <= p.maxLoss {
+			// Count independent bad probes, not repeated views of the same
+			// overlapping rolling window. A good current response clears a
+			// pending soft-degradation streak even while the old slow samples
+			// still dominate the median displayed in the UI.
+			probeQuality := evidence.OK && (p.maxLatency <= 0 || (evidence.DelayMS != nil && *evidence.DelayMS <= p.maxLatency))
+			if probeQuality {
 				item.Failures[candidate] = 0
 			} else {
 				item.Failures[candidate]++
@@ -1073,14 +1084,10 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	if emergencySwitched {
 		desired, reason = selected, emergencyReason
 	}
-	var optimizationConfirmed *bool
-	optimizationProbedCandidate := ""
+	var comparison *optimizationComparison
 	if len(optimizationProbeTargets) == 2 {
-		optimizationProbedCandidate = item.OptimizationCandidate
-		confirmed := qualityOK[item.OptimizationCandidate] &&
-			availabilityOK[item.OptimizationCandidate] &&
-			freshOptimizationWin(selected, item.OptimizationCandidate, measured, measuredSpeed, p)
-		optimizationConfirmed = &confirmed
+		comparison = compareOptimization(now, selected, item.OptimizationCandidate, measured, measuredSpeed,
+			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], p)
 	} else if len(optimizationProbeTargets) == 1 && optimizationProbeTargets[0] == selected {
 		evidence := measured[selected]
 		valid := evidence.OK && evidence.DelayMS != nil
@@ -1098,12 +1105,13 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			item.OptimizationActiveAt = float64(now.Unix())
 			item.OptimizationNextAt = float64(now.Unix() + int64(p.active))
 		} else {
-			optimizationProbedCandidate = item.OptimizationCandidate
-			confirmed := false
-			optimizationConfirmed = &confirmed
+			comparison = &optimizationComparison{At: now.UTC().Format(time.RFC3339), Candidate: item.OptimizationCandidate,
+				Result: optimizationLoss, Reason: "active-https-failed", ActiveDelayMS: evidence.DelayMS}
+			if evidence.OK && p.speedEnabled {
+				comparison.Result, comparison.Reason = optimizationInconclusive, "active-speed-missing"
+			}
 		}
 	} else if len(optimizationProbeTargets) == 1 && optimizationProbeTargets[0] == item.OptimizationCandidate {
-		optimizationProbedCandidate = item.OptimizationCandidate
 		pairMeasured := map[string]probeEvidence{
 			selected:                   {OK: item.OptimizationActiveMS != nil, DelayMS: item.OptimizationActiveMS},
 			item.OptimizationCandidate: measured[item.OptimizationCandidate],
@@ -1115,13 +1123,11 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				item.OptimizationCandidate: measuredSpeed[item.OptimizationCandidate],
 			}
 		}
-		confirmed := qualityOK[item.OptimizationCandidate] &&
-			availabilityOK[item.OptimizationCandidate] &&
-			freshOptimizationWin(selected, item.OptimizationCandidate, pairMeasured, pairSpeed, p)
-		optimizationConfirmed = &confirmed
+		comparison = compareOptimization(now, selected, item.OptimizationCandidate, pairMeasured, pairSpeed,
+			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], p)
 		clearOptimizationActiveSample(item)
 	}
-	desired, reason = gatePlannedOptimization(now, selected, desired, reason, optimizationProbedCandidate, optimizationConfirmed, item, p)
+	desired, reason = gatePlannedOptimization(now, selected, desired, reason, comparison, item, p)
 	serviceStatus := make(map[string]serviceHealthStatus)
 	if contract.Mode == "priority" && len(contract.Policy.CandidateServiceIDs) > 0 {
 		desiredGroup := groupSelector[desired]

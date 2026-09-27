@@ -80,6 +80,30 @@ test("Policy DNS ships as a native Go component", async () => {
   assert.match(makefile, /go-test:/);
 });
 
+test("Xray image applies and exercises graceful outbound transport retirement", async () => {
+  const [dockerfile, patch] = await Promise.all([
+    text("Dockerfile"),
+    text("patches/xray-outbound-transport-retirement.patch"),
+  ]);
+  const apply = "git apply /tmp/xray-outbound-transport-retirement.patch";
+  assert.ok(dockerfile.includes("git apply --check /tmp/xray-outbound-transport-retirement.patch"));
+  assert.ok(dockerfile.indexOf(apply) < dockerfile.indexOf("go test ./proxy"));
+  for (const path of ["app/proxyman/outbound", "transport/internet", "transport/internet/grpc", "transport/internet/hysteria", "transport/internet/splithttp"]) {
+    assert.ok(dockerfile.includes(`./${path}`));
+  }
+  assert.match(dockerfile, /io\.sb-gateway\.dependency\.xray\.outbound-transport-retirement="true"/);
+  for (const name of [
+    "TestRemoveHandlerRetiresTransportAfterLiveStream",
+    "TestRetirementPreservesStreamsAcrossAToBToA",
+    "TestDialerRetirementDoesNotKeepConfigurationsAlive",
+    "TestGRPCRetirementKeepsLiveStreamsAndReclaimsCache",
+    "TestHysteriaRetirementKeepsTCPAndUDPAndReclaimsCache",
+    "TestXHTTPRetirementKeepsLiveStreamsAndReclaimsCache",
+    "TestXHTTPRetirementCancelsPendingRequestsOnlyAfterStreamClose",
+    "TestXHTTPRetirementClosingHungStreamPreservesLiveSibling",
+  ]) assert.ok(patch.includes(name), name);
+});
+
 test("RouterOS container uses kernel TPROXY and mount lists", async () => {
   const install = await text("routeros/install.rsc");
   const preflight = await text("scripts/preflight.sh");
