@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const optimizationConfirmations = 2
+const (
+	optimizationConfirmations         = 2
+	maxSpeedSwitchLatencyRegressionMS = 50
+)
 
 type effectivePolicySettings struct {
 	failureThreshold  int
@@ -345,63 +348,63 @@ func meaningfullyBetter(selected string, candidates []string, delays map[string]
 	if current == nil || *current <= 0 {
 		return ""
 	}
-	measured := []string{}
-	for _, candidate := range candidates {
-		if delays[candidate] != nil && *current-*delays[candidate] >= p.improvement {
-			measured = append(measured, candidate)
-		}
-	}
+	latencyQualified := []string{}
 	if p.speedEnabled {
 		currentSpeed := speeds[selected]
 		if currentSpeed == nil || *currentSpeed <= 0 {
 			return ""
 		}
-		filtered := []string{}
-		for _, candidate := range measured {
-			if speeds[candidate] != nil && *speeds[candidate]*100 >= *currentSpeed*int64(100+p.speedImprovement) {
-				filtered = append(filtered, candidate)
+		speedQualified := []string{}
+		for _, candidate := range candidates {
+			delay, speed := delays[candidate], speeds[candidate]
+			if delay == nil || *delay <= 0 || speed == nil || *speed <= 0 {
+				continue
+			}
+			// A faster path need not also beat the HTTPS latency threshold.
+			// Bound its latency regression and require a strict improvement in
+			// responsive throughput so the same evidence cannot justify a switch
+			// straight back in the other direction.
+			if *speed > *currentSpeed &&
+				*speed*100 >= *currentSpeed*int64(100+p.speedImprovement) &&
+				*delay <= *current+maxSpeedSwitchLatencyRegressionMS &&
+				*speed*int64(*current) > *currentSpeed*int64(*delay) {
+				speedQualified = append(speedQualified, candidate)
+			}
+			if *current-*delay >= p.improvement &&
+				*speed*100 >= *currentSpeed*65 &&
+				*speed*int64(*current) > *currentSpeed*int64(*delay) {
+				latencyQualified = append(latencyQualified, candidate)
 			}
 		}
-		if len(filtered) == 0 {
-			// No candidate materially improves both metrics. Prefer responsiveness
-			// only when its relative gain outweighs the throughput cost. Keep a
-			// hard floor of 65% of current throughput and require measured speed.
-			for _, candidate := range measured {
-				speed := speeds[candidate]
-				if speed == nil || *speed <= 0 {
-					continue
+		if len(speedQualified) > 0 {
+			sort.SliceStable(speedQualified, func(i, j int) bool {
+				if *speeds[speedQualified[i]] != *speeds[speedQualified[j]] {
+					return *speeds[speedQualified[i]] > *speeds[speedQualified[j]]
 				}
-				loss := 1 - float64(*speed)/float64(*currentSpeed)
-				gain := 1 - float64(*delays[candidate])/float64(*current)
-				if loss <= 0.35 && gain > 0 && gain > loss {
-					filtered = append(filtered, candidate)
-				}
-			}
-			sort.SliceStable(filtered, func(i, j int) bool {
-				if *delays[filtered[i]] != *delays[filtered[j]] {
-					return *delays[filtered[i]] < *delays[filtered[j]]
-				}
-				return *speeds[filtered[i]] > *speeds[filtered[j]]
+				return *delays[speedQualified[i]] < *delays[speedQualified[j]]
 			})
-			if len(filtered) == 0 {
-				return ""
-			}
-			return filtered[0]
+			return speedQualified[0]
 		}
-		sort.SliceStable(filtered, func(i, j int) bool {
-			if *speeds[filtered[i]] != *speeds[filtered[j]] {
-				return *speeds[filtered[i]] > *speeds[filtered[j]]
+		// Without a speed winner, a responsive path may trade away at most
+		// 35% throughput, provided its latency gain outweighs that loss.
+		sort.SliceStable(latencyQualified, func(i, j int) bool {
+			if *delays[latencyQualified[i]] != *delays[latencyQualified[j]] {
+				return *delays[latencyQualified[i]] < *delays[latencyQualified[j]]
 			}
-			return *delays[filtered[i]] < *delays[filtered[j]]
+			return *speeds[latencyQualified[i]] > *speeds[latencyQualified[j]]
 		})
-		measured = filtered
 	} else {
-		sort.SliceStable(measured, func(i, j int) bool { return *delays[measured[i]] < *delays[measured[j]] })
+		for _, candidate := range candidates {
+			if delays[candidate] != nil && *current-*delays[candidate] >= p.improvement {
+				latencyQualified = append(latencyQualified, candidate)
+			}
+		}
+		sort.SliceStable(latencyQualified, func(i, j int) bool { return *delays[latencyQualified[i]] < *delays[latencyQualified[j]] })
 	}
-	if len(measured) == 0 || *current-*delays[measured[0]] < p.improvement {
+	if len(latencyQualified) == 0 {
 		return ""
 	}
-	return measured[0]
+	return latencyQualified[0]
 }
 
 // A planned best-mode switch is intentionally slower than outage recovery.
@@ -450,6 +453,9 @@ func freshOptimizationWin(selected, candidate string, measured map[string]probeE
 	activeEvidence, activeOK := measured[selected]
 	candidateEvidence, candidateOK := measured[candidate]
 	if !activeOK || !candidateOK || !activeEvidence.OK || !candidateEvidence.OK || activeEvidence.DelayMS == nil || candidateEvidence.DelayMS == nil {
+		return false
+	}
+	if p.maxLatency > 0 && *candidateEvidence.DelayMS > p.maxLatency {
 		return false
 	}
 	delays := map[string]*int{selected: activeEvidence.DelayMS, candidate: candidateEvidence.DelayMS}

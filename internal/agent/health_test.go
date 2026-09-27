@@ -592,9 +592,14 @@ func TestBestModeRequiresStableRecoveryLatencyAndThroughputBeforePlannedSwitch(t
 			selectedSpeed: 1_000, candidateSpeed: 1_500, want: "active",
 		},
 		{
-			name:       "small latency variation does not switch",
+			name:       "small latency variation without speed gain does not switch",
 			recoveries: 3, selectedDelay: 140, candidateDelay: 91,
-			selectedSpeed: 1_000, candidateSpeed: 1_500, want: "active",
+			selectedSpeed: 1_000, candidateSpeed: 1_100, want: "active",
+		},
+		{
+			name:       "speed gain switches below latency improvement threshold",
+			recoveries: 3, selectedDelay: 140, candidateDelay: 91,
+			selectedSpeed: 1_000, candidateSpeed: 1_500, want: "reserve", wantReason: "meaningfully-faster",
 		},
 		{
 			name:       "material latency gain permits smaller speed gain",
@@ -701,6 +706,10 @@ func TestPlannedComparisonUsesFreshPairedLatencyAndSpeed(t *testing.T) {
 	}
 	if freshOptimizationWin("active", "reserve", measured, map[string]int64{"active": 12_000}, settings) {
 		t.Fatal("fresh comparison reused a missing or historical candidate speed")
+	}
+	settings.maxLatency = 500
+	if freshOptimizationWin("active", "reserve", measured, map[string]int64{"active": 12_000, "reserve": 16_000}, settings) {
+		t.Fatal("fresh comparison accepted a reserve beyond the absolute HTTPS limit")
 	}
 }
 
