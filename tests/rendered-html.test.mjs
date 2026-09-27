@@ -6,11 +6,14 @@ import { normalizeLocalizedSource } from "./source-localization.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
 
-test("URLTest responsiveness help matches the balanced speed threshold", async () => {
+test("URLTest switching help separates speed and latency thresholds", async () => {
   const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
   assert.match(page, /name="speed_improvement_percent"/);
   assert.match(page, /Порог приоритета скорости, %/);
-  assert.match(page, /предел потери — 35%/);
+  assert.match(page, /Только для выбора по отклику/);
+  assert.match(page, /При выигрыше скорости допустимо \+50 мс отклика/);
+  assert.match(page, /Порог HTTPS-медианы, мс/);
+  assert.doesNotMatch(page, /Максимальный p95 HTTPS, мс/);
   assert.doesNotMatch(page, /Плановая смена канала не выполняется, если прирост ниже этого порога/);
 });
 

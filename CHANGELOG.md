@@ -1,62 +1,69 @@
 # Changelog
 
-## 1.6.25
+## 1.6.26
 
 ## Русский
 
 ### Изменения
 
-- Отказ одной контрольной HTTPS-цели больше не считается отказом VLESS-узла:
-  активный маршрут проверяется на трёх независимых целях, а переключение
-  требует подтверждённого отказа и рабочего резерва. Общая авария WAN/DNS
-  по-прежнему не вызывает перебор узлов.
-- При обновлении контейнера правило журнала RouterOS `info,!wireguard`
-  сохраняет исключение WireGuard и получает `!fetch`; успешные опросы
-  `fetch,info` больше не заполняют журнал.
-- Необязательный скрипт Cloudflare теперь учитывает последнюю строку обоих
-  официальных фидов даже без завершающего перевода строки. Для его обновления
-  повторно импортируйте `routeros/cloudflare-update.rsc` из нового bundle.
-  Обычное обновление контейнера не заменяет уже установленный RouterOS script.
+- URLTest теперь может перейти на подтверждённо более быстрый узел при приросте
+  скорости от заданного порога, даже если разница HTTPS-задержки меньше порога
+  выбора по отклику. При таком переходе задержка может стать хуже максимум
+  на 50 мс, а отношение скорости к задержке должно улучшиться. Сохраняются
+  две свежие парные проверки и защита от частых переключений.
+- В панели исправлена подпись порога задержки: он относится к HTTPS-медиане,
+  а не к p95 в таблице качества. Само значение 2000 мс по умолчанию не менялось.
 
 ### Проверка
 
-
+Go-набор, 167 UI-тестов, lint и статическая сборка прошли. Регрессии на
+Windows и под ARM64 подтверждают случай 485 мс / 5,5 Мбит/с против
+445 мс / 18,4 Мбит/с, границу +50 мс, две свежие парные проверки и запрет
+обратного перехода по тем же замерам. На изолированном ARM64 CHR образ
+1.6.26 прошёл штатное обновление и probation. Живая приёмка подтвердила
+маршрутизацию, DNS, отказ активного узла, подавление ложных переключений при
+коротких обрывах и общей аварии WAN/DNS, остановку и восстановление
+контейнера. Исходная конфигурация стенда восстановлена; контейнер healthy,
+restart-count 0. Отдельная ARM64/Xray-регрессия внутри CHR подтвердила
+сохранение действующих соединений и обработчика повторно выбранного узла.
+Синтетический сценарий выбора по скорости проверен тестом контроллера, а не
+искусственной сменой скорости провайдеров на живом CHR.
 
 ### Установка и обновление
 
-Для новой установки используйте `sb-gateway-1.6.25-routeros-bundle.zip` и
+Для новой установки используйте `sb-gateway-1.6.26-routeros-bundle.zip` и
 [инструкцию](../INSTALL-RU.md). Для обновления загрузите
-`sb-gateway-1.6.25-linux-arm64.tar` в разделе **Эксплуатация → Обновление
-контейнера**. Если используется необязательный Cloudflare updater, отдельно
-повторно импортируйте его скрипт из bundle.
+`sb-gateway-1.6.26-linux-arm64.tar` в разделе **Эксплуатация → Обновление
+контейнера**.
 
 ## English
 
 ### Changes
 
-- One failed HTTPS target no longer marks a VLESS node down. The active route
-  checks three independent targets; failover still requires confirmed failure
-  and a working reserve. A shared WAN/DNS outage does not trigger node cycling.
-- On container update, a RouterOS `info,!wireguard` logging rule keeps its
-  WireGuard exclusion and gains `!fetch`, suppressing successful fetch polling.
-- The optional Cloudflare updater now keeps the final line of both official
-  feeds without a trailing newline. Re-import `routeros/cloudflare-update.rsc`
-  from the new bundle; updating the container alone does not replace an
-  installed RouterOS script.
+- URLTest can now choose a confirmed faster node when the configured speed
+  gain is met, even if the HTTPS latency gain is below the latency-switch
+  threshold. Such a switch may add at most 50 ms of latency and must improve
+  the speed-to-latency ratio. Two fresh paired checks and anti-flap protection
+  remain required.
+- The panel now correctly labels the latency limit as an HTTPS median limit,
+  not the p95 shown in the quality table. The default 2000 ms value is unchanged.
 
 ### Verification
 
-Go and UI tests passed. ARM64 CHR checks covered RouterOS script syntax,
-routing and DNS, active-node failure, short flaps, shared-WAN outage, container
-outage, and restoration of the original configuration. No false switch occurred
-in controlled URLTest scenarios; this does not rule out other causes in a live
-network. CHR also verified `fetch` exclusion with `info,!wireguard` and
-Cloudflare feed updates to 15 IPv4 and 7 IPv6 prefixes. Virtual CPU failover
-timings are not physical-router performance measurements.
+The Go suite, 167 UI tests, lint, and static build passed. Windows and ARM64
+regressions cover 485 ms / 5.5 Mbit/s against 445 ms / 18.4 Mbit/s, the
+50 ms boundary, two fresh paired checks, and rejection of a reverse switch
+on unchanged evidence. On an isolated ARM64 CHR, 1.6.26 completed the normal
+update and probation. Live acceptance covered routing, DNS, active-node
+failure, short flaps and shared WAN/DNS outage without false switches,
+container outage and recovery. The original lab configuration was restored;
+the container is healthy with zero restarts. A separate ARM64/Xray regression
+inside CHR confirmed established-connection and reselected-handler safety.
+The speed-selection case was tested with controlled controller evidence, not
+by changing live providers' speeds on CHR.
 
 ### Installation and update
 
-For a clean installation use `sb-gateway-1.6.25-routeros-bundle.zip` and the
+For a clean installation use `sb-gateway-1.6.26-routeros-bundle.zip` and the
 [installation guide](../INSTALL.md). For an update, upload
-`sb-gateway-1.6.25-linux-arm64.tar` under **Operations → Container update**.
-If using the optional Cloudflare updater, re-import its script from the bundle.
+`sb-gateway-1.6.26-linux-arm64.tar` under **Operations → Container update**.

@@ -12380,9 +12380,9 @@ function PolicyDialog({
                     <input name="max_packet_loss_percent" type="number" min="0" max="100" defaultValue={asText(existingPolicy.max_packet_loss_percent, "40")} />
                   </label>
                   <label className="field">
-                    <span className="policy-check-label">{tr("Максимальный p95 HTTPS, мс")}</span>
+                    <span className="policy-check-label">{tr("Порог HTTPS-медианы, мс")}</span>
                     <input name="max_latency_ms" type="number" min="0" max="30000" defaultValue={asText(existingPolicy.max_latency_ms, "2000")} />
-                    <small>{tr("0 отключает порог задержки.")}</small>
+                    <small>{tr("0 — без порога.")}</small>
                   </label>
                   <label className="field">
                     <span className="policy-check-label">{tr("Подтверждений обычной ошибки")}</span>
@@ -12398,12 +12398,12 @@ function PolicyDialog({
                       <label className="field">
                         <span className="policy-check-label">{tr("Порог переключения URLTest, мс")}</span>
                         <input name="switch_improvement_ms" type="number" min="0" max="30000" defaultValue={asText(existingPolicy.switch_improvement_ms, "50")} />
-                        <small>{tr("Переключение выполняется, только если стабильная HTTPS-задержка ниже хотя бы на это значение.")}</small>
+                        <small>{tr("Только для выбора по отклику.")}</small>
                       </label>
                       <label className="field">
                         <span className="policy-check-label">{tr("Порог приоритета скорости, %")}</span>
                         <input name="speed_improvement_percent" type="number" min="0" max="100" defaultValue={asText(existingPolicy.speed_improvement_percent, "25")} />
-                        <small>{tr("Сначала — узлы с таким приростом. Иначе — лучший отклик, если его выигрыш больше потери скорости; предел потери — 35%.")}</small>
+                        <small>{tr("При выигрыше скорости допустимо +50 мс отклика.")}</small>
                       </label>
                     </>
                   ) : null}

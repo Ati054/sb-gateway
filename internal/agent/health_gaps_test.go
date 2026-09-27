@@ -15,15 +15,15 @@ import (
 	"time"
 )
 
-func TestBestModeFiltersAllThresholdsBeforeRanking(t *testing.T) {
+func TestBestModeSpeedGainDoesNotRequireLatencyThreshold(t *testing.T) {
 	current, tooClose, good := 500, 480, 400
 	currentSpeed, topSpeed, goodSpeed := int64(100), int64(200), int64(150)
 	got := meaningfullyBetter("active", []string{"fast-but-close", "eligible"},
 		map[string]*int{"active": &current, "fast-but-close": &tooClose, "eligible": &good},
 		map[string]*int64{"active": &currentSpeed, "fast-but-close": &topSpeed, "eligible": &goodSpeed},
 		effectivePolicySettings{speedEnabled: true, speedImprovement: 25, improvement: 50})
-	if got != "eligible" {
-		t.Fatalf("valid second choice was ignored: %q", got)
+	if got != "fast-but-close" {
+		t.Fatalf("speed winner was ignored despite safe latency: %q", got)
 	}
 }
 
