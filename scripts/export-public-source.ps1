@@ -47,19 +47,29 @@ try {
     Expand-Archive -LiteralPath $temporaryArchive -DestinationPath $sourceRoot
     Remove-Item -LiteralPath $temporaryArchive -Force
 
-    $publicReleaseVersions = @($version)
-    $publicChangelog = @("# Changelog", "")
-    foreach ($publicReleaseVersion in $publicReleaseVersions) {
-        $publicReleasePath = Join-Path $sourceRoot "docs/releases/$publicReleaseVersion.md"
-        if (-not (Test-Path -LiteralPath $publicReleasePath -PathType Leaf)) {
-            throw "Missing public release document docs/releases/$publicReleaseVersion.md."
-        }
-        $releaseLines = @(Get-Content -Encoding UTF8 -LiteralPath $publicReleasePath)
-        if ($releaseLines.Count -eq 0 -or $releaseLines[0] -ne "# SB Gateway $publicReleaseVersion") {
-            throw "Release document $publicReleaseVersion has an unexpected title."
-        }
-        $publicChangelog += @("## $publicReleaseVersion") + $releaseLines[1..($releaseLines.Count - 1)]
+    $publicReleasePath = Join-Path $sourceRoot "docs/releases/$version.md"
+    $releaseLines = @(Get-Content -Encoding UTF8 -LiteralPath $publicReleasePath)
+    if ($releaseLines.Count -eq 0 -or $releaseLines[0] -ne "# SB Gateway $version") {
+        throw "Release document $version is missing or has an unexpected title."
     }
+    if (@($releaseLines | Where-Object { $_ -match '^### (Проверка|Verification)(\s|$)' }).Count -ne 0) {
+        throw "Public release notes must contain user-facing changes, not test reports."
+    }
+    $changelogLines = @(Get-Content -Encoding UTF8 -LiteralPath (Join-Path $sourceRoot "CHANGELOG.md"))
+    $start = [Array]::IndexOf($changelogLines, "## $version")
+    if ($start -lt 0) { throw "CHANGELOG.md is missing release $version." }
+    $end = $changelogLines.Count
+    for ($index = $start + 1; $index -lt $changelogLines.Count; $index++) {
+        if ($changelogLines[$index] -match '^## \d+\.\d+\.\d+$') {
+            $end = $index
+            break
+        }
+    }
+    while ($end -gt $start + 1 -and [string]::IsNullOrWhiteSpace($changelogLines[$end - 1])) {
+        $end--
+    }
+    if ($end -le $start + 1) { throw "CHANGELOG.md has no changes for release $version." }
+    $publicChangelog = @("# Changelog", "") + $changelogLines[$start..($end - 1)]
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllLines((Join-Path $sourceRoot "CHANGELOG.md"), $publicChangelog, $utf8NoBom)
     Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs/releases') -File | Where-Object {
