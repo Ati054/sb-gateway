@@ -21,6 +21,7 @@ type fakeSelectorRuntime struct {
 	speedCalls        int
 	throughputCalls   []string
 	speeds            map[string]int64
+	speedWindow       map[string]bool
 	underlay          underlayEvidence
 }
 
@@ -73,6 +74,9 @@ func (runtime *fakeSelectorRuntime) Throughput(candidate string, _ int) (int64, 
 	runtime.speedCalls++
 	runtime.throughputCalls = append(runtime.throughputCalls, candidate)
 	if speed := runtime.speeds[candidate]; speed > 0 {
+		if runtime.speedWindow[candidate] {
+			return speed, errSpeedWindowComplete
+		}
 		return speed, nil
 	}
 	return 0, os.ErrNotExist
@@ -574,6 +578,8 @@ func TestBestModeRequiresStableRecoveryLatencyAndThroughputBeforePlannedSwitch(t
 		improvement:       50,
 		speedEnabled:      true,
 		speedImprovement:  25,
+		active:            60,
+		backup:            300,
 	}
 
 	tests := []struct {
@@ -627,6 +633,7 @@ func TestBestModeRequiresStableRecoveryLatencyAndThroughputBeforePlannedSwitch(t
 		t.Run(test.name, func(t *testing.T) {
 			item := newPolicyHealthState()
 			item.Recoveries["reserve"] = test.recoveries
+			item.LastProbeAt["reserve"] = float64(now.Add(-10 * time.Second).Unix())
 			delays := map[string]*int{"active": &test.selectedDelay, "reserve": &test.candidateDelay}
 			speeds := map[string]*int64{"active": &test.selectedSpeed, "reserve": &test.candidateSpeed}
 			desired, reason := selectDesired(
@@ -648,23 +655,23 @@ func TestPlannedBestSwitchRequiresTwoFreshPairedConfirmations(t *testing.T) {
 	item := newPolicyHealthState()
 
 	desired, reason := gatePlannedOptimization(
-		now, "active", "reserve", "meaningfully-faster", "", nil, item, settings,
+		now, "active", "reserve", "meaningfully-faster", nil, item, settings,
 	)
 	if desired != "active" || reason != "" || item.OptimizationBaseline != "active" ||
 		item.OptimizationCandidate != "reserve" || item.OptimizationChecks != 0 || item.OptimizationNextAt != 1060 {
 		t.Fatalf("planned comparison was not staged: desired=%q reason=%q item=%+v", desired, reason, item)
 	}
 
-	confirmed := true
+	confirmed := &optimizationComparison{Candidate: "reserve", Result: optimizationWin}
 	desired, reason = gatePlannedOptimization(
-		now.Add(time.Minute), "active", "reserve", "meaningfully-faster", "reserve", &confirmed, item, settings,
+		now.Add(time.Minute), "active", "reserve", "meaningfully-faster", confirmed, item, settings,
 	)
 	if desired != "active" || reason != "" || item.OptimizationChecks != 1 || item.OptimizationNextAt != 1120 {
 		t.Fatalf("first paired comparison switched early: desired=%q reason=%q item=%+v", desired, reason, item)
 	}
 
 	desired, reason = gatePlannedOptimization(
-		now.Add(2*time.Minute), "active", "reserve", "meaningfully-faster", "reserve", &confirmed, item, settings,
+		now.Add(2*time.Minute), "active", "reserve", "meaningfully-faster", confirmed, item, settings,
 	)
 	if desired != "reserve" || reason != "meaningfully-faster" || item.OptimizationCandidate != "" || item.OptimizationChecks != 0 {
 		t.Fatalf("second paired comparison did not switch: desired=%q reason=%q item=%+v", desired, reason, item)
@@ -675,16 +682,16 @@ func TestFailedPlannedComparisonBacksOffButEmergencySwitchDoesNotWait(t *testing
 	now := time.Unix(1_000, 0)
 	settings := effectivePolicySettings{active: 60, cooldown: 600}
 	item := newPolicyHealthState()
-	_, _ = gatePlannedOptimization(now, "active", "reserve", "meaningfully-faster", "", nil, item, settings)
-	confirmed := false
+	_, _ = gatePlannedOptimization(now, "active", "reserve", "meaningfully-faster", nil, item, settings)
+	confirmed := &optimizationComparison{Candidate: "reserve", Result: optimizationLoss}
 	desired, reason := gatePlannedOptimization(
-		now.Add(time.Minute), "active", "reserve", "meaningfully-faster", "reserve", &confirmed, item, settings,
+		now.Add(time.Minute), "active", "reserve", "meaningfully-faster", confirmed, item, settings,
 	)
 	if desired != "active" || reason != "" || item.OptimizationCandidate != "" || item.OptimizationRetryAfter != 1660 {
 		t.Fatalf("failed comparison did not back off: desired=%q reason=%q item=%+v", desired, reason, item)
 	}
 	desired, reason = gatePlannedOptimization(
-		now.Add(2*time.Minute), "active", "reserve", "active-unavailable", "", nil, item, settings,
+		now.Add(2*time.Minute), "active", "reserve", "active-unavailable", nil, item, settings,
 	)
 	if desired != "reserve" || reason != "active-unavailable" || item.OptimizationRetryAfter != 0 {
 		t.Fatalf("emergency switch waited for optimization state: desired=%q reason=%q item=%+v", desired, reason, item)
@@ -782,6 +789,181 @@ func TestControllerBoundsPlannedComparisonToActiveAndOneCandidate(t *testing.T) 
 	}
 }
 
+func stagedOptimizationController(t *testing.T) (*healthController, *policyHealthState, *fakeSelectorRuntime) {
+	t.Helper()
+	pool := healthFixture(true)
+	contract := pool.HealthPolicies["europe"]
+	contract.Mode = "best"
+	contract.Candidates = []string{"active", "reserve"}
+	contract.Groups = nil
+	contract.Nodes = map[string]healthNode{"active": {Label: "Active"}, "reserve": {Label: "Reserve"}}
+	contract.Policy.ActiveCheckSeconds = 60
+	contract.Policy.BackupCheckSeconds = 300
+	contract.Policy.FullScanSeconds = 1800
+	contract.Policy.ProbeBatchSize = 2
+	contract.Policy.SwitchImprovementMS = 50
+	contract.Policy.SpeedImprovementPercent = 25
+	contract.Policy.SwitchCooldownSeconds = 600
+	pool.HealthPolicies["europe"] = contract
+	item := newPolicyHealthState()
+	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "active", "active", true
+	item.CandidateSignature = strings.Join(contract.Candidates, "\n")
+	item.NextFullScanAt = 2_000
+	item.OptimizationBaseline, item.OptimizationCandidate = "active", "reserve"
+	item.OptimizationNextAt = 1_060
+	item.AvailabilityOK = make(map[string]bool)
+	item.QualityOK = make(map[string]bool)
+	activeDelay, reserveDelay := 600, 500
+	for candidate, delay := range map[string]*int{"active": &activeDelay, "reserve": &reserveDelay} {
+		item.AvailabilityOK[candidate], item.QualityOK[candidate] = true, true
+		item.Recoveries[candidate] = 3
+		item.LastProbeAt[candidate], item.LastSpeedProbeAt[candidate] = 1_000, 1_000
+		item.Samples[candidate] = []healthSample{{OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}}
+	}
+	item.SpeedSamplesBPS["active"] = []int64{12_000}
+	item.SpeedSamplesBPS["reserve"] = []int64{16_000}
+	runtime := &fakeSelectorRuntime{
+		pool: pool, current: map[string]string{"europe": "active"},
+		probes: map[string]probeEvidence{"active": successfulEvidence(activeDelay), "reserve": successfulEvidence(reserveDelay)},
+		speeds: map[string]int64{"active": 12_000, "reserve": 16_000},
+	}
+	controller := &healthController{
+		opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime,
+		state: healthState{"europe": item}, stateLoaded: true, warmStarted: map[string]bool{"europe": true},
+	}
+	return controller, item, runtime
+}
+
+func TestIncompleteCandidateSpeedRetriesThenRequiresTwoFreshWins(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	delete(runtime.speeds, "reserve")
+	if err := controller.Tick(time.Unix(1_060, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if item.Selected != "active" || item.OptimizationCandidate != "reserve" || item.OptimizationIncomplete != 1 ||
+		item.OptimizationNextAt != 1_180 || item.OptimizationRetryAfter != 0 ||
+		item.OptimizationLastResult == nil || item.OptimizationLastResult.Reason != "candidate-speed-missing" ||
+		item.LastSpeedProbeStatus["reserve"] != "failed" || item.LastSpeedSuccessAt["reserve"] != 0 {
+		t.Fatalf("incomplete candidate pair was treated as a loss: %+v", item)
+	}
+	if len(item.SpeedSamplesBPS["reserve"]) != 1 || item.SpeedSamplesBPS["reserve"][0] != 16_000 {
+		t.Fatal("failed probe changed the historical speed sample")
+	}
+	runtime.speeds["reserve"] = 16_000
+	for _, at := range []int64{1_180, 1_240} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.Selected != "reserve" || item.LastSwitchReason != "meaningfully-faster" ||
+		item.LastSpeedSuccessAt["reserve"] != 1_240 {
+		t.Fatalf("two complete wins did not switch after a bounded retry: %+v", item)
+	}
+	if strings.Join(runtime.throughputCalls, ",") != "active,reserve,active,reserve,active,reserve" {
+		t.Fatalf("unexpected throughput budget: %v", runtime.throughputCalls)
+	}
+}
+
+func TestIncompletePairResetsEarlierConfirmation(t *testing.T) {
+	item := newPolicyHealthState()
+	item.OptimizationCandidate = "reserve"
+	settings := effectivePolicySettings{active: 60, backup: 300, cooldown: 600}
+	win := &optimizationComparison{Candidate: "reserve", Result: optimizationWin}
+	incomplete := &optimizationComparison{Candidate: "reserve", Result: optimizationInconclusive, Reason: "candidate-speed-missing"}
+	_, _ = gatePlannedOptimization(time.Unix(1_000, 0), "active", "reserve", "meaningfully-faster", win, item, settings)
+	if item.OptimizationChecks != 1 {
+		t.Fatalf("first confirmation count = %d", item.OptimizationChecks)
+	}
+	_, _ = gatePlannedOptimization(time.Unix(1_060, 0), "active", "reserve", "meaningfully-faster", incomplete, item, settings)
+	if item.OptimizationChecks != 0 || item.OptimizationNextAt != 1_180 {
+		t.Fatalf("incomplete pair retained stale confirmation: %+v", item)
+	}
+	_, _ = gatePlannedOptimization(time.Unix(1_180, 0), "active", "reserve", "meaningfully-faster", win, item, settings)
+	if item.OptimizationChecks != 1 || item.OptimizationCandidate != "reserve" {
+		t.Fatalf("first fresh win after retry switched early: %+v", item)
+	}
+}
+
+func TestRepeatedIncompleteSpeedDoesNotPenalizeUnmeasuredReserve(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	delete(runtime.speeds, "active")
+	for _, at := range []int64{1_060, 1_180} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.Selected != "active" || item.OptimizationCandidate != "" || item.OptimizationRetryAfter != 1_480 ||
+		item.OptimizationBackoff["reserve"] != 0 || item.OptimizationLastResult.Reason != "active-speed-missing" {
+		t.Fatalf("active speed failure penalized the reserve: %+v", item)
+	}
+	if strings.Join(runtime.throughputCalls, ",") != "active,active" {
+		t.Fatalf("candidate download was not skipped after active failure: %v", runtime.throughputCalls)
+	}
+}
+
+func TestRepeatedCandidateSpeedFailureBacksOffOnlyThatCandidate(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	delete(runtime.speeds, "reserve")
+	for _, at := range []int64{1_060, 1_180} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.OptimizationCandidate != "" || item.OptimizationBackoff["reserve"] != 1_780 ||
+		item.OptimizationRetryAfter != 1_240 {
+		t.Fatalf("candidate failure triggered a policy-wide cooldown: %+v", item)
+	}
+	if got := withoutOptimizationBackoff(time.Unix(1_240, 0), []string{"reserve", "other"}, item); strings.Join(got, ",") != "other" {
+		t.Fatalf("candidate-local backoff = %v", got)
+	}
+}
+
+func TestSingleProbeLaneRetriesWithoutExceedingBatch(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	contract := runtime.pool.HealthPolicies["europe"]
+	contract.Policy.ProbeBatchSize = 1
+	runtime.pool.HealthPolicies["europe"] = contract
+	delete(runtime.speeds, "active")
+	if err := controller.Tick(time.Unix(1_060, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if item.OptimizationIncomplete != 1 || item.OptimizationNextAt != 1_180 {
+		t.Fatalf("single-lane failure did not schedule bounded retry: %+v", item)
+	}
+	runtime.speeds["active"] = 12_000
+	for _, at := range []int64{1_180, 1_240, 1_300, 1_360} {
+		before := len(runtime.throughputCalls)
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+		if len(runtime.throughputCalls)-before > 1 {
+			t.Fatalf("single-lane tick at %d downloaded more than once: %v", at, runtime.throughputCalls)
+		}
+	}
+	if item.Selected != "reserve" || item.LastSwitchReason != "meaningfully-faster" {
+		t.Fatalf("single-lane retry did not complete two comparisons: %+v", item)
+	}
+}
+
+func TestTimeLimitedActiveSpeedStillAllowsConfirmedFasterSwitch(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	runtime.speeds["active"] = 2_900_000
+	runtime.speeds["reserve"] = 17_700_000
+	runtime.speedWindow = map[string]bool{"active": true}
+	for _, at := range []int64{1_060, 1_120} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.Selected != "reserve" || item.LastSwitchReason != "meaningfully-faster" ||
+		item.LastSpeedProbeStatus["active"] != "time-limited" || item.LastSpeedSuccessAt["active"] != 1_120 {
+		t.Fatalf("valid time-limited baseline did not permit confirmed optimization: %+v", item)
+	}
+	if len(runtime.throughputCalls) != 4 {
+		t.Fatalf("time-limited measurement exceeded pair budget: %v", runtime.throughputCalls)
+	}
+}
+
 func TestBestModeCooldownStopsFlappingButNeverDelaysFailureFailover(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	settings := effectivePolicySettings{
@@ -836,7 +1018,7 @@ func TestEmergencyFailoverPinsRecoveredReserveButNotInitialPath(t *testing.T) {
 	}
 }
 
-func TestEmergencyFailoverPrefersConfirmedReserveOverFreshCandidate(t *testing.T) {
+func TestEmergencyFailoverPrefersFreshlyConfirmedReserveOverFreshCandidate(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	settings := effectivePolicySettings{failureThreshold: 3, recoveryThreshold: 3, backup: 300}
 	for _, mode := range []string{"best", "priority"} {
@@ -853,7 +1035,7 @@ func TestEmergencyFailoverPrefersConfirmedReserveOverFreshCandidate(t *testing.T
 				map[string]int{"active": 0, "first-fresh": 0, "confirmed-reserve": 1}, nil,
 				map[string]*int{"active": &activeDelay, "first-fresh": &freshDelay, "confirmed-reserve": &reserveDelay},
 				map[string]*int64{"first-fresh": &freshSpeed, "confirmed-reserve": &reserveSpeed},
-				map[string]probeEvidence{"first-fresh": successfulEvidence(freshDelay)},
+				map[string]probeEvidence{"first-fresh": successfulEvidence(freshDelay), "confirmed-reserve": successfulEvidence(reserveDelay)},
 				map[string]bool{"first-fresh": true, "confirmed-reserve": true},
 				map[string]bool{"first-fresh": true, "confirmed-reserve": true}, item, settings,
 			)
@@ -918,20 +1100,23 @@ func TestBestModeDoesNotBounceBetweenReachableDegradedPaths(t *testing.T) {
 	}
 }
 
-func TestDegradedPathSwitchRequiresStableReserveButBypassesCooldown(t *testing.T) {
+func TestDegradedPathSwitchRequiresFreshReserveAndCooldown(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		mode       string
 		recoveries int
 		cooldown   float64
 		lastReason string
+		lastProbe  float64
 		want       string
 	}{
-		{"unconfirmed reserve", "best", 1, 0, "", "de"},
-		{"normal cooldown does not pin degraded active", "best", 3, 2000, "meaningfully-faster", "nl"},
-		{"failover cooldown prevents ping-pong", "best", 3, 2000, "active-unavailable", "de"},
-		{"priority recovery cooldown prevents ping-pong", "priority", 3, 2000, "higher-priority-recovered", "de"},
-		{"stable reserve after cooldown", "best", 3, 0, "active-unavailable", "nl"},
+		{"unconfirmed reserve", "best", 1, 0, "", 999, "de"},
+		{"all soft switches respect cooldown", "best", 3, 2000, "meaningfully-faster", 999, "de"},
+		{"failover cooldown prevents ping-pong", "best", 3, 2000, "active-unavailable", 999, "de"},
+		{"priority recovery cooldown prevents ping-pong", "priority", 3, 2000, "higher-priority-recovered", 999, "de"},
+		{"stale reserve cannot replace reachable active", "best", 3, 0, "", 700, "de"},
+		{"reserve with recent availability failure", "best", 3, 0, "", 999, "de"},
+		{"stable reserve after cooldown", "best", 3, 0, "active-unavailable", 999, "nl"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			item := newPolicyHealthState()
@@ -939,6 +1124,10 @@ func TestDegradedPathSwitchRequiresStableReserveButBypassesCooldown(t *testing.T
 			item.Recoveries["nl"] = test.recoveries
 			item.CooldownUntil = test.cooldown
 			item.LastSwitchReason = test.lastReason
+			item.LastProbeAt["nl"] = test.lastProbe
+			if test.name == "reserve with recent availability failure" {
+				item.AvailabilityFailures["nl"] = 1
+			}
 			settings := policySettings(healthPolicy{}, test.mode)
 			delay := 50
 			desired, _ := selectDesired(time.Unix(1000, 0), test.mode, "de", []string{"de", "nl"},
@@ -946,6 +1135,81 @@ func TestDegradedPathSwitchRequiresStableReserveButBypassesCooldown(t *testing.T
 				map[string]bool{"nl": true}, map[string]bool{"de": true, "nl": true}, item, settings)
 			if desired != test.want {
 				t.Fatalf("selected %s, want %s", desired, test.want)
+			}
+		})
+	}
+}
+
+func TestRecoveredCurrentProbeClearsOverlappingQualityFailures(t *testing.T) {
+	for _, mode := range []string{"priority", "best"} {
+		t.Run(mode, func(t *testing.T) {
+			pool := healthFixture(false)
+			contract := pool.HealthPolicies["europe"]
+			contract.Mode = mode
+			contract.Policy.ActiveCheckSeconds = 60
+			contract.Policy.BackupCheckSeconds = 300
+			pool.HealthPolicies["europe"] = contract
+			item := newPolicyHealthState()
+			ensureHealthMaps(item)
+			item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
+			item.CandidateSignature = "de\nnl"
+			item.NextFullScanAt = 2800
+			item.CooldownUntil = 2000 // Do not let planned ranking obscure the degradation regression.
+			item.Failures["de"] = 2
+			fast, slow := 500, 2500
+			item.Samples["de"] = []healthSample{{OK: true, DelayMS: &fast}, {OK: true, DelayMS: &fast},
+				{OK: true, DelayMS: &slow}, {OK: true, DelayMS: &slow}, {OK: true, DelayMS: &slow}}
+			item.Samples["nl"] = []healthSample{{OK: true, DelayMS: &fast}, {OK: true, DelayMS: &fast}, {OK: true, DelayMS: &fast}}
+			item.AvailabilityOK = map[string]bool{}
+			item.QualityOK = map[string]bool{}
+			item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
+			item.Recoveries["nl"] = 3
+			item.LastProbeAt["de"], item.LastProbeAt["nl"] = 940, 999
+			runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"},
+				probes: map[string]probeEvidence{"de": successfulEvidence(fast), "nl": successfulEvidence(fast)}}
+			controller := &healthController{opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute},
+				runtime: runtime, stateLoaded: true, warmStarted: map[string]bool{"europe": true}, state: healthState{"europe": item}}
+			if err := controller.Tick(time.Unix(1000, 0)); err != nil {
+				t.Fatal(err)
+			}
+			if item.Selected != "de" || item.Failures["de"] != 0 || hasSelection(runtime.selections, "europe", "nl") {
+				t.Fatalf("current healthy probe caused a false soft switch: selected=%s failures=%d selections=%v", item.Selected, item.Failures["de"], runtime.selections)
+			}
+		})
+	}
+}
+
+func TestIndependentSlowProbesSwitchOnlyToRecentReserve(t *testing.T) {
+	for _, mode := range []string{"priority", "best"} {
+		t.Run(mode, func(t *testing.T) {
+			pool := healthFixture(false)
+			contract := pool.HealthPolicies["europe"]
+			contract.Mode = mode
+			contract.Policy.ActiveCheckSeconds = 60
+			contract.Policy.BackupCheckSeconds = 300
+			pool.HealthPolicies["europe"] = contract
+			item := newPolicyHealthState()
+			ensureHealthMaps(item)
+			item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
+			item.CandidateSignature = "de\nnl"
+			item.NextFullScanAt = 2800
+			item.Failures["de"] = 2
+			slow, fast := 2500, 500
+			item.Samples["de"] = []healthSample{{OK: true, DelayMS: &slow}, {OK: true, DelayMS: &slow}}
+			item.Samples["nl"] = []healthSample{{OK: true, DelayMS: &fast}, {OK: true, DelayMS: &fast}, {OK: true, DelayMS: &fast}}
+			item.AvailabilityOK = map[string]bool{"nl": true}
+			item.QualityOK = map[string]bool{"nl": true}
+			item.Recoveries["nl"] = 3
+			item.LastProbeAt["de"], item.LastProbeAt["nl"] = 940, 999
+			runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"},
+				probes: map[string]probeEvidence{"de": successfulEvidence(slow), "nl": successfulEvidence(fast)}}
+			controller := &healthController{opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute},
+				runtime: runtime, stateLoaded: true, warmStarted: map[string]bool{"europe": true}, state: healthState{"europe": item}}
+			if err := controller.Tick(time.Unix(1000, 0)); err != nil {
+				t.Fatal(err)
+			}
+			if item.Selected != "nl" || item.LastSwitchReason != "active-degraded" || !hasSelection(runtime.selections, "europe", "nl") {
+				t.Fatalf("sustained slowdown failed to switch: selected=%s reason=%s selections=%v", item.Selected, item.LastSwitchReason, runtime.selections)
 			}
 		})
 	}

@@ -109,6 +109,25 @@ func knownFreshReserve(now time.Time, selected string, candidates []string, mode
 	return rankCandidates(fresh, mode, groups, item.DailyStats, item.MedianDelayMS, speeds)[0]
 }
 
+// A cached reserve gets the first emergency slot, but must pass a current
+// availability probe before Select. The configured batch size still bounds
+// work even when several reserves fail together.
+func prioritizeEmergencyReserve(targets []string, reserve string, closed map[string]bool, batch int) []string {
+	if reserve == "" || closed[reserve] || batch <= 0 {
+		return targets
+	}
+	result := []string{reserve}
+	for _, target := range targets {
+		if len(result) >= batch {
+			break
+		}
+		if target != reserve {
+			result = append(result, target)
+		}
+	}
+	return result
+}
+
 func (controller *healthController) probeEmergencyCandidates(policyID string, candidates []string, p effectivePolicySettings) (map[string]probeEvidence, string, error) {
 	measured := make(map[string]probeEvidence, len(candidates))
 	selected := ""
