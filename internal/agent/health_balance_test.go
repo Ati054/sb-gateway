@@ -47,3 +47,31 @@ func TestURLTestSpeedPriorityRemainsEffective(t *testing.T) {
 		t.Fatal("speed threshold is ineffective or fallback ignores responsiveness")
 	}
 }
+
+func TestURLTestSpeedOnlySwitchBoundsLatencyAndPreventsReverse(t *testing.T) {
+	tests := []struct {
+		name                      string
+		activeDelay, reserveDelay int
+		activeSpeed, reserveSpeed int64
+		want                      string
+	}{
+		{"reported slow active", 485, 445, 5_500_000, 18_400_000, "reserve"},
+		{"equal latency and exactly 25 percent faster", 500, 500, 8_000_000, 10_000_000, "reserve"},
+		{"50 ms worse", 500, 550, 8_000_000, 10_000_000, "reserve"},
+		{"more than 50 ms worse", 500, 551, 8_000_000, 16_000_000, ""},
+		{"insufficient speed gain", 500, 500, 8_000_000, 9_999_999, ""},
+		{"speed gain loses responsive throughput", 100, 150, 8_000_000, 10_000_000, ""},
+		{"reverse speed gain cannot undo latency tradeoff", 346, 560, 10_100_000, 14_600_000, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := meaningfullyBetter("active", []string{"reserve"},
+				map[string]*int{"active": &test.activeDelay, "reserve": &test.reserveDelay},
+				map[string]*int64{"active": &test.activeSpeed, "reserve": &test.reserveSpeed},
+				effectivePolicySettings{speedEnabled: true, improvement: 50, speedImprovement: 25})
+			if got != test.want {
+				t.Fatalf("got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
