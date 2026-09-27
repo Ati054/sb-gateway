@@ -7,7 +7,7 @@ ARG RUNTIME_IMAGE=alpine:3.23
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG SB_GATEWAY_VERSION=1.6.26
+ARG SB_GATEWAY_VERSION=1.6.27
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -38,6 +38,7 @@ WORKDIR /src
 COPY patches/xray-reality-x25519-compat.patch /tmp/xray-reality-x25519-compat.patch
 COPY patches/xray-vision-padding-overflow.patch /tmp/xray-vision-padding-overflow.patch
 COPY patches/xray-vless-failure-signal.patch /tmp/xray-vless-failure-signal.patch
+COPY patches/xray-outbound-transport-retirement.patch /tmp/xray-outbound-transport-retirement.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -46,7 +47,11 @@ RUN git init \
     && patch -p1 --fuzz=0 < /tmp/xray-vision-padding-overflow.patch \
     && git apply --check /tmp/xray-vless-failure-signal.patch \
     && git apply /tmp/xray-vless-failure-signal.patch \
-    && go test ./proxy ./proxy/vless/outbound
+    && git apply --check /tmp/xray-outbound-transport-retirement.patch \
+    && git apply /tmp/xray-outbound-transport-retirement.patch \
+    && go test ./proxy ./proxy/vless/outbound ./app/proxyman/outbound \
+      ./transport/internet ./transport/internet/grpc \
+      ./transport/internet/hysteria ./transport/internet/splithttp
 RUN set -eux; \
     git clone --filter=blob:none --no-checkout https://github.com/XTLS/REALITY.git /src/reality; \
     git -C /src/reality fetch --depth=1 origin "${XRAY_REALITY_COMMIT}"; \
@@ -100,7 +105,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.9.9
 ARG XRAY_COMMIT=52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.26
+ARG SB_GATEWAY_VERSION=1.6.27
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \
@@ -114,6 +119,7 @@ LABEL org.opencontainers.image.title="sb-gateway" \
       io.sb-gateway.dependency.xray.version="${XRAY_VERSION}" \
       io.sb-gateway.dependency.xray.revision="${XRAY_COMMIT}" \
       io.sb-gateway.dependency.xray.vision-padding-overflow-compat="true" \
+      io.sb-gateway.dependency.xray.outbound-transport-retirement="true" \
       io.sb-gateway.dependency.reality.revision="${XRAY_REALITY_COMMIT}" \
       io.sb-gateway.dependency.reality.x25519-compat="true"
 ENV SB_GATEWAY_VERSION=${SB_GATEWAY_VERSION} \
