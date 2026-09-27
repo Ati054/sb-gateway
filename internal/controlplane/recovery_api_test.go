@@ -325,7 +325,8 @@ func TestRecoveryArchiveStopsAfterBoundedSourceChurn(t *testing.T) {
 	callbackCalls := 0
 	server.recoveryBeforeSnapshot = func(attempt int) {
 		callbackCalls++
-		if err := os.WriteFile(marker, []byte("changed-"+string(rune('a'+attempt))+"\n"), 0o600); err != nil {
+		// Change size as well as content: some filesystems coarsen mtime between attempts.
+		if err := os.WriteFile(marker, []byte("changed-"+string(rune('a'+attempt))+strings.Repeat("!", attempt+1)+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
