@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/agent"
+	"github.com/sb-gateway/sb-gateway/internal/geoiprefresh"
 	"github.com/sb-gateway/sb-gateway/internal/rulesets"
 	"github.com/sb-gateway/sb-gateway/internal/watchdog"
 )
@@ -17,6 +19,7 @@ type Options struct {
 	Agent               agent.Options
 	Watchdog            watchdog.Options
 	Rulesets            rulesets.Options
+	GeoIP               geoiprefresh.Options
 	RulesetInitialDelay time.Duration
 	RulesetInterval     time.Duration
 }
@@ -36,6 +39,7 @@ func OptionsFromEnvironment() Options {
 		Agent:               agent.OptionsFromEnvironment(),
 		Watchdog:            watchdog.OptionsFromEnvironment(),
 		Rulesets:            rulesets.OptionsFromEnvironment(),
+		GeoIP:               geoiprefresh.OptionsFromEnvironment(),
 		RulesetInitialDelay: boundedDuration("SB_RULESET_INITIAL_DELAY_SECONDS", 120, 10, 3600),
 		RulesetInterval:     boundedDuration("SB_RULESET_UPDATE_INTERVAL", 86400, 3600, 604800),
 	}
@@ -92,6 +96,7 @@ func runRulesetWorker(ctx context.Context, options Options) error {
 	if !wait(ctx, options.RulesetInitialDelay) {
 		return nil
 	}
+	geoIPState := &geoiprefresh.State{}
 	for {
 		catalog, err := rulesets.Catalog()
 		if err == nil {
@@ -99,6 +104,13 @@ func runRulesetWorker(ctx context.Context, options Options) error {
 			active, err = rulesets.ActivePacks(options.Rulesets.StateDir, catalog)
 			if err == nil {
 				_, err = rulesets.RefreshAll(options.Rulesets, active)
+				if err == nil {
+					if changed, activationErr := activateGeoIPAfterRefresh(ctx, options.GeoIP, geoIPState); activationErr != nil {
+						log.Printf("monitor: GeoIP activation deferred safely: %v", activationErr)
+					} else if changed {
+						log.Printf("monitor: GeoIP routing refreshed without Xray restart")
+					}
+				}
 			}
 		}
 		if err != nil {
@@ -106,6 +118,24 @@ func runRulesetWorker(ctx context.Context, options Options) error {
 		}
 		if !wait(ctx, options.RulesetInterval) {
 			return nil
+		}
+	}
+}
+
+// Retry only while an update event is pending and Xray is starting or Apply is
+// in progress. There is no background GeoIP poll between update events.
+func activateGeoIPAfterRefresh(ctx context.Context, options geoiprefresh.Options, state *geoiprefresh.State) (bool, error) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		changed, err := geoiprefresh.Activate(ctx, options, state)
+		if !errors.Is(err, geoiprefresh.ErrDeferred) {
+			return changed, err
+		}
+		if time.Now().After(deadline) {
+			return false, err
+		}
+		if !wait(ctx, 5*time.Second) {
+			return false, ctx.Err()
 		}
 	}
 }

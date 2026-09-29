@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 )
 
 var xrayPrivateDestinations = []string{
@@ -159,6 +160,55 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 	appendEntityRoutes := func(entity, policy map[string]any, identity map[string]any, remote bool) error {
 		policyID := textValue(policy["id"])
 		trafficMode := textValue(policy["traffic_mode"])
+		for _, custom := range objectSlice(policy["custom_routes"]) {
+			rule := cloneJSONMap(identity)
+			value := strings.TrimSpace(textValue(custom["value"]))
+			switch textValue(custom["kind"]) {
+			case "domain":
+				rule["domain_suffix"] = []string{strings.ToLower(value)}
+				if protocols := strings.TrimSpace(textValue(custom["protocols"])); protocols != "" {
+					rule["protocol"] = strings.Split(protocols, ",")
+				}
+			case "ip":
+				if address, err := netip.ParseAddr(value); err == nil {
+					value = netip.PrefixFrom(address, address.BitLen()).String()
+				} else if _, err := netip.ParsePrefix(value); err != nil {
+					return fmt.Errorf("invalid custom route IP %q", value)
+				}
+				rule["ip_cidr"] = []string{value}
+				if protocols := strings.TrimSpace(textValue(custom["protocols"])); protocols != "" {
+					rule["protocol"] = strings.Split(protocols, ",")
+				}
+			case "port":
+				if textValue(custom["network"]) != "tcp" && textValue(custom["network"]) != "udp" {
+					return errors.New("custom port route needs TCP or UDP")
+				}
+				rule["network"] = textValue(custom["network"])
+				rule["port"] = value
+			default:
+				return fmt.Errorf("unsupported custom route kind %q", textValue(custom["kind"]))
+			}
+			if protocols, ok := rule["protocol"].([]string); ok {
+				for _, protocol := range protocols {
+					if protocol != "http" && protocol != "tls" && protocol != "quic" {
+						return fmt.Errorf("invalid custom route protocol %q", protocol)
+					}
+				}
+			}
+			if value == "" {
+				return errors.New("custom route value cannot be empty")
+			}
+			rule["action"] = "route"
+			switch textValue(custom["target"]) {
+			case "wan":
+				rule["outbound"] = "direct-wan"
+			case "vless":
+				rule["outbound"] = selectableOrBlock(policyID, available)
+			default:
+				return errors.New("custom route target must be WAN or VLESS")
+			}
+			rules = append(rules, rule)
+		}
 		if textValue(policy["mode"]) == "priority" {
 			for _, serviceID := range candidateServiceIDs(policy) {
 				selector := policyServiceSelectorTag(policyID, serviceID)

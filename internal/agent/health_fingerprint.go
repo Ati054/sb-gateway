@@ -33,8 +33,11 @@ func invalidateChangedOutboundHealth(item *policyHealthState, candidates []strin
 		delete(item.LastSpeedSuccessAt, id)
 		delete(item.LastSpeedProbeStatus, id)
 		delete(item.OptimizationBackoff, id)
+		delete(item.OutagePenalty, id)
 		delete(item.DailyStats, id)
-		delete(item.PeriodStats, id)
+		for _, period := range item.PeriodStats {
+			delete(period, id)
+		}
 		delete(item.DelayMS, id)
 		delete(item.MedianDelayMS, id)
 		delete(item.PacketLossPercent, id)
@@ -77,6 +80,7 @@ func pruneRemovedCandidateHealth(item *policyHealthState, candidates []string) {
 	pruneNodeMap(item.LastSpeedSuccessAt, active)
 	pruneNodeMap(item.LastSpeedProbeStatus, active)
 	pruneNodeMap(item.OptimizationBackoff, active)
+	pruneNodeMap(item.OutagePenalty, active)
 	pruneNodeMap(item.DailyStats, active)
 	for _, period := range item.PeriodStats {
 		pruneNodeMap(period, active)

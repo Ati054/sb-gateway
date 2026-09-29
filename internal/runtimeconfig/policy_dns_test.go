@@ -28,7 +28,7 @@ func TestCompilePolicyDNSEmptySource(t *testing.T) {
 
 func TestCompilePolicyDNSMatchesCurrentArtifactContract(t *testing.T) {
 	rulesetRoot := t.TempDir()
-	ruleset := `{"rules":[{"domain_suffix":["YouTube.COM."]},{"port":[443]}]}`
+	ruleset := `{"rules":[{"domain_suffix":["YouTube.COM."]},{"port":[443]},{"ip_cidr":["203.0.113.0/24"]}]}`
 	if err := os.WriteFile(filepath.Join(rulesetRoot, "video.json"), []byte(ruleset), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +115,26 @@ func TestCompilePolicyDNSRejectsEmptyRuleSet(t *testing.T) {
 	}, PolicyDNSCompileOptions{RuleSetRoot: root})
 	if err == nil || !strings.Contains(err.Error(), "no usable match conditions") {
 		t.Fatalf("unexpected empty-ruleset result: %v", err)
+	}
+}
+
+func TestCompilePolicyDNSIgnoresGeoIPOnlyRuleSet(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "geoip-ru.json"), []byte(`{"rules":[{"ip_cidr":["203.0.113.0/24"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := CompilePolicyDNS(PolicyDNSSource{
+		Servers: []PolicyDNSSourceServer{{Tag: "direct", Type: "udp", Server: "127.0.0.1"}},
+		Final:   "direct",
+		Rules:   []PolicyDNSSourceRule{{RuleSet: []string{"service-geoip-ru"}, Action: "route", Server: "direct"}},
+	}, PolicyDNSCompileOptions{RuleSetRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lane := range artifacts.Runtime.Lanes {
+		if len(lane.Rules) != 0 {
+			t.Fatalf("GeoIP rule became DNS catch-all: %#v", lane.Rules)
+		}
 	}
 }
 

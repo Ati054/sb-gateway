@@ -6,6 +6,25 @@ const text = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const packageVersion = JSON.parse(await text("package.json")).version;
 const escapedPackageVersion = packageVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+test("regional catalog cards match maintained service packs", async () => {
+  const [catalogText, page] = await Promise.all([
+    text("internal/rulesets/service-packs.json"),
+    text("app/page.tsx"),
+  ]);
+  const packs = Object.fromEntries(JSON.parse(catalogText).map((pack) => [pack.id, pack]));
+  for (const id of [
+    "cn-alibaba", "cn-jd", "cn-douyin", "cn-iqiyi", "cn-kuaishou",
+    "ir-government", "ir-shopping", "ir-payment", "ir-social", "ir-tech",
+  ]) {
+    assert.match(page, new RegExp(`id: "${id}"`));
+    assert.equal(packs[id].update_mode, "catalog");
+    assert.equal(packs[id].broad, false);
+    assert.equal(packs[id].always_direct, false);
+    assert.ok(packs[id].upstream_name);
+    assert.ok(packs[id].fallback_domains.length);
+  }
+});
+
 test("mandatory Claude and Antigravity candidate packs stay narrow and complete", async () => {
   const catalog = JSON.parse(await text("internal/rulesets/service-packs.json"));
   const packs = Object.fromEntries(catalog.map((pack) => [pack.id, pack]));

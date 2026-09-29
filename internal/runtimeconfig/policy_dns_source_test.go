@@ -80,6 +80,41 @@ func TestBuildPolicyDNSSourceFromCurrentConfig(t *testing.T) {
 	}, "unassigned remote fail-closed rule")
 }
 
+func TestBuildPolicyDNSSourceCustomIPAndPortNeverBecomeCatchAll(t *testing.T) {
+	config := map[string]any{
+		"dns": map[string]any{
+			"internal_server": "192.168.88.1",
+			"direct_resolver": map[string]any{"provider": "yandex", "protocol": "doh"},
+			"vpn_resolver":    map[string]any{"provider": "cloudflare", "protocol": "dot"},
+		},
+		"policies": []any{map[string]any{
+			"id": "route", "enabled": true, "traffic_mode": "vless_with_wan_exceptions",
+			"custom_routes": []any{
+				map[string]any{"kind": "ip", "value": "203.0.113.0/24", "target": "wan"},
+				map[string]any{"kind": "port", "value": "443", "network": "udp", "target": "wan"},
+				map[string]any{"kind": "domain", "value": "example.com", "target": "vless"},
+			},
+		}},
+		"local_clients": []any{map[string]any{"id": "pc", "enabled": true, "policy_id": "route", "source_cidrs": []any{"192.0.2.5/32"}}},
+	}
+	source, err := BuildPolicyDNSSource(config, map[string]struct{}{"route": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom := 0
+	for _, rule := range source.Rules {
+		if reflect.DeepEqual(rule.SourceCIDR, []string{"192.0.2.5/32"}) && rule.Server == "policy-dns-route" && len(rule.DomainSuffix) != 0 {
+			if !reflect.DeepEqual(rule.DomainSuffix, []string{"example.com"}) {
+				t.Fatalf("unexpected custom DNS rule: %#v", rule)
+			}
+			custom++
+		}
+	}
+	if custom != 1 {
+		t.Fatalf("wanted exactly one domain-specific custom DNS rule, got %d: %#v", custom, source.Rules)
+	}
+}
+
 func TestBuildPolicyDNSSourceRejectsLegacyAndInvalidResolvers(t *testing.T) {
 	base := func(provider, protocol string) map[string]any {
 		return map[string]any{"dns": map[string]any{

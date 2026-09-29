@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,6 +27,21 @@ func TestSubscriptionRefreshRequestDeadlineScope(t *testing.T) {
 	}
 	if subscriptionRefreshResponseTimeout <= 60*time.Second {
 		t.Fatalf("response timeout %s must cover one queued and one active bounded refresh", subscriptionRefreshResponseTimeout)
+	}
+}
+
+func TestSubscriptionRefreshMessageRequiresApplyOnlyForUnappliedConfiguration(t *testing.T) {
+	applied := map[string]any{"id": "provider", "enabled": true, "url_secret_ref": "subscriptions/provider/url"}
+	active := map[string]any{"subscriptions": []any{applied}}
+	if got := subscriptionRefreshActivationMessage(active, applied); strings.Contains(got, "примен") || !strings.Contains(got, "автоматически") {
+		t.Fatalf("active refresh should not request Apply: %q", got)
+	}
+	changed := map[string]any{"id": "provider", "enabled": true, "url_secret_ref": "subscriptions/provider/new-url"}
+	if got := subscriptionRefreshActivationMessage(active, changed); !strings.Contains(got, "ожидают применения") {
+		t.Fatalf("draft source should await Apply: %q", got)
+	}
+	if got := subscriptionRefreshActivationMessage(active, map[string]any{"id": "new", "enabled": true}); !strings.Contains(got, "Новая подписка") {
+		t.Fatalf("new subscription should await first Apply: %q", got)
 	}
 }
 
@@ -51,6 +67,9 @@ func TestNativeSubscriptionRefreshCommitsSecretsAndReturnsPublicMetadata(t *test
 	result := decodeResponse(t, refresh)
 	if result["nodes"] != float64(1) || result["activated"] != false {
 		t.Fatalf("refresh result = %#v", result)
+	}
+	if !strings.Contains(result["message"].(string), "Новая подписка") {
+		t.Fatalf("unapplied subscription message = %#v", result["message"])
 	}
 	state, err := server.repository.auxiliary("subscription-nodes")
 	if err != nil {

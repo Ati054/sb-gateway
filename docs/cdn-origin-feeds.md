@@ -9,7 +9,7 @@ CDN-развёртывании наследует его защиту.
 
 | CDN | Официальный источник | Обновление |
 |---|---|---|
-| Cloudflare | [IPv4](https://www.cloudflare.com/ips-v4), [IPv6](https://www.cloudflare.com/ips-v6) | Ежедневно; смешанный origin-порт — control plane IPv4 каждые 15 минут |
+| Cloudflare | [IPv4](https://www.cloudflare.com/ips-v4), [IPv6](https://www.cloudflare.com/ips-v6) | Установленный RouterOS updater — ежедневно только при активном `SB_CLOUDFLARE_V4`; смешанный origin-порт — control plane IPv4 каждые 15 минут |
 | Gcore | [public-net-list](https://api.gcore.com/cdn/public-net-list) | Control plane, каждые 15 минут |
 | EdgeCenter | [public_net_list](https://api.edgecenter.ru/cdn/public_net_list) | Control plane, каждые 15 минут |
 | Yandex | [CDN prefixes](https://tech.cdn.yandex.net/prefixes/yc.json) | Control plane, каждые 15 минут |
@@ -35,6 +35,10 @@ Feeds публичные и не требуют платной опции/ток
 - Cloudflare сохраняет прежний независимый RouterOS updater. Новые адаптеры
   управляют отдельными `SB_CDN_<PROVIDER>_V4`, не меняя старые Cloudflare-списки.
   Для смешанных origin-портов используется отдельный `SB_CDN_CLOUDFLARE_V4`.
+- После обновления контейнера исходный код установленного RouterOS updater
+  сверяется с образом автоматически. Если активная конфигурация не использует
+  `SB_CLOUDFLARE_V4`, его расписание отключается без удаления прежнего списка;
+  повторное включение нужного ingress возвращает расписание.
 - Фиксированные HTTPS URL, проверка сертификата, без редиректов, системного
   proxy, пользовательских URL и секретов CDN.
 - Максимум 1 МиБ; проверяются JSON, статус, все CIDR и число записей.

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/sb-gateway/sb-gateway/internal/cdnfeed"
 	"github.com/sb-gateway/sb-gateway/internal/releasecontract"
@@ -711,6 +712,134 @@ func (result *configValidation) validatePolicySettings(entities map[string][]map
 				result.optionalStringArray(value, path+"."+field, 2048)
 			}
 		}
+		if raw, exists := policy["node_groups"]; exists {
+			groups, ok := raw.([]any)
+			if !ok || len(groups) > 32 {
+				result.add(path+".node_groups", "type", "Node groups must be an array of at most 32 groups.")
+			} else {
+				seen := map[string]bool{}
+				for groupIndex, entry := range groups {
+					groupPath := fmt.Sprintf("%s.node_groups[%d]", path, groupIndex)
+					group, ok := entry.(map[string]any)
+					if !ok {
+						result.add(groupPath, "type", "Node group must be an object.")
+						continue
+					}
+					id, _ := group["id"].(string)
+					if !entityIDPattern.MatchString(id) || seen[id] {
+						result.add(groupPath+".id", "identifier", "Node group needs a unique valid ID.")
+					}
+					seen[id] = true
+					name, _ := group["name"].(string)
+					if strings.TrimSpace(name) == "" || len(name) > 128 {
+						result.add(groupPath+".name", "required", "Node group name must contain 1–128 characters.")
+					}
+					filters := 0
+					for _, field := range []string{"subscription_ids", "countries", "protocols"} {
+						if value, exists := group[field]; exists {
+							result.optionalStringArray(value, groupPath+"."+field, 32)
+							if items, ok := value.([]any); ok {
+								filters += len(items)
+								if field == "countries" {
+									for itemIndex, item := range items {
+										country, _ := item.(string)
+										if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+											result.add(fmt.Sprintf("%s.countries[%d]", groupPath, itemIndex), "country", "Country must be a two-letter ISO code; use the name filter for emoji.")
+										}
+									}
+								}
+							}
+						}
+					}
+					if value, exists := group["name_contains"]; exists {
+						needle, ok := value.(string)
+						if !ok || len(needle) > 128 {
+							result.add(groupPath+".name_contains", "type", "Name filter must be a string of at most 128 characters.")
+						} else if strings.TrimSpace(needle) != "" {
+							filters++
+						}
+					}
+					if value, exists := group["name_excludes"]; exists {
+						excluded, ok := value.(string)
+						if !ok || len(excluded) > 128 {
+							result.add(groupPath+".name_excludes", "type", "Excluded words must be a string of at most 128 characters.")
+						} else {
+							for _, part := range strings.Split(excluded, ",") {
+								word := strings.TrimSpace(part)
+								for _, r := range word {
+									if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+										result.add(groupPath+".name_excludes", "word", "Excluded names must be comma-separated whole words.")
+										break
+									}
+								}
+							}
+						}
+					}
+					if filters == 0 {
+						result.add(groupPath, "required", "Node group needs at least one filter.")
+					}
+				}
+			}
+		}
+		if raw, exists := policy["custom_routes"]; exists {
+			routes, ok := raw.([]any)
+			if !ok || len(routes) > 128 {
+				result.add(path+".custom_routes", "type", "Custom routes must be an array of at most 128 rules.")
+			} else {
+				for routeIndex, entry := range routes {
+					routePath := fmt.Sprintf("%s.custom_routes[%d]", path, routeIndex)
+					route, ok := entry.(map[string]any)
+					if !ok {
+						result.add(routePath, "type", "Custom route must be an object.")
+						continue
+					}
+					kind, _ := route["kind"].(string)
+					value, _ := route["value"].(string)
+					value = strings.TrimSpace(value)
+					if route["target"] != "wan" && route["target"] != "vless" {
+						result.add(routePath+".target", "enum", "Custom route target must be WAN or VLESS.")
+					}
+					if len(value) == 0 || len(value) > 253 {
+						result.add(routePath+".value", "required", "Custom route needs a value of at most 253 characters.")
+						continue
+					}
+					switch kind {
+					case "domain":
+						if !validReverseExportHostname(strings.ToLower(value)) {
+							result.add(routePath+".value", "hostname", "Custom route domain must be a valid domain suffix.")
+						}
+						validateCustomRouteProtocols(result, routePath, route["protocols"])
+					case "ip":
+						if _, err := netip.ParsePrefix(value); err != nil {
+							if _, err := netip.ParseAddr(value); err != nil {
+								result.add(routePath+".value", "cidr", "Custom route IP must be an address or CIDR.")
+							}
+						}
+						validateCustomRouteProtocols(result, routePath, route["protocols"])
+					case "port":
+						if route["network"] != "tcp" && route["network"] != "udp" {
+							result.add(routePath+".network", "enum", "Port route must choose TCP or UDP.")
+						}
+						parts := strings.Split(value, "-")
+						if len(parts) < 1 || len(parts) > 2 {
+							result.add(routePath+".value", "port", "Port must be a number or a bounded range.")
+							break
+						}
+						start, startErr := strconv.Atoi(parts[0])
+						end := start
+						var endErr error
+						if len(parts) == 2 {
+							end, endErr = strconv.Atoi(parts[1])
+						}
+						if startErr != nil || endErr != nil || start < 1 || end > 65535 || end < start {
+							result.add(routePath+".value", "port", "Port must be between 1 and 65535, with an ascending range.")
+						}
+					default:
+						result.add(routePath+".kind", "enum", "Custom route kind must be domain, IP or port.")
+					}
+				}
+			}
+		}
 		if routes, exists := policy["service_routes"]; exists {
 			result.stringStringMap(routes, path+".service_routes", 2048)
 		}
@@ -728,6 +857,28 @@ func (result *configValidation) validatePolicySettings(entities map[string][]map
 				}
 			}
 		}
+	}
+}
+
+func validateCustomRouteProtocols(result *configValidation, routePath string, raw any) {
+	if raw == nil {
+		return
+	}
+	value, ok := raw.(string)
+	if !ok {
+		result.add(routePath+".protocols", "type", "Protocol filter must be a comma-separated string.")
+		return
+	}
+	if value == "" {
+		return
+	}
+	seen := map[string]bool{}
+	for _, protocol := range strings.Split(value, ",") {
+		if (protocol != "http" && protocol != "tls" && protocol != "quic") || seen[protocol] {
+			result.add(routePath+".protocols", "protocol", "Choose unique protocols from http, tls and quic.")
+			return
+		}
+		seen[protocol] = true
 	}
 }
 

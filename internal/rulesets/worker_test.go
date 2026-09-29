@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -16,8 +17,20 @@ func TestCatalogAndOfflineSeeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(packs) != 43 || packs[0].Name != "Госуслуги и государственные сайты" {
+	if len(packs) != 59 || packs[0].Name != "Госуслуги и государственные сайты" {
 		t.Fatalf("embedded catalog is incomplete or incorrectly encoded: %d %#v", len(packs), packs[0])
+	}
+	for _, id := range []string{"cn-alibaba", "cn-jd", "cn-douyin", "cn-iqiyi", "cn-kuaishou", "ir-government", "ir-shopping", "ir-payment", "ir-social", "ir-tech"} {
+		found := false
+		for _, pack := range packs {
+			if pack.ID == id && pack.UpstreamName != nil && len(pack.FallbackDomains) != 0 && !pack.Broad && !pack.AlwaysDirect {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("curated regional pack %s is missing or too broad", id)
+		}
 	}
 	root := t.TempDir()
 	created, err := EnsureSeeds(root, packs)
@@ -31,6 +44,41 @@ func TestCatalogAndOfflineSeeds(t *testing.T) {
 	calls := readRule(t, filepath.Join(root, "calls.json"))
 	if calls["network"] != "udp" || !sliceContains(calls["port_range"], "16393:16402") {
 		t.Fatalf("reviewed call ranges missing: %#v", calls)
+	}
+}
+
+func TestGeoIPCountryPackValidatesCIDRsAndKeepsLastGood(t *testing.T) {
+	pack, err := CustomPack("geoip-cn", "")
+	if err != nil || pack.UpdateMode != "geoip" || pack.Name != "GeoIP CN" {
+		t.Fatalf("invalid GeoIP pack: %#v %v", pack, err)
+	}
+	root := t.TempDir()
+	_, err = RefreshPack(pack, root, func(name string) (string, error) {
+		if name != "geoip-cn" {
+			t.Fatalf("unexpected source: %q", name)
+		}
+		return "# country\n203.0.113.7/24\n2001:db8::/32\n203.0.113.0/24\n", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "geoip-cn.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(before), "203.0.113.0/24") || strings.Contains(string(before), "203.0.113.7/24") {
+		t.Fatalf("CIDRs not canonicalized: %s", before)
+	}
+	if _, err = RefreshPack(pack, root, func(string) (string, error) { return "not-a-cidr", nil }); err == nil {
+		t.Fatal("invalid GeoIP source was accepted")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("last good GeoIP list changed")
+	}
+	if _, err := CustomPack("geoip-not-a-country", ""); err == nil {
+		t.Fatal("invalid country accepted")
 	}
 }
 

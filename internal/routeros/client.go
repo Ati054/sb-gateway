@@ -223,6 +223,64 @@ func (client *Client) RunManagedScript(ctx context.Context, name string) (map[st
 	return client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": id})
 }
 
+// EnterPlannedApplyFailOpen disables the owned gate before a deliberate Xray
+// restart. RouterOS user environments are isolated, so the script's startup
+// flag is not relied on to bypass the watchdog's recovery hysteresis.
+func (client *Client) EnterPlannedApplyFailOpen(ctx context.Context) error {
+	rows, err := client.list(ctx, "/rest/system/script?.proplist=.id,name,comment")
+	if err != nil {
+		return err
+	}
+	id := ""
+	for _, row := range rows {
+		if text(row["name"]) != startupFailOpenScript {
+			continue
+		}
+		if id != "" || text(row["comment"]) != "SB-GATEWAY startup fail-open" || text(row[".id"]) == "" {
+			return errors.New("planned Apply safety script is ambiguous or unowned")
+		}
+		id = text(row[".id"])
+	}
+	if id == "" {
+		return errors.New("planned Apply safety script is missing")
+	}
+	_, err = client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": id})
+	return err
+}
+
+// WaitManagedDiversion prevents Apply from claiming success while the RouterOS
+// watchdog is still sending newly opened managed-client connections to WAN.
+func (client *Client) WaitManagedDiversion(ctx context.Context) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		rows, err := client.list(ctx, "/rest/ip/firewall/mangle?.proplist=.id,comment,disabled")
+		if err == nil {
+			found := false
+			for _, row := range rows {
+				if text(row["comment"]) != "SB-GATEWAY diversion-gate" {
+					continue
+				}
+				if found {
+					return errors.New("managed diversion gate is ambiguous")
+				}
+				found = true
+				if row["disabled"] == false || text(row["disabled"]) == "false" {
+					return nil
+				}
+			}
+			if !found {
+				return errors.New("managed diversion gate is missing")
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("managed diversion did not recover before Apply completed: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
 // EnforceStartupTrafficSafety migrates an existing installation from the
 // legacy container-only health gate to the route-aware traffic gate, then
 // immediately enters the already-owned fail-open startup state. It touches

@@ -43,7 +43,7 @@ func TestConvertXrayRulesPreservesPolicyAndTerminalBlock(t *testing.T) {
 
 func TestConvertXrayRulesExpandsRulesetOnce(t *testing.T) {
 	root := t.TempDir()
-	body := `{"rules":[{"domain_suffix":["video.example"]},{"ip_cidr":["203.0.113.0/24"],"port":[443],"network":"tcp"}]}`
+	body := `{"rules":[{"domain_suffix":["video.example"]},{"domain_keyword":["video-edge"],"domain_regex":["^img[0-9]+\\.example\\.org$"]},{"ip_cidr":["203.0.113.0/24"],"port":[443],"network":"tcp"}]}`
 	if err := os.WriteFile(filepath.Join(root, "video.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -53,14 +53,17 @@ func TestConvertXrayRulesExpandsRulesetOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 3 || !reflect.DeepEqual(rules[0]["domain"], []string{"domain:video.example"}) {
+	if len(rules) != 4 || !reflect.DeepEqual(rules[0]["domain"], []string{"domain:video.example"}) {
 		t.Fatalf("expanded rules = %#v", rules)
 	}
-	if !reflect.DeepEqual(rules[1]["ip"], []string{"203.0.113.0/24"}) || rules[1]["port"] != "443" || rules[1]["network"] != "tcp" {
-		t.Fatalf("ruleset conditions changed: %#v", rules[1])
+	if !reflect.DeepEqual(rules[1]["domain"], []string{"keyword:video-edge", `regexp:^img[0-9]+\.example\.org$`}) {
+		t.Fatalf("keyword/regexp conditions were dropped: %#v", rules[1])
 	}
-	if !reflect.DeepEqual(rules[1]["user"], []string{"alice"}) {
-		t.Fatalf("base identity was not preserved: %#v", rules[1])
+	if !reflect.DeepEqual(rules[2]["ip"], []string{"203.0.113.0/24"}) || rules[2]["port"] != "443" || rules[2]["network"] != "tcp" {
+		t.Fatalf("ruleset conditions changed: %#v", rules[2])
+	}
+	if !reflect.DeepEqual(rules[2]["user"], []string{"alice"}) {
+		t.Fatalf("base identity was not preserved: %#v", rules[2])
 	}
 }
 
@@ -74,5 +77,26 @@ func TestConvertXrayRulesRejectsBrokenRuleset(t *testing.T) {
 	}}, nil, nil, root)
 	if err == nil || !strings.Contains(err.Error(), "no usable match conditions") {
 		t.Fatalf("empty ruleset was accepted: %v", err)
+	}
+}
+
+func TestConvertXrayRulesTagsGeoIPForLiveRefresh(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "geoip-cn.json"), []byte(`{"rules":[{"ip_cidr":["203.0.113.0/24","2001:db8::/32"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := ConvertXrayRules([]any{map[string]any{
+		"action": "route", "outbound": "direct-wan", "source_ip_cidr": []any{"192.0.2.1/32"},
+		"rule_set": []any{"service-geoip-cn"},
+	}}, nil, nil, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 || rules[0]["ruleTag"] != "sb-geoip-geoip-cn-0-0" {
+		t.Fatalf("GeoIP rule has no stable live-refresh tag: %#v", rules)
+	}
+	if !reflect.DeepEqual(rules[0]["ip"], []string{"203.0.113.0/24", "2001:db8::/32"}) ||
+		!reflect.DeepEqual(rules[0]["source"], []string{"192.0.2.1/32"}) {
+		t.Fatalf("GeoIP rule conditions changed: %#v", rules[0])
 	}
 }

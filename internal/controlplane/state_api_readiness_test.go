@@ -64,3 +64,48 @@ func TestTrafficReadyPoliciesPreserveModesAndLocalAssignments(t *testing.T) {
 		t.Fatalf("stale pre-restart selector evidence was accepted: %#v", pending)
 	}
 }
+
+func TestPlannedRuntimeActivationRequiresLiveApplyAndUnchangedRouterOS(t *testing.T) {
+	operation := map[string]any{
+		"pending": true, "state": "runtime_activated",
+		"previous_routeros_source": "managed rules", "target_routeros_source": "managed rules",
+	}
+	if !plannedRuntimeActivationReady(operation, true) {
+		t.Fatal("verified runtime-only Apply must allow watchdog recovery")
+	}
+	if plannedRuntimeActivationReady(operation, false) {
+		t.Fatal("stale journal after process exit must not bypass fail-open")
+	}
+	operation["target_routeros_source"] = "changed rules"
+	if plannedRuntimeActivationReady(operation, true) {
+		t.Fatal("RouterOS transaction must not bypass recovery gate")
+	}
+	operation["target_routeros_source"] = "managed rules"
+	operation["state"] = "recovery_pending"
+	if plannedRuntimeActivationReady(operation, true) {
+		t.Fatal("rollback-pending journal must stay fail-open")
+	}
+}
+
+func TestHotPolicyReadinessRequiresLiveProvenPublication(t *testing.T) {
+	if plannedHotPolicyReadiness(map[string]any{"pending": true, "state": "runtime_hot_activating"}, true) {
+		t.Fatal("missing RouterOS source was accepted as unchanged")
+	}
+	for _, state := range []string{"prepared", "runtime_hot_activating", "runtime_activated", "active_committed", "recovery_pending"} {
+		operation := map[string]any{
+			"pending": true, "state": state,
+			"previous_routeros_source": "unchanged", "target_routeros_source": "unchanged",
+		}
+		want := state == "runtime_hot_activating" || state == "runtime_activated" || state == "active_committed"
+		if got := plannedHotPolicyReadiness(operation, true); got != want {
+			t.Fatalf("live hot state %s: ready=%t", state, got)
+		}
+		if plannedHotPolicyReadiness(operation, false) {
+			t.Fatalf("stale journal %s preserved readiness after crash", state)
+		}
+		operation["target_routeros_source"] = "changed"
+		if plannedHotPolicyReadiness(operation, true) {
+			t.Fatal("changed RouterOS was allowed to preserve hot readiness")
+		}
+	}
+}

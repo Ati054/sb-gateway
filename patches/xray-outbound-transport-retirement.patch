@@ -380,6 +380,13 @@ index a2b5f75..5f4cf79 100644
  	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
  }
  
+@@ -50,5 +53,6 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 	// logs
+ 	gotConn := done.New()
++	dialErr := make(chan error, 1)
+ 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+ 		GotConn: func(connInfo httptrace.GotConnInfo) {
+ 			remoteAddr = connInfo.Conn.RemoteAddr()
 @@ -61,7 +64,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
  	if body != nil {
  		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
@@ -389,7 +396,7 @@ index a2b5f75..5f4cf79 100644
  	if err != nil {
  		errors.LogInfoInner(ctx, err, "failed to create HTTP request for "+url)
  		return nil, nil, nil, err
-@@ -69,7 +72,9 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+@@ -69,14 +72,17 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
  	c.transportConfig.FillStreamRequest(req, sessionId, "")
  
  	wrc = &WaitReadCloser{wait: done.New()}
@@ -399,6 +406,25 @@ index a2b5f75..5f4cf79 100644
  		resp, err := c.client.Do(req)
  		if err != nil {
  			if !uploadOnly { // stream-down is enough
+ 				c.closed.Store(true)
+ 				errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
+ 			}
++			dialErr <- err
+ 			gotConn.Close()
+ 			common.Close(body)
+ 			wrc.Close()
+ 			return
+@@ -94,5 +99,10 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 		wrc.(*WaitReadCloser).Set(resp.Body)
+ 	}()
+ 
+ 	<-gotConn.Wait()
++	select {
++	case err = <-dialErr:
++		return nil, nil, nil, err
++	default:
++	}
+ 	return
 @@ -100,7 +105,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
  
  func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {
@@ -549,10 +575,14 @@ diff --git a/transport/internet/splithttp/dialer.go b/transport/internet/splitht
 index 9bac57a..975ddba 100644
 --- a/transport/internet/splithttp/dialer.go
 +++ b/transport/internet/splithttp/dialer.go
-@@ -44,12 +44,22 @@ var (
+@@ -44,12 +44,26 @@ var (
  	globalDialerAccess sync.Mutex
  )
  
++// Bound only connection establishment. A completed stream keeps its own
++// lifetime, so retiring a handler never terminates an established stream.
++var xhttpHandshakeTimeout = 60 * time.Second
++
 -func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
 +func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings, owner *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
  	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
@@ -591,14 +621,42 @@ index 9bac57a..975ddba 100644
  	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
  	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
  
-@@ -138,6 +148,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+@@ -116,7 +130,9 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 	transportConfig := streamSettings.ProtocolSettings.(*Config)
+ 
+ 	dialContext := func(ctxInner context.Context) (net.Conn, error) {
+-		conn, err := internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
++		setupCtx, cancel := context.WithTimeout(ctxInner, xhttpHandshakeTimeout)
++		defer cancel()
++		conn, err := internet.DialSystem(setupCtx, dest, streamSettings.SocketSettings)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -131,17 +147,22 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 		}
+ 
+ 		if realityConfig != nil {
+-			return reality.UClient(conn, realityConfig, ctxInner, dest)
++			return reality.UClient(conn, realityConfig, setupCtx, dest)
+ 		}
+ 
+ 		if gotlsConfig != nil {
  			if fingerprint := tls.GetFingerprint(tlsConfig.Fingerprint); fingerprint != nil {
  				conn = tls.UClient(conn, gotlsConfig, fingerprint)
- 				if err := conn.(*tls.UConn).HandshakeContext(ctxInner); err != nil {
+-				if err := conn.(*tls.UConn).HandshakeContext(ctxInner); err != nil {
++				if err := conn.(*tls.UConn).HandshakeContext(setupCtx); err != nil {
 +					conn.Close()
  					return nil, err
  				}
  			} else {
+ 				conn = tls.Client(conn, gotlsConfig)
++				if err := conn.(*tls.Conn).HandshakeContext(setupCtx); err != nil {
++					conn.Close()
++					return nil, err
++				}
+ 			}
+ 		}
+ 
 @@ -231,6 +242,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
  
  				conn, err := tr.DialEarly(ctx, udpAddr, tlsCfg, cfg)
@@ -1471,7 +1529,7 @@ new file mode 100644
 index 0000000..a4d0d09
 --- /dev/null
 +++ b/transport/internet/splithttp/retirement_test.go
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,330 @@
 +package splithttp
 +
 +import (
@@ -1544,6 +1602,59 @@ index 0000000..a4d0d09
 +				late.Close()
 +				waitXHTTPRetired(t, dest, settings)
 +			}
++		})
++	}
++}
++
++func TestXHTTPRetirementBoundsSilentTLSSetup(t *testing.T) {
++	previous := xhttpHandshakeTimeout
++	xhttpHandshakeTimeout = 100 * time.Millisecond
++	defer func() { xhttpHandshakeTimeout = previous }()
++	for _, fingerprint := range []string{"", "chrome"} {
++		t.Run("fingerprint="+fingerprint, func(t *testing.T) {
++			listener, err := gonet.Listen("tcp", "127.0.0.1:0")
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer listener.Close()
++			accepted := make(chan gonet.Conn, 1)
++			go func() {
++				conn, err := listener.Accept()
++				if err == nil {
++					accepted <- conn
++				}
++			}()
++			port := net.Port(listener.Addr().(*gonet.TCPAddr).Port)
++			dest := net.TCPDestination(net.LocalHostIP, port)
++			settings := &internet.MemoryStreamConfig{
++				ProtocolName: "splithttp", ProtocolSettings: &Config{Mode: "stream-one"},
++				SecurityType: "tls", SecuritySettings: &tls.Config{ServerName: "localhost", Fingerprint: fingerprint},
++			}
++			result := make(chan error, 1)
++			go func() {
++				conn, err := Dial(context.Background(), dest, settings)
++				if conn != nil {
++					conn.Close()
++				}
++				result <- err
++			}()
++			var peer gonet.Conn
++			select {
++			case peer = <-accepted:
++				defer peer.Close()
++			case <-time.After(time.Second):
++				t.Fatal("silent TLS peer was not reached")
++			}
++			select {
++			case err := <-result:
++				if err == nil {
++					t.Fatal("silent TLS establishment returned a live stream")
++				}
++			case <-time.After(2 * time.Second):
++				t.Fatal("silent TLS establishment did not time out")
++			}
++			settings.RetireDialers()
++			waitXHTTPRetired(t, dest, settings)
 +		})
 +	}
 +}

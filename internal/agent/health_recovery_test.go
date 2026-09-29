@@ -283,6 +283,9 @@ func TestConfirmedFailureIsSuppressedWhenUnderlayDropsBeforeSwitch(t *testing.T)
 	if hasSelection(runtime.selections, "europe", "nl") {
 		t.Fatalf("underlay race selected reserve: %#v", runtime.selections)
 	}
+	if len(item.OutagePenalty) != 0 {
+		t.Fatalf("shared underlay outage penalized a node: %+v", item.OutagePenalty)
+	}
 }
 
 func TestRecoveredUnderlayRechecksActiveBeforeSwitching(t *testing.T) {
@@ -362,11 +365,64 @@ func TestRecoveredUnderlayRequiresFreshFastLaneFailureBeforeSwitching(t *testing
 	if hasSelection(runtime.selections, "europe", "nl") {
 		t.Fatalf("first post-recovery failure selected reserve: %#v", runtime.selections)
 	}
+	if len(item.OutagePenalty) != 0 {
+		t.Fatalf("first post-recovery failure penalized a node: %+v", item.OutagePenalty)
+	}
 	if _, err := controller.checkActiveAvailability(time.Unix(1005, 0), "europe", contract, item, true); err != nil {
 		t.Fatal(err)
 	}
 	if item.Selected != "nl" || item.LastSwitchReason != "active-unavailable" {
 		t.Fatalf("confirmed endpoint failure did not switch: selected=%s reason=%s", item.Selected, item.LastSwitchReason)
+	}
+	if item.OutagePenalty["de"].Count != 1 {
+		t.Fatalf("confirmed endpoint outage not recorded: %+v", item.OutagePenalty["de"])
+	}
+}
+
+func TestRecoveredUnderlayRequiresFreshQualityLoopFailureBeforeSwitching(t *testing.T) {
+	for _, failure := range []probeFailureClass{probeFailureFatal, probeFailureTimeout, probeFailureTLS} {
+		t.Run(string(failure), func(t *testing.T) {
+			pool := healthFixture(false)
+			contract := pool.HealthPolicies["europe"]
+			item := newPolicyHealthState()
+			ensureHealthMaps(item)
+			item.AvailabilityOK = map[string]bool{}
+			item.QualityOK = map[string]bool{}
+			item.MedianDelayMS = map[string]*int{}
+			item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
+			item.CandidateSignature = "de\nnl"
+			item.UnderlayFailure = "wan"
+			item.UnderlayCheckedAt = time.Unix(995, 0).UTC().Format(time.RFC3339Nano)
+			item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
+			item.Recoveries["nl"] = contract.Policy.RecoveryThreshold
+			item.LastProbeAt["nl"] = 999
+			reserveDelay := 90
+			item.MedianDelayMS["nl"] = &reserveDelay
+			runtime := &fakeSelectorRuntime{
+				pool: pool, current: map[string]string{"europe": "de"},
+				probes: map[string]probeEvidence{"de": {Failure: failure}, "nl": successfulEvidence(reserveDelay)},
+				underlay: underlayEvidence{Known: true, WANOK: true, DNSOK: true},
+			}
+			controller := &healthController{
+				opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime,
+				warmStarted: map[string]bool{"europe": true}, stateLoaded: true, state: healthState{"europe": item},
+			}
+			if err := controller.tickPolicy(time.Unix(1000, 0), "europe", contract, item); err != nil {
+				t.Fatal(err)
+			}
+			if failure == probeFailureTLS {
+				if item.Selected != "nl" || item.LastSwitchReason != "active-unavailable" {
+					t.Fatalf("deterministic TLS failure was suppressed: selected=%s reason=%s", item.Selected, item.LastSwitchReason)
+				}
+				return
+			}
+			if item.Selected != "de" || item.AvailabilityFailures["de"] != 0 || item.UnderlayFailure != "" {
+				t.Fatalf("first post-recovery failure changed route: selected=%s failures=%d underlay=%s", item.Selected, item.AvailabilityFailures["de"], item.UnderlayFailure)
+			}
+			if hasSelection(runtime.selections, "europe", "nl") {
+				t.Fatalf("first post-recovery failure selected reserve: %#v", runtime.selections)
+			}
+		})
 	}
 }
 

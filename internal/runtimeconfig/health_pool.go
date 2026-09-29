@@ -74,15 +74,15 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 	healthPolicies := make(map[string]any)
 	routingMonitor := objectValue(objectValue(config["system"])["routing_monitor"])
 	for _, policy := range enabledObjects(config["policies"]) {
+		policyID := textValue(policy["id"])
+		if policyID == "" {
+			continue
+		}
 		mode := textDefault(policy["mode"], "best")
 		if mode == "urltest" {
 			mode = "best"
 		}
 		if mode != "best" && mode != "priority" {
-			continue
-		}
-		policyID := textValue(policy["id"])
-		if policyID == "" {
 			continue
 		}
 		groups := policyCandidateGroups(policy, selectable)
@@ -166,6 +166,20 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 			}
 		}
 	}
+	localPolicySet := make(map[string]bool)
+	for _, client := range enabledObjects(config["local_clients"]) {
+		policyID := textValue(client["policy_id"])
+		// Direct-only and empty policies have no health-worker selector to
+		// acknowledge. Scope only contracts actually published in this pool.
+		if _, managed := healthPolicies[policyID]; managed {
+			localPolicySet[policyID] = true
+		}
+	}
+	localPolicyIDs := make([]string, 0, len(localPolicySet))
+	for policyID := range localPolicySet {
+		localPolicyIDs = append(localPolicyIDs, policyID)
+	}
+	sort.Strings(localPolicyIDs)
 
 	baseSet := make(map[string]struct{})
 	dynamicOutbounds := make(map[string]json.RawMessage, len(dynamicNodeIDs))
@@ -198,7 +212,8 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 
 	pool := map[string]any{
 		"version": 4, "policies": policyMembers, "health_policies": healthPolicies,
-		"policy_prefixes": policyPrefixes, "base_outbound_tags": baseTags,
+		"local_policy_ids": localPolicyIDs,
+		"policy_prefixes":  policyPrefixes, "base_outbound_tags": baseTags,
 		"outbounds": dynamicOutbounds, "dial_targets": dialTargets,
 	}
 	body, err := marshalCanonical(pool)

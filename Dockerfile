@@ -7,7 +7,7 @@ ARG RUNTIME_IMAGE=alpine:3.23
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG SB_GATEWAY_VERSION=1.6.27
+ARG SB_GATEWAY_VERSION=1.6.30
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -39,6 +39,7 @@ COPY patches/xray-reality-x25519-compat.patch /tmp/xray-reality-x25519-compat.pa
 COPY patches/xray-vision-padding-overflow.patch /tmp/xray-vision-padding-overflow.patch
 COPY patches/xray-vless-failure-signal.patch /tmp/xray-vless-failure-signal.patch
 COPY patches/xray-outbound-transport-retirement.patch /tmp/xray-outbound-transport-retirement.patch
+COPY patches/xray-routing-reload-preserve-selection.patch /tmp/xray-routing-reload-preserve-selection.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -49,6 +50,9 @@ RUN git init \
     && git apply /tmp/xray-vless-failure-signal.patch \
     && git apply --check /tmp/xray-outbound-transport-retirement.patch \
     && git apply /tmp/xray-outbound-transport-retirement.patch \
+    && git apply --check /tmp/xray-routing-reload-preserve-selection.patch \
+    && git apply /tmp/xray-routing-reload-preserve-selection.patch \
+    && go test ./app/router -run '^$' \
     && go test ./proxy ./proxy/vless/outbound ./app/proxyman/outbound \
       ./transport/internet ./transport/internet/grpc \
       ./transport/internet/hysteria ./transport/internet/splithttp
@@ -105,7 +109,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.9.9
 ARG XRAY_COMMIT=52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.27
+ARG SB_GATEWAY_VERSION=1.6.30
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \

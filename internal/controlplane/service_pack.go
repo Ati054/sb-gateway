@@ -12,6 +12,66 @@ import (
 
 type servicePackRefreshFunc func(rulesets.ServicePack, string) (map[string]any, error)
 
+func selectedServicePackIDs(config map[string]any) map[string]bool {
+	selected := make(map[string]bool)
+	for _, section := range []string{"policies", "local_clients", "remote_users"} {
+		for _, entity := range objects(config[section]) {
+			if entity["enabled"] == false {
+				continue
+			}
+			for _, field := range []string{"direct_services", "candidate_service_ids"} {
+				for _, id := range stringsOf(entity[field]) {
+					selected[id] = true
+				}
+			}
+			if routes, ok := entity["service_routes"].(map[string]any); ok {
+				for id := range routes {
+					selected[id] = true
+				}
+			}
+		}
+	}
+	return selected
+}
+
+// A newly selected catalog card must be populated before runtime rendering.
+// The monitor's daily refresh may be many hours away, while seed rules contain
+// only a small fallback subset of the card.
+func (server *Server) refreshNewSelectedCatalogPacks(active, desired map[string]any) error {
+	if active == nil {
+		return nil // First installation must remain possible without catalog access.
+	}
+	previous := selectedServicePackIDs(active)
+	selected := selectedServicePackIDs(desired)
+	catalog, err := rulesets.Catalog()
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]rulesets.ServicePack, len(catalog))
+	for _, pack := range catalog {
+		byID[pack.ID] = pack
+	}
+	ids := make([]string, 0, len(selected))
+	for id := range selected {
+		if !previous[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	server.servicePackMu.Lock()
+	defer server.servicePackMu.Unlock()
+	for _, id := range ids {
+		pack, known := byID[id]
+		if !known || pack.UpdateMode != "catalog" || pack.UpstreamName == nil {
+			continue // Custom and GeoIP packs were validated by the resolver.
+		}
+		if _, err := server.refreshServicePack(pack, server.opts.Runtime.RuleSetDir); err != nil {
+			return fmt.Errorf("selected catalog card %q could not be refreshed: %w", id, err)
+		}
+	}
+	return nil
+}
+
 var compoundDomainSuffixes = map[string]bool{
 	"co.uk": true, "org.uk": true, "com.au": true, "com.br": true,
 	"com.cn": true, "com.hk": true, "co.jp": true, "co.kr": true,
@@ -28,6 +88,10 @@ func (server *Server) resolveServicePack(response http.ResponseWriter, request *
 		return
 	}
 	source := strings.ToLower(strings.TrimSpace(text(body["upstream_name"])))
+	source = strings.TrimPrefix(source, "geosite:")
+	if strings.HasPrefix(source, "geoip:") {
+		source = "geoip-" + strings.TrimPrefix(source, "geoip:")
+	}
 	hostname := servicePackHostname(source)
 	packID := source
 	if hostname != "" {

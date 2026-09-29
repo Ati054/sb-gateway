@@ -210,7 +210,8 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`}`,
 
 		// Probation: three consecutive healthy scheduler passes commit; any
-		// container restart or twelve misses restore the old image.
+		// container restart or sixty misses restore the old image. Large GeoIP
+		// configs can need a longer cold Xray start on single-core RouterOS.
 		`:if (([:len $current] = 1) && ([:len $candidate] = 0) && ([:len $rollback] = 1)) do={`,
 		`  :local healthy false`,
 		`  :do { :local probe ([/tool/fetch url=$healthURL output=user as-value]->"data"); :if ([:typeof [:find $probe "\"ready\":true"]] = "num") do={ :set healthy true } } on-error={}`,
@@ -242,7 +243,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`    :log info "SB-GATEWAY: image update committed after probation"`,
 		`    :return true`,
 		`  }`,
-		`  :if (($sbGatewayImageMisses < 12) && ($restartCount = 0)) do={ :return true }`,
+		`  :if (($sbGatewayImageMisses < 60) && ($restartCount = 0)) do={ :return true }`,
 		`  :local failed $current`,
 		`  :local failedMountlists [/container/get $failed mountlists]`,
 		`  :do { /container/stop $failed } on-error={}`,

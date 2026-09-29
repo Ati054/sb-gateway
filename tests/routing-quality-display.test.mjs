@@ -27,8 +27,32 @@ test("quality table follows configured priority or URLTest quality ranking", asy
   assert.match(css, /th:nth-child\(1\) \{ width: 78px; \}/);
 });
 
+test("only a current confirmed route outage replaces the historical percentage", () => {
+  assert.match(routing, /asObject\(asObject\(health\.outage_penalty\)\[candidate\]\)/);
+  assert.match(routing, /confirmedUnstableRoute\(\s*outage\.open === true,/);
+  assert.match(routing, /max_packet_loss_percent \?\? 40/);
+  assert.doesNotMatch(routing, /lastOutageAt > 0 && Date\.now\(\) \/ 1000/);
+  assert.match(routing, /node\.unstable \? "Нестабилен" : node\.availability == null/);
+  assert.match(routing, /node\.unstable \? <small>Срыв маршрута<\/small>/);
+});
+
+test("a short outage is not labeled unstable without sustained measured loss", async () => {
+  const helper = await readFile(new URL("../app/node-quality.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(helper, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const exports = {};
+  new Function("exports", compiled)(exports);
+  const unstable = exports.confirmedUnstableRoute;
+  assert.equal(unstable(true, false, 145, 1.4, 40), false);
+  assert.equal(unstable(true, false, 145, 41, 40), true);
+  assert.equal(unstable(true, false, 2, 100, 40), false);
+  assert.equal(unstable(true, true, 145, 41, 40), false);
+  assert.equal(unstable(false, false, 145, 41, 40), false);
+});
+
 test("expanded policy uses the full selected inventory, not the capped runtime pool", async () => {
-  assert.match(routing, /orderedCandidateNodeIds\(displayOrder, routingNodes, configuredWireguardExits, configuredReverseVlessExits\)/);
+  assert.match(routing, /orderedCandidateNodeIds\(displayOrder, routingNodes, configuredWireguardExits, configuredReverseVlessExits, asObjectList\(policy\.node_groups\)\)/);
   assert.match(routing, /const queueNodes = routeCandidateIds\(health, dailyStats,/);
   assert.match(routing, /chosenIds\.map\(\(nodeId\) =>/);
   assert.match(routing, /compareRouteCandidates\(left, right\)/);
@@ -42,17 +66,19 @@ test("expanded policy uses the full selected inventory, not the capped runtime p
 
 test("selection expansion retains every matching server, including more than ten, in selection order", () => {
   const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const names = ["selectorNodeIds", "orderedCandidateNodeIds", "decodeCitySelectionToken", "normalizedSelectorLabel", "selectorLocationName"];
+  const names = ["selectorNodeIds", "orderedCandidateNodeIds", "nodeMatchesUserGroup", "decodeCitySelectionToken", "normalizedSelectorLabel", "selectorLocationName"];
   const source = parsed.statements.filter(node => ts.isFunctionDeclaration(node) && names.includes(node.name?.text)).map(node => node.getText(parsed)).join("\n");
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const expand = new Function("asText", "regionIdForCountry", `${compiled}; return orderedCandidateNodeIds;`)(
+  const expand = new Function("asText", "asStringList", "regionIdForCountry", `${compiled}; return orderedCandidateNodeIds;`)(
     (value, fallback = "") => typeof value === "string" ? value : fallback,
+    value => Array.isArray(value) ? value.filter(item => typeof item === "string") : [],
     country => country === "SE" ? "europe" : "other",
   );
   const nodes = Array.from({ length: 18 }, (_, index) => ({ id: `node-${index}`, country: "SE", city: "Malmö", location_key: `loc-${index}` }));
   const order = ["reverse:home", "city:SE:Malm%C3%B6", "country:SE", "wireguard:wg"];
   assert.deepEqual(expand(order, nodes, [{ id: "wg" }], [{ id: "home" }]), ["reverse:home", ...nodes.map(node => node.id), "wireguard:wg"]);
   assert.deepEqual(expand(["region:europe"], nodes, [], []), nodes.map(node => node.id));
+  assert.deepEqual(expand(["group:sweden"], nodes, [], [], [{ id: "sweden", countries: ["SE"] }]), nodes.map(node => node.id));
   assert.deepEqual(
     expand([`city:CA:${encodeURIComponent("🇨🇦 ⭐️ Канада")}`], [
       { id: "canada", country: "CA", city: "🇨🇦 ⚡️ ⭐️ Канада", location_key: "canada" },
@@ -60,6 +86,51 @@ test("selection expansion retains every matching server, including more than ten
     ], [], []),
     ["canada"],
   );
+});
+
+test("user groups match multiple emoji tokens across presentation variants", () => {
+  const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const source = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "nodeMatchesUserGroup")?.getText(parsed);
+  assert.ok(source);
+  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const matches = new Function("asText", "asStringList", `${compiled}; return nodeMatchesUserGroup;`)(
+    (value, fallback = "") => typeof value === "string" ? value : fallback,
+    value => Array.isArray(value) ? value.filter(item => typeof item === "string") : [],
+  );
+  assert.equal(matches({ name_contains: "⚡, ⭐" }, { label: "🇸🇪 ⚡️ Быстрый ⭐️ Швеция" }), true);
+  assert.equal(matches({ name_contains: "⚡, ⭐" }, { label: "🇸🇪 ⚡️ Швеция" }), false);
+  assert.equal(matches({ name_contains: "⚡, ⭐", name_excludes: "резерв, TEST" }, { label: "⚡️ ⭐️ Швеция резерв" }), false);
+  assert.equal(matches({ name_contains: "⚡, ⭐", name_excludes: "резерв, TEST" }, { label: "⚡️ ⭐️ Sweden testing" }), true);
+  assert.equal(matches({ name_excludes: "test" }, { label: "Sweden" }), false);
+  assert.equal(matches({ subscription_ids: ["*"], countries: ["CA"] }, { subscription_id: "provider-a", country: "CA" }), true);
+  assert.equal(matches({ subscription_ids: ["*"], countries: ["CA"] }, { subscription_id: "provider-b", country: "CA" }), true);
+  assert.equal(matches({ subscription_ids: ["*"], countries: ["CA"] }, { country: "CA" }), false);
+  assert.equal(matches({ subscription_ids: ["*"], countries: ["CA"] }, { subscription_id: "provider-b", country: "DE" }), false);
+  assert.equal(matches({ subscription_ids: [], countries: ["CA"] }, { country: "CA" }), true);
+});
+
+test("rule-based group editor offers all subscriptions and provider-neutral examples", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /<option value="\*">\{tr\("Все подписки"\)\}<\/option>/);
+  assert.match(source, /<option value="">\{tr\("Любой источник \(старое правило\)"\)\}<\/option>/);
+  assert.match(source, /subscription_ids: \[newSubscription\]/);
+  assert.doesNotMatch(source, /placeholder="⚡, ⭐"/);
+  assert.doesNotMatch(source, /Например: для мобильных операторов/);
+});
+
+test("route editor keeps view controls horizontal and scopes protocol filters to domain or IP", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.subscription-location-heading > div:not\(\.subscription-view-switch\)/);
+  assert.match(css, /\.policy-editor-modal \.subscription-view-switch \{ display: flex;/);
+  assert.match(css, /\.custom-route-row \{ display: grid;/);
+  assert.match(css, /\.custom-route-row \{[^\n]*align-items: start;/);
+  assert.match(css, /\.custom-route-protocol-filter \{ grid-column: 3 \/ -2;/);
+  assert.match(css, /\.custom-route-row \.custom-route-protocol-filter \{ grid-column: 2 \/ 4; grid-row: 4; \}/);
+  assert.match(css, /\.custom-route-row \.custom-route-remove \{ grid-column: 3; grid-row: 1; \}/);
+  assert.doesNotMatch(page, /<option value="protocol">/);
+  assert.match(page, /rule\.kind === "domain" \|\| rule\.kind === "ip"/);
+  assert.match(page, /\["http", "tls", "quic"\]\.map/);
+  assert.match(page, /<label className="field custom-route-value">/);
 });
 
 test("active pool size is visible and editable in advanced switching parameters", () => {

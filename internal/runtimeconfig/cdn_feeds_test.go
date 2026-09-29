@@ -56,3 +56,26 @@ func TestAutomaticOriginProvidersCannotShareDifferentTrustBoundaries(t *testing.
 		t.Fatal("different providers shared a RouterOS trust boundary")
 	}
 }
+
+func TestLegacyCloudflareUpdaterFollowsActualProtectedIngress(t *testing.T) {
+	config := routerOSModelConfig()
+	config["ingress"] = map[string]any{
+		"subscription_hostname": "sub.example.test", "subscription_origin_server_name": "origin.example.test",
+		"subscription_endpoint_mode": "separate", "subscription_cdn_provider": "cloudflare",
+		"subscription_origin_protection_mode": "auto-cidr", "subscription_listen_port": 18443,
+	}
+	required, err := RequiresRouterOSCloudflareUpdater(config)
+	if err != nil || !required {
+		t.Fatalf("protected subscription should require updater: required=%t err=%v", required, err)
+	}
+	config["ingress"].(map[string]any)["subscription_origin_protection_mode"] = "secret-header"
+	required, err = RequiresRouterOSCloudflareUpdater(config)
+	if err != nil || required {
+		t.Fatalf("secret-header subscription should not require updater: required=%t err=%v", required, err)
+	}
+	config["ingress"].(map[string]any)["subscription_endpoint_mode"] = "direct"
+	required, err = RequiresRouterOSCloudflareUpdater(config)
+	if err != nil || required {
+		t.Fatalf("direct subscription should not require updater: required=%t err=%v", required, err)
+	}
+}

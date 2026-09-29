@@ -41,6 +41,15 @@ test("stable responsive node outranks slower perfect-history background node", (
   assert.deepEqual(sheet.rows.map(item => item.label), ["Active", "Finland", "Perfect but slow"]);
 });
 
+test("recently failing reserve ranks below stable reserves even with perfect planned samples", () => {
+  const sheet = qualitySheet([{ key: "route", name: "Route", mode: "best", nodeStats: [
+    node("Active", { selected: true }),
+    node("Flapping", { inRuntimePool: true, unstable: true, speedBps: 20e6 }),
+    node("Stable", { inRuntimePool: true, speedBps: 10e6 }),
+  ] }], "route");
+  assert.deepEqual(sheet.rows.map(item => item.label), ["Active", "Stable", "Flapping"]);
+});
+
 test("priority table follows configured order without promoting the active or statistically better node", () => {
   const sheet = qualitySheet([{
     key: "route",

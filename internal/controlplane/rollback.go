@@ -68,5 +68,6 @@ func (server *Server) rollbackDraft(response http.ResponseWriter, request *http.
 		"requested_revision": previousRevision,
 		"restored_revision":  result["revision"],
 	})
+	server.wakeRouterOSManagedScripts()
 	server.writeJSON(response, http.StatusOK, result)
 }

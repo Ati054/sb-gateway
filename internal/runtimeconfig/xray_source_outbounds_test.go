@@ -85,6 +85,74 @@ func TestPolicyCandidateGroupsKeepsCityWhenProviderChangesLeadingBadges(t *testi
 	}
 }
 
+func TestPolicyCandidateGroupsFollowsSubscriptionAndFiltersAcrossRenames(t *testing.T) {
+	policy := map[string]any{
+		"selection_order": []any{"group:mobile", "country:CA"},
+		"node_groups": []any{map[string]any{
+			"id": "mobile", "name": "Mobile", "subscription_ids": []any{"provider-a"},
+			"protocols": []any{"vless"},
+		}},
+	}
+	nodes := []map[string]any{
+		{"id": "renamed", "subscription_id": "provider-a", "protocol": "vless", "label": "New provider title", "country": "CA"},
+		{"id": "added", "subscription_id": "provider-a", "protocol": "vless", "label": "Another node", "country": "DE"},
+		{"id": "excluded", "subscription_id": "provider-b", "protocol": "vless", "country": "CA"},
+	}
+	want := []policyCandidateGroup{
+		{Selector: "group:mobile", Members: []string{"renamed", "added"}},
+		{Selector: "country:CA", Members: []string{"excluded"}},
+	}
+	if got := policyCandidateGroups(policy, nodes); !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscription groups = %#v, want %#v", got, want)
+	}
+}
+
+func TestSubscriptionNodeGroupMatchesEmojiWithVariationSelectors(t *testing.T) {
+	group := map[string]any{"name_contains": "⚡, ⭐"}
+	if !subscriptionNodeGroupMatches(group, map[string]any{"label": "🇸🇪 ⚡️ Быстрый ⭐️ Швеция"}) {
+		t.Fatal("emoji filter should match both tokens regardless of presentation selector")
+	}
+	if subscriptionNodeGroupMatches(group, map[string]any{"label": "🇸🇪 ⚡️ Швеция"}) {
+		t.Fatal("all comma-separated name tokens must match")
+	}
+}
+
+func TestSubscriptionNodeGroupMatchesEverySubscriptionButNoStandaloneExit(t *testing.T) {
+	group := map[string]any{"subscription_ids": []any{"*"}, "countries": []any{"CA"}, "name_excludes": "backup"}
+	if !subscriptionNodeGroupMatches(map[string]any{"subscription_ids": []any{"*"}}, map[string]any{"subscription_id": "provider-a"}) {
+		t.Fatal("all-subscription group must work without optional filters")
+	}
+	for _, feed := range []string{"provider-a", "provider-b", "new-provider"} {
+		if !subscriptionNodeGroupMatches(group, map[string]any{"subscription_id": feed, "country": "CA", "label": "Canada"}) {
+			t.Fatalf("node from %s should match the all-subscriptions filter", feed)
+		}
+	}
+	for _, node := range []map[string]any{
+		{"country": "CA", "label": "Standalone Canada"},
+		{"subscription_id": "provider-a", "country": "DE", "label": "Germany"},
+		{"subscription_id": "provider-a", "country": "CA", "label": "Canada backup"},
+	} {
+		if subscriptionNodeGroupMatches(group, node) {
+			t.Fatalf("unwanted node matched all-subscriptions filter: %#v", node)
+		}
+	}
+}
+
+func TestSubscriptionNodeGroupExcludesOnlyWholeNameWords(t *testing.T) {
+	group := map[string]any{"name_contains": "⚡, ⭐", "name_excludes": "РЕЗЕРВ, test"}
+	for _, label := range []string{"⚡️ ⭐️ Швеция Резерв", "⚡ ⭐ Sweden TEST"} {
+		if subscriptionNodeGroupMatches(group, map[string]any{"label": label}) {
+			t.Fatalf("excluded word in %q should reject the node", label)
+		}
+	}
+	if !subscriptionNodeGroupMatches(group, map[string]any{"label": "⚡️ ⭐️ Sweden testing"}) {
+		t.Fatal("a word substring must not exclude the node")
+	}
+	if subscriptionNodeGroupMatches(map[string]any{"name_excludes": "test"}, map[string]any{"label": "Sweden"}) {
+		t.Fatal("exclusions alone must not implicitly select every node")
+	}
+}
+
 func TestBuildXrayOutboundSourceBuildsPriorityServiceSelectors(t *testing.T) {
 	config := map[string]any{"policies": []any{map[string]any{
 		"id": "europe", "enabled": true, "mode": "priority", "selection_order": []any{"country:DE", "country:FI"},

@@ -1,0 +1,32 @@
+diff --git a/app/router/router.go b/app/router/router.go
+index 1f75d93..30c8592 100644
+--- a/app/router/router.go
++++ b/app/router/router.go
+@@ -98,5 +98,8 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
+ 			return err
+ 		}
+ 		balancer.InjectContext(r.ctx)
++		if previous, found := oldBalancers[rule.Tag]; found {
++			balancer.override.Put(previous.override.Get())
++		}
+ 		newBalancers[rule.Tag] = balancer
+ 	}
+diff --git a/app/router/balancing.go b/app/router/balancing.go
+index 409a14d..a31e650 100644
+--- a/app/router/balancing.go
++++ b/app/router/balancing.go
+@@ -150,4 +150,6 @@ func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
+ // SetOverrideTarget implements routing.BalancerOverrider
+ func (r *Router) SetOverrideTarget(tag, target string) error {
++	r.mu.Lock()
++	defer r.mu.Unlock()
+ 	if b, ok := (*r.balancers.Load())[tag]; ok {
+ 		b.override.Put(target)
+@@ -158,5 +160,7 @@ func (r *Router) SetOverrideTarget(tag, target string) error {
+ 
+ // GetOverrideTarget implements routing.BalancerOverrider
+ func (r *Router) GetOverrideTarget(tag string) (string, error) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
+ 	if b, ok := (*r.balancers.Load())[tag]; ok {
+ 		return b.override.Get(), nil
