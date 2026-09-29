@@ -8,18 +8,25 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/sb-gateway/sb-gateway/internal/rulesets"
 )
 
 const maxRuntimeMigrationArtifactBytes = 32 << 20
 
-// MigrateLegacyDynamicRuntime rewrites only the legacy startup graph that
-// duplicated subscription-backed outbounds already present in the health-pool
-// contract. It runs before the appliance starts Xray, so an image update gets
-// the smaller graph without an additional data-plane restart or RouterOS edit.
+// MigrateLegacyDynamicRuntime rewrites legacy dynamic outbounds or an active
+// GeoIP route missing managed rule tags. It runs before Xray starts, so an
+// image update can enable hot GeoIP refresh without another data-plane restart.
 func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (bool, error) {
 	legacy, err := legacyDynamicRuntime(opts.Runtime.XrayConfig, opts.Runtime.XrayHealthPool)
-	if err != nil || !legacy {
+	if err != nil {
 		return false, err
+	}
+	if !legacy {
+		legacy, err = legacyGeoIPRouting(opts.StateDir, opts.Runtime.XrayConfig)
+		if err != nil || !legacy {
+			return false, err
+		}
 	}
 	repository, err := newStateRepository(opts.StateDir)
 	if err != nil {
@@ -85,6 +92,49 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (bool, error
 	}
 	if err := repository.updateRuntimeRevision(candidate.Revision); err != nil {
 		return false, fmt.Errorf("record migrated runtime revision: %w", err)
+	}
+	return true, nil
+}
+
+func legacyGeoIPRouting(stateDir, xrayPath string) (bool, error) {
+	catalog, err := rulesets.Catalog()
+	if err != nil {
+		return false, err
+	}
+	packs, err := rulesets.ActivePacks(stateDir, catalog)
+	if err != nil {
+		return false, err
+	}
+	selected := false
+	for _, pack := range packs {
+		selected = selected || pack.UpdateMode == "geoip"
+	}
+	if !selected {
+		return false, nil
+	}
+	file, err := os.Open(xrayPath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, maxRuntimeMigrationArtifactBytes+1))
+	if err != nil || len(body) > maxRuntimeMigrationArtifactBytes {
+		return false, errors.New("read bounded Xray GeoIP migration input")
+	}
+	var xray struct {
+		Routing struct {
+			Rules []struct {
+				RuleTag string `json:"ruleTag"`
+			} `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(body, &xray); err != nil {
+		return false, err
+	}
+	for _, rule := range xray.Routing.Rules {
+		if strings.HasPrefix(rule.RuleTag, "sb-geoip-") {
+			return false, nil
+		}
 	}
 	return true, nil
 }

@@ -119,7 +119,7 @@ func (server *Server) readiness(response http.ResponseWriter, request *http.Requ
 		server.internalStateError(response, request, err)
 		return
 	}
-	applyRecoveryPending := applyOperation["pending"] == true
+	applyRecoveryPending := applyOperation["pending"] == true && !server.liveApplyReadinessAllowed(applyOperation)
 	consistent := (!configured || lkg == active) && !applyRecoveryPending
 	status := http.StatusOK
 	if !consistent {
@@ -167,7 +167,7 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 	}
 	mountsWritable, blockedMounts := server.checkPersistentMounts()
 	applyOperation, _ := server.repository.auxiliary("apply-operation")
-	applyRecoveryPending := applyOperation["pending"] == true
+	applyRecoveryPending := applyOperation["pending"] == true && !server.liveApplyReadinessAllowed(applyOperation)
 	ready = ready && mountsWritable && !applyRecoveryPending
 	payload := map[string]any{
 		"ready": ready, "configured": active != nil,
@@ -183,6 +183,34 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 		payload["lease_age_seconds"] = age
 	}
 	return ready, payload
+}
+
+// A runtime-only Apply has already restarted and probed Xray before it reaches
+// this journal phase. Its RouterOS source is unchanged, so the watchdog may
+// publish a fresh lease while Apply waits for the existing diversion gate.
+// Other pending journal phases remain fail-open, especially after a crash.
+func plannedRuntimeActivationReady(operation map[string]any, liveApply bool) bool {
+	return liveApply && operation["pending"] == true &&
+		operation["state"] == "runtime_activated" &&
+		operation["previous_routeros_source"] == operation["target_routeros_source"] &&
+		operation["previous_routeros_source"] != ""
+}
+
+func (server *Server) liveApplyReadinessAllowed(operation map[string]any) bool {
+	return plannedRuntimeActivationReady(operation, server.plannedRuntimeApply.Load()) ||
+		plannedHotPolicyReadiness(operation, server.plannedHotPolicyApply.Load())
+}
+
+// Only the live native publication callback can set this flag, after proving
+// that urltest-pool is the sole changed artifact. Keep the existing traffic
+// lease while a new eligible leaf is prepared; stale journals after a crash
+// and every routing/process restart still take the normal recovery path.
+func plannedHotPolicyReadiness(operation map[string]any, liveApply bool) bool {
+	state := operation["state"]
+	previousSource := text(operation["previous_routeros_source"])
+	return liveApply && operation["pending"] == true &&
+		(state == "runtime_hot_activating" || state == "runtime_activated" || state == "active_committed") &&
+		previousSource != "" && previousSource == text(operation["target_routeros_source"])
 }
 
 // trafficReadiness is deliberately stricter than the image probation health

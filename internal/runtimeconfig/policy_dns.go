@@ -153,14 +153,15 @@ type policyDNSRuleSetRule struct {
 	Network      json.RawMessage   `json:"network"`
 }
 
-func (rule policyDNSRuleSetRule) usable() bool {
-	return len(rule.Domain) != 0 || len(rule.DomainSuffix) != 0 || len(rule.IPCIDR) != 0 ||
-		len(rule.Port) != 0 || len(rule.PortRange) != 0 || nonEmptyJSON(rule.Protocol) || nonEmptyJSON(rule.Network)
+func (rule policyDNSRuleSetRule) nonDNSCondition() bool {
+	return len(rule.IPCIDR) != 0 || len(rule.Port) != 0 || len(rule.PortRange) != 0 ||
+		nonEmptyPolicyJSON(rule.Protocol) || nonEmptyPolicyJSON(rule.Network)
 }
 
-func nonEmptyJSON(value json.RawMessage) bool {
+func nonEmptyPolicyJSON(value json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(value)
-	return len(trimmed) != 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte(`""`)) && !bytes.Equal(trimmed, []byte("[]"))
+	return len(trimmed) != 0 && !bytes.Equal(trimmed, []byte("null")) &&
+		!bytes.Equal(trimmed, []byte(`""`)) && !bytes.Equal(trimmed, []byte("[]"))
 }
 
 // CompilePolicyDNS performs one bounded compilation pass. Parsed rulesets are
@@ -444,8 +445,15 @@ func (compiler *policyDNSCompiler) expand(raw PolicyDNSSourceRule) ([]PolicyDNSS
 			return nil, fmt.Errorf("Xray candidate cannot inline ruleset %q: %w", name, err)
 		}
 		valid := 0
+		nonDNS := 0
 		for _, entry := range entries {
-			if !entry.usable() && len(raw.Domain) == 0 && len(raw.DomainSuffix) == 0 {
+			// DNS lanes only understand names. An IP/port-only service rule must
+			// never become an unconstrained DNS route for every query.
+			if len(entry.Domain) == 0 && len(entry.DomainSuffix) == 0 &&
+				len(raw.Domain) == 0 && len(raw.DomainSuffix) == 0 {
+				if entry.nonDNSCondition() {
+					nonDNS++
+				}
 				continue
 			}
 			valid++
@@ -458,12 +466,9 @@ func (compiler *policyDNSCompiler) expand(raw PolicyDNSSourceRule) ([]PolicyDNSS
 			}
 			result = append(result, merged)
 		}
-		if valid == 0 {
+		if valid == 0 && nonDNS == 0 {
 			return nil, fmt.Errorf("Xray ruleset %q has no usable match conditions", name)
 		}
-	}
-	if len(result) == 0 {
-		return nil, errors.New("Xray routing rule references no usable service rules")
 	}
 	return result, nil
 }

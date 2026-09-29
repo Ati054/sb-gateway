@@ -26,7 +26,7 @@ const (
 	defaultRecoveryThreshold = 3
 	defaultRestartBudget     = 6
 	defaultDeepInterval      = 30
-	defaultStartupGrace      = 30
+	defaultStartupGrace      = 210
 	controlPlaneThreshold    = 24
 	statusHeartbeat          = 30 * time.Second
 )
@@ -84,8 +84,9 @@ type listener struct {
 }
 
 type readiness struct {
-	Configured bool `json:"configured"`
-	Ready      bool `json:"ready"`
+	Configured           bool `json:"configured"`
+	Ready                bool `json:"ready"`
+	ApplyRecoveryPending bool `json:"apply_recovery_pending"`
 }
 
 type statusPayload struct {
@@ -178,6 +179,18 @@ func Run(ctx context.Context, opts Options) error {
 		}
 
 		ready, err := r.readiness(ctx)
+		if err == nil && ready.ApplyRecoveryPending {
+			r.clearLease()
+			leasePublished = false
+			failures, successes = 0, 0
+			activeFailureClass = ""
+			r.nextDeepProbe = time.Time{}
+			r.postState(ctx, current, "recovery_pending", false, 0, "routeros_rollback_guard")
+			if !wait(ctx, current.interval) {
+				return nil
+			}
+			continue
+		}
 		if err == nil && !ready.Configured {
 			r.clearLease()
 			leasePublished = false
@@ -408,12 +421,15 @@ func (r *runner) readiness(ctx context.Context) (readiness, error) {
 		return result, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
 		return result, fmt.Errorf("readiness returned HTTP %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
 	if err := decoder.Decode(&result); err != nil {
 		return result, err
+	}
+	if response.StatusCode == http.StatusServiceUnavailable && !result.ApplyRecoveryPending {
+		return result, fmt.Errorf("readiness returned HTTP %d", response.StatusCode)
 	}
 	return result, nil
 }

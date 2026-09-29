@@ -34,23 +34,24 @@ fi
 
 # A normal Apply already validated this exact config and gets the shortest
 # interruption budget. Cold container/runtime starts need more room for large
-# RouterOS/ARM64 configs. The prevalidation marker is one-shot, so a timed-out
-# fast attempt automatically retries through the cold recovery budget.
+# RouterOS/ARM64 configs, including large active GeoIP country sets. The
+# prevalidation marker is one-shot, so a timed-out fast attempt automatically
+# retries through the cold recovery budget.
 if [ -n "$configured_startup_timeout_seconds" ]; then
   startup_timeout_seconds="$configured_startup_timeout_seconds"
 elif [ "$skip_validation" -eq 1 ]; then
   startup_timeout_seconds=15
 else
-  startup_timeout_seconds=30
+  startup_timeout_seconds=180
 fi
 case "$startup_timeout_seconds" in
   ''|*[!0-9]*|0)
-    printf '%s\n' "SB_XRAY_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 30" >&2
+    printf '%s\n' "SB_XRAY_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 180" >&2
     exit 78
     ;;
 esac
-if [ "$startup_timeout_seconds" -gt 30 ]; then
-  printf '%s\n' "SB_XRAY_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 30" >&2
+if [ "$startup_timeout_seconds" -gt 180 ]; then
+  printf '%s\n' "SB_XRAY_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 180" >&2
   exit 78
 fi
 if [ "$skip_validation" -ne 1 ]; then

@@ -49,7 +49,7 @@ func TestXrayStartupUsesOneBoundedReadinessAndRestoreBudget(t *testing.T) {
 		`configured_startup_timeout_seconds="${SB_XRAY_STARTUP_TIMEOUT_SECONDS:-}"`,
 		`elif [ "$skip_validation" -eq 1 ]; then`,
 		`startup_timeout_seconds=15`,
-		`startup_timeout_seconds=30`,
+		`startup_timeout_seconds=180`,
 		`startup_deadline=$((startup_started + startup_timeout_seconds))`,
 		`while [ "$xray_api_ready" -ne 1 ]; do`,
 		`selector_timeout_seconds=$((startup_deadline - startup_now))`,

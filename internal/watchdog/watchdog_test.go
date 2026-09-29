@@ -2,7 +2,10 @@ package watchdog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +13,87 @@ import (
 	"testing"
 	"time"
 )
+
+func TestReadinessRecognizesPendingRouterOSRollbackGuard(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		status      int
+		body        string
+		wantError   bool
+		wantPending bool
+	}{
+		{"guard pending", http.StatusServiceUnavailable, `{"configured":true,"ready":false,"apply_recovery_pending":true}`, false, true},
+		{"other unavailable", http.StatusServiceUnavailable, `{"configured":true,"ready":false,"apply_recovery_pending":false}`, true, false},
+		{"unauthorized", http.StatusUnauthorized, `{"configured":true,"ready":false,"apply_recovery_pending":true}`, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer endpoint.Close()
+			runner := &runner{opts: Options{ReadyURL: endpoint.URL}, http: endpoint.Client()}
+			ready, err := runner.readiness(context.Background())
+			if (err != nil) != test.wantError || ready.ApplyRecoveryPending != test.wantPending {
+				t.Fatalf("readiness=%+v err=%v", ready, err)
+			}
+		})
+	}
+}
+
+func TestRunWaitsForPendingRouterOSRollbackWithoutRestarting(t *testing.T) {
+	root := t.TempDir()
+	readyMarker := filepath.Join(root, "xray-ready")
+	if err := os.WriteFile(readyMarker, []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(root, "token")
+	if err := os.WriteFile(tokenFile, []byte("test-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	recoveryObserved := make(chan struct{}, 1)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/ready":
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = response.Write([]byte(`{"configured":true,"ready":false,"apply_recovery_pending":true}`))
+		case "/status":
+			var payload statusPayload
+			if json.NewDecoder(request.Body).Decode(&payload) == nil && payload.State == "recovery_pending" {
+				select {
+				case recoveryObserved <- struct{}{}:
+				default:
+				}
+				cancel()
+			}
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer endpoint.Close()
+	opts := Options{
+		ReadyURL: endpoint.URL + "/ready", StatusURL: endpoint.URL + "/status",
+		TokenFile: tokenFile, XrayReadyFile: readyMarker,
+		MarkerFile:     filepath.Join(root, "router-ready"),
+		RestartFile:    filepath.Join(root, "restarts"),
+		ApplyGuardFile: filepath.Join(root, "apply-guard"),
+		SettingsFile:   filepath.Join(root, "watchdog.env"),
+	}
+	if err := Run(ctx, opts); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-recoveryObserved:
+	default:
+		t.Fatal("watchdog did not enter recovery_pending state")
+	}
+	if _, err := os.Stat(opts.RestartFile); !os.IsNotExist(err) {
+		t.Fatalf("watchdog recorded a restart during pending rollback: %v", err)
+	}
+}
 
 func TestStartupGraceEndsAsSoonAsCurrentXrayIsReady(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "xray-selectors-ready")

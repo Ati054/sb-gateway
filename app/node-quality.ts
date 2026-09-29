@@ -3,6 +3,7 @@ type QualityNode = {
   selected: boolean;
   inRuntimePool: boolean;
   available: boolean;
+  unstable?: boolean;
   quality: boolean;
   availability: number | null;
   loss: number | null;
@@ -12,6 +13,19 @@ type QualityNode = {
   decisionMedian: number | null;
   label: string;
 };
+
+// A brief failed probe is shown by the live status marker, not as a severe
+// route warning over the historical availability column.
+export function confirmedUnstableRoute(
+  outageOpen: boolean,
+  availabilityOK: boolean | undefined,
+  samples: number,
+  lossPercent: number | null,
+  maxPacketLossPercent: number,
+): boolean {
+  return outageOpen && availabilityOK === false && samples >= 10 &&
+    lossPercent !== null && lossPercent > maxPacketLossPercent;
+}
 
 function responsiveScoreOrder(left: QualityNode, right: QualityNode): number {
   const leftDelay = left.decisionMedian ?? left.median ?? left.p95 ?? 0;
@@ -56,6 +70,7 @@ export function qualitySheet<T extends QualityNode>(
     // then rank the remaining background candidates by measured responsiveness.
     if (left.inRuntimePool !== right.inRuntimePool) return left.inRuntimePool ? -1 : 1;
     if (left.available !== right.available) return left.available ? -1 : 1;
+    if (Boolean(left.unstable) !== Boolean(right.unstable)) return left.unstable ? 1 : -1;
     if (left.quality !== right.quality) return left.quality ? -1 : 1;
     return responsiveScoreOrder(left, right)
       || (right.availability ?? -1) - (left.availability ?? -1)

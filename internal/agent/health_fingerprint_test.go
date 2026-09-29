@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -10,8 +11,37 @@ import (
 	"time"
 )
 
+type unavailableCurrentRuntime struct{ *fakeSelectorRuntime }
+
+func (runtime unavailableCurrentRuntime) Current(string) (string, error) {
+	return "", errors.New("Xray selector readback unavailable")
+}
+
+func TestFailedGenerationReadbackPreservesPreviousNodeHistory(t *testing.T) {
+	pool := healthFixture(false)
+	contract := pool.HealthPolicies["europe"]
+	contract.Nodes["de"] = healthNode{Fingerprint: "new"}
+	item := newPolicyHealthState()
+	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
+	item.CandidateNodes = map[string]healthNode{"de": {Fingerprint: "old"}}
+	item.Samples["de"] = []healthSample{{OK: true}}
+	item.LastProbeAt["de"] = 100
+	controller := &healthController{
+		opts:        Options{StateRoot: t.TempDir()},
+		runtime:     unavailableCurrentRuntime{&fakeSelectorRuntime{pool: pool}},
+		warmStarted: map[string]bool{"europe": true}, state: healthState{"europe": item},
+	}
+	if err := controller.tickPolicy(time.Unix(1000, 0), "europe", contract, item); err == nil {
+		t.Fatal("failed selector readback was accepted")
+	}
+	if len(item.Samples["de"]) != 1 || item.CandidateNodes["de"].Fingerprint != "old" {
+		t.Fatal("transient readback failure erased node history before generation confirmation")
+	}
+}
+
 func TestChangedOutboundLosesOldHealthWithoutLosingStableID(t *testing.T) {
 	item := newPolicyHealthState()
+	ensureHealthMaps(item)
 	item.Selected = "node"
 	item.CandidateNodes = map[string]healthNode{"node": {Label: "Old name", Fingerprint: "old"}}
 	item.LastProbeAt["node"] = 1000
@@ -19,7 +49,11 @@ func TestChangedOutboundLosesOldHealthWithoutLosingStableID(t *testing.T) {
 	item.AvailabilityOK = map[string]bool{"node": true}
 	item.QualityOK = map[string]bool{"node": true}
 	item.Recoveries["node"] = 3
+	item.OutagePenalty["node"] = outagePenalty{LastAt: 1000, Count: 2, Until: 2000}
 	item.Samples["node"] = []healthSample{{OK: true}}
+	item.PeriodStats = map[string]map[string]healthStats{
+		"7d": {"node": {Samples: 10}}, "30d": {"node": {Samples: 20}},
+	}
 	item.LastWorkingSelection = &workingSelection{Selected: "node"}
 	current := map[string]healthNode{"node": {Label: "New name", Fingerprint: "old"}}
 	if got := invalidateChangedOutboundHealth(item, []string{"node"}, current); len(got) != 0 {
@@ -29,8 +63,14 @@ func TestChangedOutboundLosesOldHealthWithoutLosingStableID(t *testing.T) {
 	if got := invalidateChangedOutboundHealth(item, []string{"node"}, current); !reflect.DeepEqual(got, []string{"node"}) {
 		t.Fatalf("changed endpoint not detected: %v", got)
 	}
-	if item.Selected != "node" || item.LastProbeAt["node"] != 0 || item.LastGoodAt["node"] != 0 || item.AvailabilityOK["node"] || item.QualityOK["node"] || item.Recoveries["node"] != 0 || len(item.Samples["node"]) != 0 || item.LastWorkingSelection != nil {
+	if item.Selected != "node" || item.LastProbeAt["node"] != 0 || item.LastGoodAt["node"] != 0 || item.AvailabilityOK["node"] || item.QualityOK["node"] || item.Recoveries["node"] != 0 || len(item.Samples["node"]) != 0 || len(item.OutagePenalty) != 0 || item.LastWorkingSelection != nil {
 		t.Fatalf("stale health survived endpoint change: %+v", item)
+	}
+	if _, exists := item.PeriodStats["7d"]["node"]; exists {
+		t.Fatal("stale 7-day aggregate survived endpoint change")
+	}
+	if _, exists := item.PeriodStats["30d"]["node"]; exists {
+		t.Fatal("stale 30-day aggregate survived endpoint change")
 	}
 	if reserve := knownFreshReserve(time.Unix(1001, 0), "block", []string{"node"}, "priority", nil, item, effectivePolicySettings{backup: 300, recoveryThreshold: 3, failureThreshold: 3}); reserve != "" {
 		t.Fatalf("stale reserve reused: %q", reserve)
@@ -39,6 +79,7 @@ func TestChangedOutboundLosesOldHealthWithoutLosingStableID(t *testing.T) {
 
 func TestRemovedCandidatesDoNotAccumulateAcrossCatalogGenerations(t *testing.T) {
 	item := newPolicyHealthState()
+	ensureHealthMaps(item)
 	item.AvailabilityOK = make(map[string]bool)
 	item.QualityOK = make(map[string]bool)
 	item.CandidateNodes = make(map[string]healthNode)
@@ -60,6 +101,7 @@ func TestRemovedCandidatesDoNotAccumulateAcrossCatalogGenerations(t *testing.T) 
 		item.LastSpeedSuccessAt[id] = 1
 		item.LastSpeedProbeStatus[id] = "ok"
 		item.OptimizationBackoff[id] = 1
+		item.OutagePenalty[id] = outagePenalty{LastAt: 1, Count: 1, Until: 2}
 		item.FailureClass[id] = "timeout"
 		item.AvailabilityOK[id] = true
 		item.QualityOK[id] = true
@@ -71,7 +113,7 @@ func TestRemovedCandidatesDoNotAccumulateAcrossCatalogGenerations(t *testing.T) 
 		item.SpeedProbeTargets = append(item.SpeedProbeTargets, id)
 		item.LastWorkingSelection = &workingSelection{Selected: id}
 		pruneRemovedCandidateHealth(item, []string{id})
-		if len(item.Samples) != 1 || len(item.DailySamples) != 1 || len(item.HistoryDays) != 1 || len(item.SpeedSamplesBPS) != 1 || len(item.CandidateNodes) != 1 || len(item.PeriodStats["24h"]) != 1 || len(item.Shortlist) != 1 || len(item.ProbedCandidates) != 1 || len(item.SpeedProbeTargets) != 1 {
+		if len(item.Samples) != 1 || len(item.DailySamples) != 1 || len(item.HistoryDays) != 1 || len(item.SpeedSamplesBPS) != 1 || len(item.CandidateNodes) != 1 || len(item.OutagePenalty) != 1 || len(item.PeriodStats["24h"]) != 1 || len(item.Shortlist) != 1 || len(item.ProbedCandidates) != 1 || len(item.SpeedProbeTargets) != 1 {
 			t.Fatalf("generation %d retained removed node evidence", generation)
 		}
 		encoded, err := json.Marshal(item)

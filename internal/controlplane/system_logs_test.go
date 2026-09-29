@@ -58,3 +58,19 @@ func TestRoutingLogShowsOnlyRecentHealthEvents(t *testing.T) {
 		t.Fatalf("routing log filter: %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestSystemLogExcludesRouteHealthWithoutHidingEarlierEvents(t *testing.T) {
+	server := newTestServer(t)
+	cookie, _ := bootstrapSession(t, server)
+	path := filepath.Join(t.TempDir(), "control-plane.log")
+	body := "control-plane: first event\n" + strings.Repeat("agent: route-health probe\n", 700) + "control-plane: last event\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server.opts.Runtime.ControlPlaneLog = path
+	response := performRequest(t, server, http.MethodGet, apiPrefix+"/runtime/system-logs?source=system&lines=2", nil, nil, cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "first event") ||
+		!strings.Contains(response.Body.String(), "last event") || strings.Contains(response.Body.String(), "route-health") {
+		t.Fatalf("system log filter: %d %s", response.Code, response.Body.String())
+	}
+}

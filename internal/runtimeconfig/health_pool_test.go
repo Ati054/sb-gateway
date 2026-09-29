@@ -6,6 +6,49 @@ import (
 	"testing"
 )
 
+func TestBuildXrayHealthPoolScopesEnabledLocalPolicies(t *testing.T) {
+	config := map[string]any{
+		"reverse_vless_exits": []any{map[string]any{"id": "exit", "enabled": true}},
+		"policies": []any{
+			map[string]any{"id": "local-a", "mode": "best", "selection_order": []any{"reverse:exit"}},
+			map[string]any{"id": "local-b", "mode": "best", "selection_order": []any{"reverse:exit"}},
+			map[string]any{"id": "remote", "mode": "best", "selection_order": []any{"reverse:exit"}},
+			map[string]any{"id": "direct-only", "enabled": true, "mode": "direct"},
+			map[string]any{"id": "empty", "enabled": true, "mode": "best", "selection_order": []any{"reverse:missing"}},
+			map[string]any{"id": "disabled", "enabled": false, "mode": "best", "selection_order": []any{"reverse:exit"}},
+		},
+		"local_clients": []any{
+			map[string]any{"policy_id": "local-b", "enabled": true},
+			map[string]any{"policy_id": "local-a"},
+			map[string]any{"policy_id": "local-a", "enabled": true},
+			map[string]any{"policy_id": "remote", "enabled": false},
+			map[string]any{"policy_id": "direct-only", "enabled": true},
+			map[string]any{"policy_id": "empty", "enabled": true},
+			map[string]any{"policy_id": "disabled", "enabled": true},
+			map[string]any{"policy_id": "missing", "enabled": true},
+		},
+	}
+	body, err := BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pool map[string]any
+	if err := json.Unmarshal(body, &pool); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringSlice(pool["local_policy_ids"]); !reflect.DeepEqual(got, []string{"local-a", "local-b"}) {
+		t.Fatalf("local policy availability scope = %v", got)
+	}
+	if _, ok := objectValue(pool["health_policies"])["remote"]; !ok {
+		t.Fatal("remote-only policy disappeared from structural reconciliation")
+	}
+	for _, id := range []string{"direct-only", "empty"} {
+		if _, exists := objectValue(pool["health_policies"])[id]; exists {
+			t.Fatalf("unmanaged policy %q unexpectedly has a health contract", id)
+		}
+	}
+}
+
 func TestBuildXrayHealthPoolUsesCurrentPriorityOrder(t *testing.T) {
 	config := map[string]any{
 		"reverse_vless_exits": []any{
@@ -162,6 +205,55 @@ func TestHealthPoolFingerprintTracksOutboundNotDisplayName(t *testing.T) {
 	outbound["settings"] = map[string]any{"port": 8443, "uuid": "secret-uuid"}
 	if changed, _ := read(); changed == before {
 		t.Fatal("outbound port change retained old fingerprint")
+	}
+}
+
+func TestHealthPoolFingerprintSurvivesLocalClientAddition(t *testing.T) {
+	config := map[string]any{
+		"system": map[string]any{"networking": map[string]any{
+			"tun_address": "198.18.0.1/30", "container_address": "198.18.0.2/29",
+			"tun_mtu": 1400, "tun_stack": "system", "remote_ipv6_mode": "proxy_only",
+		}},
+		"dns": map[string]any{
+			"internal_server": "192.168.3.1",
+			"direct_resolver": map[string]any{"provider": "cloudflare", "protocol": "doh"},
+			"vpn_resolver":    map[string]any{"provider": "cloudflare", "protocol": "doh"},
+		},
+		"policies": []any{map[string]any{"id": "all", "enabled": true, "mode": "best", "selection_order": []any{"country:FR"}}},
+	}
+	nodes := []map[string]any{{
+		"id": "fr", "enabled": true, "country": "FR", "protocol": "vless",
+		"server": "fr.example", "server_port": 443, "uuid_secret_ref": "node/fr",
+	}}
+	fingerprint := func() string {
+		t.Helper()
+		xray, err := BuildXrayCandidateFromSchema(config, nodes, inboundSecretReader(map[string]string{
+			"node/fr": "11111111-1111-1111-1111-111111111111",
+		}), inboundSecretPath, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := BuildXrayHealthPool(config, nodes, xray.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pool map[string]any
+		if err := json.Unmarshal(body, &pool); err != nil {
+			t.Fatal(err)
+		}
+		inventory := objectValue(objectValue(objectValue(pool["health_policies"])["all"])["nodes"])
+		return textValue(objectValue(inventory["fr"])["fingerprint"])
+	}
+	before := fingerprint()
+	if len(before) != 64 {
+		t.Fatalf("missing endpoint fingerprint: %q", before)
+	}
+	config["local_clients"] = []any{map[string]any{
+		"id": "iphone", "enabled": true, "policy_id": "all",
+		"source_kind": "wireguard", "source_peer_refs": []any{"iphone-wireguard"},
+	}}
+	if after := fingerprint(); after != before {
+		t.Fatalf("adding a local WireGuard client changed endpoint fingerprint: %q -> %q", before, after)
 	}
 }
 

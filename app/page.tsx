@@ -17,12 +17,13 @@ import {
 } from "./lte-pinpoint-domains";
 import { mergeRuntimeStatus, reverseAvailability } from "./runtime-status";
 import { nodePresentation, selectorCandidateIds, routeCandidateIds, compareRouteCandidates, nodeDisplayLabel, nodeLocationDetail } from "./node-presentation";
-import { qualitySheet } from "./node-quality";
+import { confirmedUnstableRoute, qualitySheet } from "./node-quality";
 import { latestSpeedSince, qualityStatsSince } from "./quality-window";
 import { automaticCidrHint, supportsAutomaticCidr } from "./cdn-capabilities";
 import { AcmeFields, useAcmeProfile } from "./acme-fields";
 import { TlsTransferDialog } from "./tls-transfer";
 import { mergeSubscriptionMetadata } from "./subscription-metadata";
+import { subscriptionFeedGroups } from "./subscription-feed";
 import { disableSubscriptionPublication } from "./subscription-publication";
 import { LanguageProvider, useLanguage, type Locale, type MessageKey } from "./i18n";
 import { localizedText } from "./i18n-text";
@@ -365,6 +366,22 @@ const DIRECT_SERVICE_PACKS = [
   { id: "ru-media", name: "Медиа, ТВ, видеостриминг и музыка РФ", category: "Россия · медиа", description: "Новости, телеканалы, онлайн-кинотеатры, видео, радио, музыка и CDN.", updateMode: "daily", broad: false },
   { id: "ru-education-work-it", name: "Образование, работа и ИТ-сервисы РФ", category: "Россия · работа", description: "Образовательные платформы, вакансии, разработка, облака, хостинг и ИТ-медиа.", updateMode: "daily", broad: false },
   { id: "ru-all", name: "Вся зона RU/РФ", category: "Россия · широкий доступ", description: "Разрешает практически всю российскую доменную зону.", updateMode: "daily", broad: true },
+  { id: "cn-baidu", name: "Baidu", category: "Китай · поиск", description: "Поиск, карты и сервисы Baidu.", updateMode: "daily", broad: false },
+  { id: "cn-bilibili", name: "Bilibili", category: "Китай · видео", description: "Видео, приложение и CDN Bilibili.", updateMode: "daily", broad: false },
+  { id: "cn-tencent", name: "Tencent / WeChat", category: "Китай · сервисы", description: "Основные сервисы Tencent, WeChat и CDN.", updateMode: "daily", broad: false },
+  { id: "cn-alibaba", name: "Alibaba / Taobao", category: "Китай · покупки", description: "Магазины Taobao и сервисы Alibaba.", updateMode: "daily", broad: false },
+  { id: "cn-jd", name: "JD.com", category: "Китай · покупки", description: "Магазин JD.com и связанные домены.", updateMode: "daily", broad: false },
+  { id: "cn-douyin", name: "Douyin", category: "Китай · видео", description: "Видео Douyin и CDN.", updateMode: "daily", broad: false },
+  { id: "cn-iqiyi", name: "iQIYI", category: "Китай · видео", description: "Видео iQIYI и медиадомены.", updateMode: "daily", broad: false },
+  { id: "cn-kuaishou", name: "Kuaishou", category: "Китай · видео", description: "Видео Kuaishou и CDN.", updateMode: "daily", broad: false },
+  { id: "ir-banks", name: "Банки Ирана", category: "Иран · платежи", description: "Банковские домены из каталога category-bank-ir.", updateMode: "daily", broad: false },
+  { id: "ir-snapp", name: "Snapp", category: "Иран · сервисы", description: "Поездки, доставка и другие сервисы Snapp.", updateMode: "daily", broad: false },
+  { id: "ir-aparat", name: "Aparat", category: "Иран · видео", description: "Видеосервис Aparat и связанные домены.", updateMode: "daily", broad: false },
+  { id: "ir-government", name: "Госуслуги Ирана", category: "Иран · государство", description: "Государственные порталы из category-gov-ir.", updateMode: "daily", broad: false },
+  { id: "ir-shopping", name: "Покупки Ирана", category: "Иран · покупки", description: "Магазины и объявления из category-shopping-ir.", updateMode: "daily", broad: false },
+  { id: "ir-payment", name: "Платежи Ирана", category: "Иран · платежи", description: "Платежные сервисы из category-payment-ir.", updateMode: "daily", broad: false },
+  { id: "ir-social", name: "Соцсети Ирана", category: "Иран · общение", description: "Местные соцсети из category-social-media-ir.", updateMode: "daily", broad: false },
+  { id: "ir-tech", name: "ИТ-сервисы Ирана", category: "Иран · сервисы", description: "Каталоги приложений и облака из category-tech-ir.", updateMode: "daily", broad: false },
   { id: "youtube", name: "YouTube", category: "Видео", description: "YouTube и медиадомены Google.", updateMode: "daily", broad: false },
   { id: "telegram", name: "Telegram", category: "Общение", description: "Web, API, официальные сети и звонки Telegram.", updateMode: "daily", broad: false },
   { id: "whatsapp", name: "WhatsApp", category: "Общение", description: "WhatsApp Web, приложение и связанные звонки.", updateMode: "daily", broad: false },
@@ -1293,7 +1310,17 @@ function selectorDescription(
   wireguardExits: JsonObject[] = [],
   reverseVlessExits: JsonObject[] = [],
   locale: Locale = "ru",
+  nodeGroups: JsonObject[] = [],
 ): { title: string; detail: string } {
+  if (token.startsWith("group:")) {
+    const group = nodeGroups.find((item) => asText(item.id, "") === token.slice(6));
+    return {
+      title: group ? asText(group.name, token) : localizedText("Недоступная группа", locale),
+      detail: group
+        ? localizedText("Правило отбора обновляет состав при загрузке подписки", locale)
+        : localizedText("Правило группы удалено", locale),
+    };
+  }
   if (token.startsWith("wireguard:")) {
     const id = token.slice("wireguard:".length);
     const exit = wireguardExits.find((item) => asText(item.id, "") === id);
@@ -1390,11 +1417,29 @@ function selectorDescription(
   return { title: token, detail: localizedText("Неизвестный тип выбора", locale) };
 }
 
+function nodeMatchesUserGroup(group: JsonObject, node: JsonObject): boolean {
+  const subscriptions = asStringList(group.subscription_ids);
+  const countries = asStringList(group.countries);
+  const protocols = asStringList(group.protocols);
+  const nameTokens = asText(group.name_contains, "").split(",").map((value) => value.trim().toLocaleLowerCase().replace(/[\uFE0E\uFE0F]/g, "")).filter(Boolean);
+  const excludedWords = asText(group.name_excludes, "").split(",").map((value) => value.trim().toLocaleLowerCase()).filter(Boolean);
+  if (!subscriptions.length && !countries.length && !protocols.length && !nameTokens.length) return false;
+  const label = asText(node.label, "").toLocaleLowerCase().replace(/[\uFE0E\uFE0F]/g, "");
+  const labelWords = new Set(label.match(/[\p{L}\p{N}]+/gu) ?? []);
+  const subscriptionID = asText(node.subscription_id, "");
+  return (!subscriptions.length || (subscriptions.includes("*") ? Boolean(subscriptionID) : subscriptions.includes(subscriptionID))) &&
+    (!countries.length || countries.includes(asText(node.country, "").toUpperCase())) &&
+    (!protocols.length || protocols.includes(asText(node.protocol, "").toLowerCase())) &&
+    nameTokens.every((token) => label.includes(token)) &&
+    !excludedWords.some((word) => labelWords.has(word));
+}
+
 function selectorNodeIds(
   token: string,
   nodes: JsonObject[],
   wireguardExits: JsonObject[],
   reverseVlessExits: JsonObject[],
+  nodeGroups: JsonObject[] = [],
 ): string[] {
   if (token.startsWith("wireguard:")) {
     const id = token.slice("wireguard:".length);
@@ -1408,13 +1453,18 @@ function selectorNodeIds(
       ? [`reverse:${id}`]
       : [];
   }
+  const userGroup = token.startsWith("group:")
+    ? nodeGroups.find((item) => asText(item.id, "") === token.slice(6))
+    : undefined;
   const cityToken = decodeCitySelectionToken(token);
   return nodes.flatMap((node) => {
     const id = asText(node.id, asText(node.location_key, ""));
     if (!id) return [];
     const country = asText(node.country, "ZZ").toUpperCase();
     const city = asText(node.city, asText(node.label, ""));
-    const matches = token.startsWith("region:")
+    const matches = userGroup
+      ? nodeMatchesUserGroup(userGroup, node)
+      : token.startsWith("region:")
       ? regionIdForCountry(country) === token.slice("region:".length)
       : token.startsWith("country:")
         ? country === token.slice("country:".length).toUpperCase()
@@ -1433,11 +1483,12 @@ function orderedCandidateNodeIds(
   nodes: JsonObject[],
   wireguardExits: JsonObject[],
   reverseVlessExits: JsonObject[],
+  nodeGroups: JsonObject[] = [],
 ): string[] {
   const claimed = new Set<string>();
   const result: string[] = [];
   for (const token of order) {
-    for (const id of selectorNodeIds(token, nodes, wireguardExits, reverseVlessExits)) {
+    for (const id of selectorNodeIds(token, nodes, wireguardExits, reverseVlessExits, nodeGroups)) {
       if (claimed.has(id)) continue;
       claimed.add(id);
       result.push(id);
@@ -1474,6 +1525,7 @@ function MixedCheckbox({
 
 function SubscriptionLocationPicker({
   nodes,
+  nodeGroups,
   wireguardExits,
   reverseVlessExits,
   mode,
@@ -1495,6 +1547,7 @@ function SubscriptionLocationPicker({
   onCustomPackAdded,
 }: {
   nodes: JsonObject[];
+  nodeGroups: JsonObject[];
   wireguardExits: JsonObject[];
   reverseVlessExits: JsonObject[];
   mode: PolicySelectionMode;
@@ -1521,6 +1574,8 @@ function SubscriptionLocationPicker({
   const [expandedRegions, setExpandedRegions] = useState<string[] | null>(null);
   const [expandedCountries, setExpandedCountries] = useState<string[]>([]);
   const [serviceEditorToken, setServiceEditorToken] = useState("");
+  const [nodeView, setNodeView] = useState<"geography" | "subscription">("geography");
+  const subscriptionFeeds = subscriptionFeedGroups(nodes);
   const visibleExpandedRegions =
     expandedRegions ?? (regions[0] ? [regions[0].id] : []);
 
@@ -1529,6 +1584,9 @@ function SubscriptionLocationPicker({
     nextCountries: string[],
     nextLocations: string[],
   ): boolean {
+    if (token.startsWith("group:")) {
+      return selectionOrder.includes(token) && nodeGroups.some((group) => asText(group.id, "") === token.slice(6));
+    }
     if (token.startsWith("wireguard:")) {
       return selectedWireguardExits.includes(token.slice("wireguard:".length));
     }
@@ -1603,7 +1661,7 @@ function SubscriptionLocationPicker({
       if (ordered.includes(token) || !tokenSelected(token, nextCountries, nextLocations)) {
         continue;
       }
-      if (token.startsWith("wireguard:") || token.startsWith("reverse:")) {
+      if (token.startsWith("wireguard:") || token.startsWith("reverse:") || token.startsWith("group:")) {
         ordered.push(token);
         continue;
       }
@@ -1880,6 +1938,7 @@ function SubscriptionLocationPicker({
     nodes,
     wireguardExits,
     reverseVlessExits,
+    nodeGroups,
   ).length;
   const activeNodeCount = mode === "priority" ? eligibleNodeCount : Math.min(candidateLimit, eligibleNodeCount);
   const activePriorityItems = selectionOrder;
@@ -1940,7 +1999,7 @@ function SubscriptionLocationPicker({
         </div>
         <ol>
           {activePriorityItems.map((token, index) => {
-            const description = selectorDescription(token, regions, wireguardExits, reverseVlessExits, locale);
+            const description = selectorDescription(token, regions, wireguardExits, reverseVlessExits, locale, nodeGroups);
             return (
               <li key={token}>
                 <button
@@ -1969,7 +2028,7 @@ function SubscriptionLocationPicker({
                     }}
                   >
                     {selectionOrder.map((option) => {
-                      const optionDescription = selectorDescription(option, regions, wireguardExits, reverseVlessExits, locale);
+                      const optionDescription = selectorDescription(option, regions, wireguardExits, reverseVlessExits, locale, nodeGroups);
                       return <option key={option} value={option}>{optionDescription.title}{optionDescription.detail ? ` — ${optionDescription.detail}` : ""}</option>;
                     })}
                   </select>
@@ -2074,10 +2133,37 @@ function SubscriptionLocationPicker({
     <div className="subscription-picker-stack">
       <div className="subscription-location-heading">
         <div>
-          <strong>{tr("Группы, страны и города подписки")}</strong>
-          <small>{tr("Страны показаны полностью и по алфавиту. Названия городов, эмодзи и протоколы сохранены как в подписке.")}</small>
+          <strong>{nodeView === "geography" ? tr("Группы, страны и города подписки") : tr("Узлы как в подписке")}</strong>
+          <small>{nodeView === "geography"
+            ? tr("Страны показаны полностью и по алфавиту. Названия городов, эмодзи и протоколы сохранены как в подписке.")
+            : tr("Узлы показаны в порядке подписки. Переключение вида не меняет выбор и приоритеты.")}</small>
+        </div>
+        <div className="subscription-view-switch" role="group" aria-label={tr("Вид списка узлов")}>
+          <button type="button" aria-pressed={nodeView === "geography"} onClick={() => setNodeView("geography")}>{tr("По странам")}</button>
+          <button type="button" aria-pressed={nodeView === "subscription"} onClick={() => setNodeView("subscription")}>{tr("Как в подписке")}</button>
         </div>
       </div>
+      {nodeGroups.length ? (
+        <div className="subscription-user-groups" aria-label={tr("Пользовательские группы узлов")}>
+          {nodeGroups.map((group) => {
+            const id = asText(group.id, "");
+            const token = `group:${id}`;
+            const members = nodes.filter((node) => nodeMatchesUserGroup(group, node));
+            return (
+              <label key={id} className="subscription-user-group">
+                <input
+                  type="checkbox"
+                  checked={selectionOrder.includes(token)}
+                  onChange={() => commitSelectionOrder(selectionOrder.includes(token)
+                    ? selectionOrder.filter((item) => item !== token)
+                    : [...selectionOrder, token])}
+                />
+                <span><strong>{asText(group.name, id)}</strong><small>{members.length} {tr("узл. сейчас")}</small></span>
+              </label>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="subscription-location-tree">
         {reverseVlessExits.length ? (
           <div className="subscription-region policy-extra-exit-group">
@@ -2168,7 +2254,37 @@ function SubscriptionLocationPicker({
             ) : null}
           </div>
         ) : null}
-        {regions.map((region) => {
+        {nodeView === "subscription" ? subscriptionFeeds.map((feed) => (
+          <section className="subscription-feed" key={feed.id} aria-label={feed.name}>
+            <div className="subscription-feed-heading">
+              <strong>{feed.name}</strong>
+              <small>{feed.nodes.length} {tr("узл.")}</small>
+            </div>
+            <div className="subscription-feed-nodes">
+              {feed.nodes.map((node) => {
+                const key = asText(node.location_key, "");
+                const id = asText(node.id, key);
+                const country = countries.find((item) => item.locationKeys.includes(key));
+                const checked = Boolean(country && (selectedCountries.includes(country.code) || selectedLocations.includes(key)));
+                const label = asText(node.label, id);
+                return (
+                  <label className="subscription-feed-node" key={id}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!country || !key}
+                      onChange={() => { if (country && key) toggleLocation(country, key); }}
+                    />
+                    <span>
+                      <strong>{label}</strong>
+                      <small>{country ? `${countryFlag(country.code)} ${country.name}` : tr("Страна не определена")} · {protocolLabel(node.protocol)}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </section>
+        )) : regions.map((region) => {
         const expanded = visibleExpandedRegions.includes(region.id);
         const checked = region.countries.every(
           (country) => countryState(country).checked,
@@ -3356,6 +3472,7 @@ function DirectServicePackPicker({
   hiddenValues = [],
   onRemovePack,
   onRestoreHidden,
+  onGeoIPResolved,
 }: {
   defaultValues?: string[];
   selectedValues?: string[];
@@ -3369,10 +3486,15 @@ function DirectServicePackPicker({
   hiddenValues?: string[];
   onRemovePack?: (packId: string, custom: boolean) => void;
   onRestoreHidden?: () => void;
+  onGeoIPResolved?: (pack: JsonObject) => void;
 }) {
   const { tr } = useLanguage();
+  const [region, setRegion] = useState<"ru" | "cn" | "ir" | "other">("ru");
+  const [geoIPBusy, setGeoIPBusy] = useState(false);
+  const [geoIPError, setGeoIPError] = useState("");
   const controlled = selectedValues !== undefined;
   const selected = new Set(selectedValues ?? defaultValues);
+  const regionGeoIPId = region === "other" ? "" : `geoip-${region}`;
   const locked = new Set(lockedValues);
   const excluded = new Set(excludedValues);
   const hidden = new Set(hiddenValues);
@@ -3386,8 +3508,10 @@ function DirectServicePackPicker({
       .map((pack) => ({
         id: asText(pack.id, ""),
         name: asText(pack.name, asText(pack.id, "")),
-        category: tr("Добавленный сервис"),
-        description: tr("Домены, поддомены и CDN из доверенного каталога."),
+        category: asText(pack.id, "").startsWith("geoip-") ? "GeoIP · WAN/VLESS" : tr("Добавленный сервис"),
+        description: asText(pack.id, "").startsWith("geoip-")
+          ? tr("IP-диапазоны страны, загруженные для шлюза. Индивидуальные клиентские профили не поддерживаются.")
+          : tr("Домены, поддомены и CDN из доверенного каталога."),
         updateMode: "daily",
         broad: false,
       })),
@@ -3395,14 +3519,68 @@ function DirectServicePackPicker({
   const activeOptionCount = options.filter(
     (pack) => selected.has(pack.id) || locked.has(pack.id),
   ).length;
+  const visibleOptions = options.filter((pack) => {
+    if (pack.id === regionGeoIPId) return false;
+    const scopedRegion = pack.id === "yandex" || pack.id === "mailru-group"
+      ? "ru"
+      : pack.id.startsWith("ru-") ? "ru"
+      : pack.id.startsWith("cn-") ? "cn"
+      : pack.id.startsWith("ir-") ? "ir"
+      : pack.id === "geoip-ru" ? "ru"
+      : pack.id === "geoip-cn" ? "cn"
+      : pack.id === "geoip-ir" ? "ir"
+      : "common";
+    return scopedRegion === "common" || scopedRegion === region;
+  });
+  async function toggleRegionGeoIP(checked: boolean): Promise<void> {
+    if (!regionGeoIPId || !onSelectedValuesChange) return;
+    setGeoIPError("");
+    if (!checked) {
+      onSelectedValuesChange([...selected].filter((id) => id !== regionGeoIPId));
+      return;
+    }
+    if (customIds.has(regionGeoIPId)) {
+      onSelectedValuesChange([...selected, regionGeoIPId]);
+      return;
+    }
+    if (!onGeoIPResolved) return;
+    setGeoIPBusy(true);
+    try {
+      const result = await resolveServicePack<JsonObject>(`geoip:${region}`);
+      const pack = asObject(result.pack);
+      if (asText(pack.id, "") !== regionGeoIPId) throw new Error(tr("Каталог не вернул сервисный пакет."));
+      onGeoIPResolved(pack);
+    } catch (error) {
+      setGeoIPError(errorMessage(error));
+    } finally {
+      setGeoIPBusy(false);
+    }
+  }
   return (
     <fieldset className="field form-span service-pack-field">
       <legend className="service-pack-legend">
         <span>{legend}</span>
         <small>{activeOptionCount}  {tr("из")} {options.length}  {tr("активно")}</small>
       </legend>
+      <div className="service-pack-regions" role="group" aria-label={tr("Регион каталога")}>
+        {(["ru", "cn", "ir", "other"] as const).map((value) => (
+          <button key={value} type="button" aria-pressed={region === value} disabled={geoIPBusy}
+            className={`service-pack-region${region === value ? " is-active" : ""}`}
+            onClick={() => { setRegion(value); setGeoIPError(""); }}>{value === "other" ? "Other" : value.toUpperCase()}</button>
+        ))}
+        {regionGeoIPId && onGeoIPResolved ? (
+          <label className="service-pack-geoip">
+            <input type="checkbox" checked={selected.has(regionGeoIPId)} disabled={geoIPBusy}
+              onChange={(event) => void toggleRegionGeoIP(event.target.checked)} />
+            <span>{geoIPBusy ? tr("Загружаю GeoIP…") : `GeoIP ${region.toUpperCase()}`}</span>
+          </label>
+        ) : null}
+        <small>{tr("Общие карточки видны во всех режимах. Выбор скрытых карточек сохраняется.")}</small>
+      </div>
+      {regionGeoIPId && onGeoIPResolved ? <small className="service-pack-geoip-note">{tr("GeoIP направляет IP-диапазоны страны только на шлюзе; индивидуальные клиентские профили не поддерживаются.")}</small> : null}
+      {geoIPError ? <small className="service-pack-geoip-error" role="alert">{geoIPError}</small> : null}
       <div className="service-pack-grid">
-        {options.map((pack) => (
+        {visibleOptions.map((pack) => (
           <div className="service-pack-option-shell" key={`${pack.id}-${locked.has(pack.id) ? "locked" : "editable"}`}>
             <label className="service-pack-option">
               <input
@@ -3522,8 +3700,9 @@ function CatalogServiceAdder({
       );
       onResolved(pack);
       setValue("");
-      setMessage(
-        tr("{value1} {value2}: правил — {value3}. Домены, поддомены, IP-диапазоны и CDN из пакета будут применены автоматически{value4}.", { value1: asText(pack.name, raw), value2: alreadyConfigured ? tr("уже загружен и выбран") : tr("выбран"), value3: asText(result.rules, tr("готово")), value4: destinationLabel ? ` через ${destinationLabel}` : "" }),
+      setMessage(asText(pack.id, "").startsWith("geoip-")
+        ? tr("{value1}: проверенный список IP выбран для шлюза. Индивидуальные клиентские профили GeoIP не экспортируют.", { value1: asText(pack.name, raw) })
+        : tr("{value1} {value2}: правил — {value3}. Домены, поддомены, IP-диапазоны и CDN из пакета будут применены автоматически{value4}.", { value1: asText(pack.name, raw), value2: alreadyConfigured ? tr("уже загружен и выбран") : tr("выбран"), value3: asText(result.rules, tr("готово")), value4: destinationLabel ? ` через ${destinationLabel}` : "" }),
       );
     } catch (error) {
       setMessage(errorMessage(error));
@@ -3534,12 +3713,12 @@ function CatalogServiceAdder({
 
   return (
     <div className="field form-span custom-service-pack">
-      <span>{tr("Добавить сервис вручную из доверенного каталога")}</span>
+      <span>{tr("Добавить сервис, GeoSite или GeoIP из доверенного каталога")}</span>
       <div className="custom-service-pack-row">
         <input
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          placeholder={tr("Например: avito или avito.ru")}
+          placeholder={tr("Например: avito.ru, geosite:baidu, geoip:cn")}
           aria-label={tr("Сервис или домен для поиска в доверенном каталоге")}
         />
         <button
@@ -4663,6 +4842,14 @@ function Routing({
         const nodeStats = candidateIds
           .map((candidate) => {
             const stats = asObject(dailyStats[candidate]);
+            const outage = asObject(asObject(health.outage_penalty)[candidate]);
+            const unstable = confirmedUnstableRoute(
+              outage.open === true,
+              asObject(health.availability_ok)[candidate] as boolean | undefined,
+              Number(stats.samples ?? 0),
+              typeof stats.loss_percent === "number" ? stats.loss_percent : null,
+              Number(asObject(health.quality_thresholds).max_packet_loss_percent ?? 40),
+            );
             return {
               id: candidate,
               provider: candidateProvider(candidate),
@@ -4675,6 +4862,7 @@ function Routing({
               inRuntimePool: asStringList(health.shortlist).includes(candidate),
               available: asObject(health.availability_ok)[candidate] === true,
               quality: asObject(health.quality_ok)[candidate] === true,
+              unstable,
               availabilityKnown: typeof asObject(health.availability_ok)[candidate] === "boolean",
               samples: Number(stats.samples ?? 0),
               loss: typeof stats.loss_percent === "number" ? stats.loss_percent : null,
@@ -4731,7 +4919,7 @@ function Routing({
             ? `reverse:${outbound.slice("reverse-vless-".length)}`
             : outbound.startsWith("wg-egress-") ? `wireguard:${outbound.slice("wg-egress-".length)}` : outbound),
         ];
-        const chosenIds = orderedCandidateNodeIds(displayOrder, routingNodes, configuredWireguardExits, configuredReverseVlessExits);
+        const chosenIds = orderedCandidateNodeIds(displayOrder, routingNodes, configuredWireguardExits, configuredReverseVlessExits, asObjectList(policy.node_groups));
         const chosenCandidateIds = chosenIds.map((nodeId) => nodeId
           .replace(/^reverse:/, "reverse-vless-")
           .replace(/^wireguard:/, "wg-egress-"));
@@ -4764,7 +4952,7 @@ function Routing({
             ? !routingNodesLoaded
               ? [tr("Проверяю выбранные узлы…")]
               : selectionOrder.map(
-                  (token) => selectorDescription(token, routingRegions, configuredWireguardExits, configuredReverseVlessExits, locale).title,
+                  (token) => selectorDescription(token, routingRegions, configuredWireguardExits, configuredReverseVlessExits, locale, asObjectList(policy.node_groups)).title,
                 )
             : cities.length
             ? cities
@@ -5079,8 +5267,8 @@ function Routing({
                       </td>
                       <td className="quality-inline-value">
                         <span className="quality-availability-value">
-                          <strong>{node.availability == null ? tr("Нет замера") : `${node.availability.toFixed(1)}%`}</strong>
-                          {node.loss == null ? null : <small>({node.loss.toFixed(1)}{tr("% потерь)")}</small>}
+                          <strong>{node.unstable ? tr("Нестабилен") : node.availability == null ? tr("Нет замера") : `${node.availability.toFixed(1)}%`}</strong>
+                          {node.unstable ? <small>{tr("Срыв маршрута")}</small> : node.loss == null ? null : <small>({node.loss.toFixed(1)}{tr("% потерь)")}</small>}
                         </span>
                       </td>
                       <td><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong></td>
@@ -11803,6 +11991,119 @@ function AddDialog({
   );
 }
 
+function SubscriptionNodeGroupEditor({
+  groups, originalGroups, nodes, subscriptions, onChange,
+}: {
+  groups: JsonObject[];
+  originalGroups: JsonObject[];
+  nodes: JsonObject[];
+  subscriptions: JsonObject[];
+  onChange: (groups: JsonObject[]) => void;
+}) {
+  const { tr } = useLanguage();
+  const [newName, setNewName] = useState("");
+  const [newSubscription, setNewSubscription] = useState("");
+  function update(id: string, field: string, value: unknown) {
+    onChange(groups.map((group) => asText(group.id, "") === id ? { ...group, [field]: value } : group));
+  }
+  function memberIDs(group: JsonObject): string[] {
+    return nodes.filter((node) => nodeMatchesUserGroup(group, node)).map((node) => asText(node.id, "")).filter(Boolean);
+  }
+  return (
+    <section className="subscription-node-group-editor" aria-label={tr("Группы по правилам")}>
+      <div className="subscription-location-heading">
+        <div><strong>{tr("Группы по правилам")}</strong><small>{tr("Состав обновляется по условиям после загрузки подписки. Смена названия узла не влияет на выбор по подписке, стране и протоколу.")}</small></div>
+      </div>
+      {groups.map((group) => {
+        const id = asText(group.id, "");
+        const old = originalGroups.find((item) => asText(item.id, "") === id);
+        const before = new Set(old ? memberIDs(old) : []);
+        const after = new Set(memberIDs(group));
+        const added = [...after].filter((item) => !before.has(item));
+        const removed = [...before].filter((item) => !after.has(item));
+        const invalidCountry = asStringList(group.countries).some((value) => !/^[A-Z]{2}$/.test(value));
+        const invalidExcludedWord = asText(group.name_excludes, "").split(",").some((value) => value.trim() !== "" && !/^[\p{L}\p{N}]+$/u.test(value.trim()));
+        return (
+          <div className="subscription-node-group-definition" key={id}>
+            <div className="subscription-node-group-title">
+              <label className="field">{tr("Название группы")}<input value={asText(group.name, "")} maxLength={128} onChange={(event) => update(id, "name", event.target.value)} /></label>
+              <button type="button" className="button button-ghost" onClick={() => onChange(groups.filter((item) => asText(item.id, "") !== id))}>{tr("Удалить")}</button>
+            </div>
+            <div className="subscription-node-group-filters">
+              <label className="field">{tr("Подписки")}<select value={asStringList(group.subscription_ids)[0] ?? ""} onChange={(event) => update(id, "subscription_ids", event.target.value ? [event.target.value] : [])}>
+                <option value="">{tr("Любой источник (старое правило)")}</option>
+                <option value="*">{tr("Все подписки")}</option>
+                {subscriptions.map((item) => <option key={asText(item.id, "")} value={asText(item.id, "")}>{asText(item.display_name, asText(item.id, ""))}</option>)}
+              </select></label>
+              <label className="field">{tr("Страны ISO, через запятую")}<input value={asStringList(group.countries).join(", ")} placeholder="CA, DE" aria-invalid={invalidCountry} onChange={(event) => update(id, "countries", event.target.value.toUpperCase().split(/[\s,]+/).filter(Boolean))} />{invalidCountry ? <small className="field-error">{tr("Для эмодзи используйте поле имени узла.")}</small> : null}</label>
+              <label className="field">{tr("Протоколы, через запятую")}<input value={asStringList(group.protocols).join(", ")} placeholder="vless, hysteria2" onChange={(event) => update(id, "protocols", event.target.value.toLowerCase().split(/[\s,]+/).filter(Boolean))} /></label>
+              <label className="field">{tr("Имя или эмодзи узла (через запятую)")}<input value={asText(group.name_contains, "")} maxLength={128} placeholder={tr("Например: premium")} onChange={(event) => update(id, "name_contains", event.target.value)} /><small>{tr("Все указанные части должны быть в названии узла.")}</small></label>
+              <label className="field">{tr("Исключить слова из имени (через запятую)")}<input value={asText(group.name_excludes, "")} maxLength={128} placeholder={tr("Например: тест, резерв")} aria-invalid={invalidExcludedWord} onChange={(event) => update(id, "name_excludes", event.target.value)} /><small className={invalidExcludedWord ? "field-error" : undefined}>{invalidExcludedWord ? tr("Введите отдельные слова через запятую, без пробелов внутри слова.") : tr("Исключается только целое слово, без учёта регистра.")}</small></label>
+            </div>
+            <div className="subscription-node-group-preview" role="status">
+              {tr("Сейчас совпадает: {count}; добавится: {added}; исчезнет: {removed}", { count: after.size, added: added.length, removed: removed.length })}
+              {added.length || removed.length ? <small>{[...added.map((item) => `+ ${item}`), ...removed.map((item) => `− ${item}`)].slice(0, 8).join(" · ")}</small> : null}
+            </div>
+          </div>
+        );
+      })}
+      <div className="subscription-node-group-add">
+        <label className="field">{tr("Новая группа")}<input value={newName} onChange={(event) => setNewName(event.target.value)} maxLength={128} placeholder={tr("Например: основной маршрут")} /></label>
+        <label className="field">{tr("Подписка")}<select value={newSubscription} onChange={(event) => setNewSubscription(event.target.value)}><option value="">{tr("Выберите подписку")}</option><option value="*">{tr("Все подписки")}</option>{subscriptions.map((item) => <option key={asText(item.id, "")} value={asText(item.id, "")}>{asText(item.display_name, asText(item.id, ""))}</option>)}</select></label>
+        <button type="button" className="button button-secondary" disabled={!newName.trim() || !newSubscription || groups.length >= 32} onClick={() => {
+          const id = entityIdFromName(newName, new Set(groups.map((group) => asText(group.id, ""))), "group");
+          onChange([...groups, { id, name: newName.trim(), subscription_ids: [newSubscription], countries: [], protocols: [], name_contains: "", name_excludes: "" }]);
+          setNewName("");
+          setNewSubscription("");
+        }}>{tr("Добавить группу")}</button>
+      </div>
+    </section>
+  );
+}
+
+function CustomRouteEditor({ rules, onChange }: { rules: JsonObject[]; onChange: (rules: JsonObject[]) => void }) {
+  const { tr } = useLanguage();
+  function update(index: number, field: string, value: string) {
+    onChange(rules.map((rule, at) => at === index ? { ...rule, [field]: value } : rule));
+  }
+  return (
+    <section className="custom-route-editor form-span" aria-label={tr("Свои правила маршрутизации")}>
+      <div className="subscription-location-heading">
+        <div><strong>{tr("Свои правила маршрутизации")}</strong><small>{tr("Первое совпавшее правило направит трафик в выбранный путь. Эти правила выше карточек и действуют независимо от основного режима.")}</small></div>
+      </div>
+      {rules.map((rule, index) => <div className={`custom-route-row${rule.kind === "port" ? " custom-route-row-port" : ""}`} key={index}>
+        <span className="custom-route-position">{index + 1}</span>
+        <label className="field">{tr("Тип")}
+          <select value={asText(rule.kind, "domain")} onChange={(event) => onChange(rules.map((item, at) => at === index ? { ...item, kind: event.target.value, value: "" } : item))}>
+            <option value="domain">{tr("Домен и поддомены")}</option>
+            <option value="ip">IP / CIDR</option>
+            <option value="port">TCP / UDP {tr("порт")}</option>
+          </select>
+        </label>
+        <label className="field custom-route-value">{tr("Значение")}
+          <input value={asText(rule.value, "")} onChange={(event) => update(index, "value", event.target.value)} placeholder={asText(rule.kind, "domain") === "ip" ? "203.0.113.0/24" : asText(rule.kind, "domain") === "port" ? "443 или 1000-2000" : "example.com"} />
+        </label>
+        {rule.kind === "port" ? <label className="field">{tr("Сеть")}
+          <select value={asText(rule.network, "tcp")} onChange={(event) => update(index, "network", event.target.value)}><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+        </label> : null}
+        <label className="field">{tr("Направить")}
+          <select value={asText(rule.target, "wan")} onChange={(event) => update(index, "target", event.target.value)}><option value="wan">WAN</option><option value="vless">VLESS</option></select>
+        </label>
+        <button type="button" className="button button-ghost custom-route-remove" title={tr("Удалить правило {number}", { number: index + 1 })} aria-label={tr("Удалить правило {number}", { number: index + 1 })} onClick={() => onChange(rules.filter((_, at) => at !== index))}>×</button>
+        {(rule.kind === "domain" || rule.kind === "ip") ? <div className="custom-route-protocol-filter" role="group" aria-label={tr("Протоколы (необязательно)")}>
+          <span>{tr("Протоколы (необязательно)")}</span>
+          <div className="custom-route-protocol-options">{["http", "tls", "quic"].map((protocol) => <label key={protocol}><input type="checkbox" checked={asText(rule.protocols, "").split(",").includes(protocol)} onChange={(event) => {
+            const selected = asText(rule.protocols, "").split(",").filter(Boolean);
+            update(index, "protocols", (event.target.checked ? [...selected, protocol] : selected.filter((item) => item !== protocol)).join(","));
+          }} />{protocol}</label>)}</div>
+        </div> : null}
+      </div>)}
+      <button type="button" className="button button-secondary" disabled={rules.length >= 128} onClick={() => onChange([...rules, { kind: "domain", value: "", target: "wan", network: "tcp" }])}>{tr("Добавить правило")}</button>
+      {rules.length ? <p className="custom-route-preview" role="status">{tr("Перед применением: {count} правил; порядок сверху вниз. IP- и портовые правила не перехватывают все DNS-запросы.", { count: rules.length })}</p> : null}
+    </section>
+  );
+}
+
 function PolicyDialog({
   policyId,
   onClose,
@@ -11851,6 +12152,12 @@ function PolicyDialog({
   );
   const [selectionOrder, setSelectionOrder] = useState<string[]>(
     () => initialSelectionOrderKey.split("\n").filter(Boolean),
+  );
+  const [nodeGroups, setNodeGroups] = useState<JsonObject[]>(
+    () => asObjectList(existingPolicy.node_groups),
+  );
+  const [customRoutes, setCustomRoutes] = useState<JsonObject[]>(
+    () => asObjectList(existingPolicy.custom_routes),
   );
   const [candidateLimit, setCandidateLimit] = useState(() => {
     const saved = Number(existingPolicy.max_active_candidates);
@@ -12024,7 +12331,8 @@ function PolicyDialog({
         !selectedCountries.length &&
         !selectedLocations.length &&
         !selectedWireguardExits.length &&
-        !selectedReverseVlessExits.length
+        !selectedReverseVlessExits.length &&
+        !selectionOrder.some((token) => token.startsWith("group:") && nodeGroups.some((group) => `group:${asText(group.id, "")}` === token))
       ) {
         throw new Error(tr("Выберите хотя бы одну группу, страну, город или WireGuard-выход."));
       }
@@ -12073,6 +12381,8 @@ function PolicyDialog({
         countries: selectedCountries,
         locations: selectedLocations,
         selection_order: selectionOrder,
+        node_groups: nodeGroups,
+        custom_routes: customRoutes,
         candidate_service_ids: mode === "priority" ? candidateServiceIds : [],
         candidate_service_access: mode === "priority"
           ? Object.fromEntries(
@@ -12242,6 +12552,13 @@ function PolicyDialog({
                 </div>
               </fieldset>
               <section className="subscription-location-picker form-span">
+                <SubscriptionNodeGroupEditor
+                  groups={nodeGroups}
+                  originalGroups={asObjectList(existingPolicy.node_groups)}
+                  nodes={subscriptionNodes}
+                  subscriptions={asObjectList(config.subscriptions).filter((item) => item.enabled !== false)}
+                  onChange={setNodeGroups}
+                />
                 {nodesBusy ? (
                   <div className="subscription-discovery-empty">{tr("Загружаю расположения из подписок…")}</div>
                 ) : nodesError ? (
@@ -12249,6 +12566,7 @@ function PolicyDialog({
                 ) : (
                   <SubscriptionLocationPicker
                     nodes={subscriptionNodes}
+                    nodeGroups={nodeGroups}
                     wireguardExits={wireguardExits}
                     reverseVlessExits={reverseVlessExits}
                     mode={mode}
@@ -12277,6 +12595,7 @@ function PolicyDialog({
                   />
                 )}
               </section>
+              <CustomRouteEditor rules={customRoutes} onChange={setCustomRoutes} />
               <DirectServicePackPicker
                 selectedValues={selectedExceptionServices}
                 onSelectedValuesChange={setExceptionServices}
@@ -12292,6 +12611,13 @@ function PolicyDialog({
                 hiddenValues={hiddenServicePacks}
                 onRemovePack={removeServicePack}
                 onRestoreHidden={() => setHiddenServicePacks([])}
+                onGeoIPResolved={(pack) => {
+                  const id = asText(pack.id, "");
+                  setCustomPacks((current) => current.some((item) => asText(item.id, "") === id)
+                    ? current
+                    : [...current, pack]);
+                  setExceptionServices((current) => current.includes(id) ? current : [...current, id]);
+                }}
                 description={trafficMode === "vless_with_wan_exceptions"
                   ? tr("Карточки применяются ко всем устройствам маршрутного листа и отправляются через обычный WAN.")
                   : tr("Карточки применяются ко всем устройствам, подключённым к этому маршрутному листу.")}
