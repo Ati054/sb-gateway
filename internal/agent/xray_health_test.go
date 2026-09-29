@@ -481,6 +481,56 @@ func TestXrayCurrentDecodesCandidateRemovedFromLatestContract(t *testing.T) {
 	}
 }
 
+func TestXrayCurrentRefreshesSelectedOutboundGenerationAfterApply(t *testing.T) {
+	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
+	prefix := "sb-urltest-europe-"
+	runtime.pool = healthPool{
+		Policies:       map[string][]string{"europe": {"de"}},
+		HealthPolicies: map[string]healthPolicyContract{"europe": {Candidates: []string{"de"}}},
+		PolicyPrefixes: map[string]string{"europe": prefix},
+		Outbounds:      map[string]json.RawMessage{"de": json.RawMessage(`{"protocol":"freedom","tag":"old"}`)},
+	}
+	oldTag := runtime.dynamicTag(prefix, "de")
+	runtime.pool.Outbounds["de"] = json.RawMessage(`{"protocol":"freedom","tag":"new"}`)
+	newTag := runtime.dynamicTag(prefix, "de")
+	if oldTag == newTag {
+		t.Fatal("test outbound generations have identical tags")
+	}
+	runtime.activeByNode["de"] = oldTag
+	runtime.activeByPolicy["europe"] = oldTag
+	runtime.loadedDynamic[oldTag] = true
+	selected, installed := oldTag, false
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "bi":
+			return selectorInfo(selected), nil
+		case "lso":
+			if installed {
+				return outboundTagsJSON(oldTag, newTag), nil
+			}
+			return outboundTagsJSON(oldTag), nil
+		case "ado":
+			installed = true
+			return nil, nil
+		case "bo":
+			if !installed {
+				t.Fatal("selector moved before replacement handler was installed")
+			}
+			selected = newTag
+			return nil, nil
+		case "rmo":
+			t.Fatal("old handler was removed while existing streams may still use it")
+		}
+		t.Fatalf("unexpected Xray command: %v", args)
+		return nil, nil
+	}
+	got, err := runtime.Current("europe")
+	if err != nil || got != "de" || selected != newTag || runtime.activeByPolicy["europe"] != newTag ||
+		!contains(runtime.retiredByPolicy["europe"], oldTag) {
+		t.Fatalf("generation did not move safely: got=%q selected=%q retired=%v err=%v", got, selected, runtime.retiredByPolicy["europe"], err)
+	}
+}
+
 func TestXrayCurrentRestoresMissingSelectedOutboundBeforeConfirming(t *testing.T) {
 	runtime := newXraySelectorRuntime(Options{XrayBinary: "xray", XrayAPIServer: "127.0.0.1:10085"})
 	prefix := "sb-urltest-europe-"

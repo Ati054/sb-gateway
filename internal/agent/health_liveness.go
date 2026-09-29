@@ -56,6 +56,7 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	controller.livenessAt[policyID] = now
 	wasFailed := item.AvailabilityFailures[selected] > 0
 	if evidence.OK {
+		finishOutageEpisode(item, selected)
 		if wasFailed {
 			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-recovered", Policy: policyID, Node: selected, Targets: probeTargetResults(evidence)})
 		}

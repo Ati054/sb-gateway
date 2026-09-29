@@ -51,7 +51,23 @@ func TestCandidateStorePublishesRollsBackAndKeepsOneCandidate(t *testing.T) {
 	}
 	assertFileBody(t, destinations["policy-dns.json"], "new-dns\n")
 	assertFileBody(t, destinations["xray.json"], "new-xray\n")
-	if err := store.Rollback(receipt); err != nil {
+	prepareErr := errors.New("rollback scope was not captured")
+	if err := store.RollbackAfter(receipt, func(restoring map[string]string) error {
+		assertFileBody(t, destinations["xray.json"], "new-xray\n")
+		assertFileBody(t, restoring["xray.json"], "old-xray\n")
+		if path, exists := restoring["policy-dns.json"]; !exists || path != "" {
+			t.Fatalf("previously absent artifact = %q, exists=%t", path, exists)
+		}
+		return prepareErr
+	}); !errors.Is(err, prepareErr) {
+		t.Fatalf("rollback ignored preparation error: %v", err)
+	}
+	assertFileBody(t, destinations["xray.json"], "new-xray\n")
+	if err := store.RollbackAfter(receipt, func(restoring map[string]string) error {
+		assertFileBody(t, destinations["xray.json"], "new-xray\n")
+		assertFileBody(t, restoring["xray.json"], "old-xray\n")
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(destinations["policy-dns.json"]); !os.IsNotExist(err) {

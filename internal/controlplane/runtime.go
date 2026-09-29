@@ -177,11 +177,49 @@ func (runtime *nativeRuntime) nginxRenderOptions(template string) runtimeconfig.
 }
 
 func (runtime *nativeRuntime) activate(ctx context.Context, candidate runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, error) {
+	return runtime.activateWithXrayRestartHook(ctx, candidate, nil)
+}
+
+func (runtime *nativeRuntime) activateWithXrayRestartHook(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart func(context.Context) error) (runtimeconfig.ActivationReceipt, error) {
+	return runtime.activateWithHooks(ctx, candidate, beforeXrayRestart, nil)
+}
+
+const hotPolicyActivationTimeout = 90 * time.Second
+
+func hotPolicyChange(changed []string) bool {
+	return len(changed) == 1 && changed[0] == "urltest-pool.json"
+}
+
+func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart, beforeHotPolicy func(context.Context) error) (runtimeconfig.ActivationReceipt, error) {
+	var policyScope hotRuntimeScope
 	receipt, err := runtime.store.ActivateAfter(candidate, func(changed []string) error {
-		return runtime.validate(ctx, candidate, changed)
+		if err := runtime.validate(ctx, candidate, changed); err != nil {
+			return err
+		}
+		// This proof is made under the store's publication lock. Only policy
+		// eligibility changed: Xray, listeners, DNS and routing stay untouched.
+		if hotPolicyChange(changed) {
+			var scopeErr error
+			policyScope, scopeErr = hotPolicyScope(runtime.options.XrayHealthPool, candidate.Files["urltest-pool.json"])
+			if scopeErr != nil {
+				return scopeErr
+			}
+			if beforeHotPolicy != nil {
+				return beforeHotPolicy(ctx)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return runtimeconfig.ActivationReceipt{}, err
+	}
+	if hotPolicyChange(receipt.Changed()) {
+		readyContext, cancelReady := context.WithTimeout(ctx, hotPolicyActivationTimeout)
+		defer cancelReady()
+		if err := runtime.waitHotRuntime(readyContext, runtime.options.XrayHealthPool, policyScope); err != nil {
+			return receipt, fmt.Errorf("activate policy selector generation without restart: %w", err)
+		}
+		return receipt, nil
 	}
 	programs := runtime.restartOrder(receipt.Changed())
 	if len(programs) == 0 {
@@ -197,6 +235,11 @@ func (runtime *nativeRuntime) activate(ctx context.Context, candidate runtimecon
 		return receipt, fmt.Errorf("create watchdog apply guard: %w", err)
 	}
 	defer releaseGuard()
+	if containsRuntimeArtifact(receipt.Changed(), "xray.json") && beforeXrayRestart != nil {
+		if err := beforeXrayRestart(ctx); err != nil {
+			return receipt, fmt.Errorf("prepare planned Xray restart on RouterOS: %w", err)
+		}
+	}
 	if err := runtime.controller.Restart(ctx, programs); err != nil {
 		return receipt, fmt.Errorf("restart runtime: %w", err)
 	}
@@ -212,8 +255,17 @@ func (runtime *nativeRuntime) activate(ctx context.Context, candidate runtimecon
 // restarting the shared Xray process. The health worker adds versioned outbound
 // handlers first and confirms every selector against the new pool generation.
 func (runtime *nativeRuntime) activateSubscription(ctx context.Context, candidate runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, error) {
+	var policyScope hotRuntimeScope
 	receipt, err := runtime.store.ActivateAfter(candidate, func(changed []string) error {
-		return runtime.validate(ctx, candidate, changed)
+		if err := runtime.validate(ctx, candidate, changed); err != nil {
+			return err
+		}
+		if containsRuntimeArtifact(changed, "urltest-pool.json") {
+			var err error
+			policyScope, err = hotPolicyScope(runtime.options.XrayHealthPool, candidate.Files["urltest-pool.json"])
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return runtimeconfig.ActivationReceipt{}, err
@@ -228,7 +280,7 @@ func (runtime *nativeRuntime) activateSubscription(ctx context.Context, candidat
 	if err := runtime.restartChangedWithoutXray(ctx, changed); err != nil {
 		return receipt, err
 	}
-	if err := runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool); err != nil {
+	if err := runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope); err != nil {
 		return receipt, fmt.Errorf("activate Xray subscription generation without restart: %w", err)
 	}
 	return receipt, nil
@@ -259,22 +311,39 @@ func (runtime *nativeRuntime) restartChangedWithoutXray(ctx context.Context, cha
 }
 
 func (runtime *nativeRuntime) rollbackSubscription(ctx context.Context, receipt runtimeconfig.ActivationReceipt) error {
-	if err := runtime.store.Rollback(receipt); err != nil {
+	policyScope, err := runtime.restoreHotPolicyScope(receipt)
+	if err != nil {
 		return err
 	}
 	if err := runtime.restartChangedWithoutXray(ctx, receipt.Changed()); err != nil {
 		return err
 	}
 	if containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json") {
-		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool)
+		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
 	}
 	return nil
 }
 
-func (runtime *nativeRuntime) waitHotRuntime(ctx context.Context, poolPath string) error {
+func (runtime *nativeRuntime) restoreHotPolicyScope(receipt runtimeconfig.ActivationReceipt) (hotRuntimeScope, error) {
+	var policyScope hotRuntimeScope
+	err := runtime.store.RollbackAfter(receipt, func(restoring map[string]string) error {
+		if path := restoring["urltest-pool.json"]; path != "" {
+			var err error
+			policyScope, err = hotPolicyScope(runtime.options.XrayHealthPool, path)
+			return err
+		}
+		return nil
+	})
+	return policyScope, err
+}
+
+func (runtime *nativeRuntime) waitHotRuntime(ctx context.Context, poolPath string, policyScope hotRuntimeScope) error {
 	expected, expectedMTime, err := hashFileGeneration(poolPath)
 	if err != nil {
 		return err
+	}
+	if policyScope.PoolSHA256 != "" && policyScope.PoolSHA256 != expected {
+		return errors.New("published hot pool no longer matches its activation scope")
 	}
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -282,14 +351,20 @@ func (runtime *nativeRuntime) waitHotRuntime(ctx context.Context, poolPath strin
 		body, readErr := os.ReadFile(runtime.options.XrayHotRuntimeReadyFile)
 		if readErr == nil {
 			var marker struct {
-				PoolSHA256        string `json:"pool_sha256"`
-				PoolMTimeUnixNano int64  `json:"pool_mtime_unix_nano"`
-				XrayPID           int    `json:"xray_pid"`
+				PoolSHA256        string            `json:"pool_sha256"`
+				PoolMTimeUnixNano int64             `json:"pool_mtime_unix_nano"`
+				XrayPID           int               `json:"xray_pid"`
+				PolicySelections  map[string]string `json:"policy_selections"`
 			}
 			if json.Unmarshal(body, &marker) == nil && marker.PoolSHA256 == expected &&
-				marker.PoolMTimeUnixNano == expectedMTime && marker.XrayPID > 0 {
+				marker.PoolMTimeUnixNano == expectedMTime && marker.XrayPID > 0 &&
+				hotPolicyScopeReady(policyScope.RequiredPolicies, marker.PolicySelections) {
 				ready, readyErr := os.ReadFile(runtime.options.XrayReadyFile)
 				if readyErr == nil && strings.TrimSpace(string(ready)) == strconv.Itoa(marker.XrayPID) {
+					current, statErr := os.Stat(poolPath)
+					if statErr != nil || current.ModTime().UnixNano() != expectedMTime {
+						return errors.New("hot pool generation changed while awaiting selectors")
+					}
 					return nil
 				}
 			}
@@ -318,8 +393,18 @@ func hashFileGeneration(path string) (string, int64, error) {
 }
 
 func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfig.ActivationReceipt) error {
-	if err := runtime.store.Rollback(receipt); err != nil {
+	var policyScope hotRuntimeScope
+	var err error
+	if hotPolicyChange(receipt.Changed()) {
+		policyScope, err = runtime.restoreHotPolicyScope(receipt)
+	} else {
+		err = runtime.store.Rollback(receipt)
+	}
+	if err != nil {
 		return err
+	}
+	if hotPolicyChange(receipt.Changed()) {
+		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
 	}
 	programs := runtime.restartOrder(receipt.Changed())
 	if len(programs) == 0 {

@@ -2,12 +2,9 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"sort"
@@ -150,6 +147,7 @@ type policyHealthState struct {
 	OptimizationRetryAfter float64                           `json:"optimization_retry_after,omitempty"`
 	OptimizationIncomplete int                               `json:"optimization_incomplete,omitempty"`
 	OptimizationBackoff    map[string]float64                `json:"optimization_backoff,omitempty"`
+	OutagePenalty          map[string]outagePenalty          `json:"outage_penalty,omitempty"`
 	OptimizationLastResult *optimizationComparison           `json:"optimization_last_result,omitempty"`
 	OptimizationActiveAt   float64                           `json:"optimization_active_at,omitempty"`
 	OptimizationActiveMS   *int                              `json:"optimization_active_ms,omitempty"`
@@ -268,18 +266,21 @@ type selectorRuntime interface {
 }
 
 type healthController struct {
-	priorityPolicy string
-	opts           Options
-	runtime        selectorRuntime
-	warmStarted    map[string]bool
-	state          healthState
-	stateLoaded    bool
-	regularNext    map[string]time.Time
-	livenessAt     map[string]time.Time
-	forceLiveness  map[string]bool
-	lastSignalAt   map[string]time.Time
-	yielded        bool
-	eventSink      func(healthEvent)
+	priorityPolicy      string
+	opts                Options
+	runtime             selectorRuntime
+	warmStarted         map[string]bool
+	state               healthState
+	stateLoaded         bool
+	regularNext         map[string]time.Time
+	livenessAt          map[string]time.Time
+	forceLiveness       map[string]bool
+	lastSignalAt        map[string]time.Time
+	yielded             bool
+	transitions         map[string]*policyTransition
+	processedPool       healthPool
+	processedGeneration hotRuntimeGeneration
+	eventSink           func(healthEvent)
 }
 
 func runHealth(ctx context.Context, opts Options) error {
@@ -326,7 +327,7 @@ func runHealth(ctx context.Context, opts Options) error {
 				continue
 			}
 			log.Printf("agent: selector health probe failed safely; keeping previous selector: %v", err)
-		} else if err := publishHotRuntimeReady(opts); err != nil {
+		} else if err := controller.publishHotRuntimeReady(); err != nil {
 			log.Printf("agent: publish hot runtime readiness: %v", err)
 		}
 		if !waitForHealthWake(ctx, controller.nextInterval(), []string{opts.HealthPoolFile, opts.XrayReadyFile}, 500*time.Millisecond, signals,
@@ -338,32 +339,14 @@ func runHealth(ctx context.Context, opts Options) error {
 	}
 }
 
-func publishHotRuntimeReady(opts Options) error {
-	file, err := os.Open(opts.HealthPoolFile)
-	if err != nil {
-		return err
-	}
-	info, statErr := file.Stat()
-	digest := sha256.New()
-	_, copyErr := io.Copy(digest, io.LimitReader(file, (32<<20)+1))
-	closeErr := file.Close()
-	if err := errors.Join(statErr, copyErr, closeErr); err != nil {
-		return err
-	}
-	pid := readyProcessPID(opts.XrayReadyFile, "xray")
-	if pid <= 0 {
-		return errors.New("Xray startup selectors are not ready")
-	}
-	return writeJSONAtomic(opts.HotRuntimeReadyFile, map[string]any{
-		"pool_sha256": hex.EncodeToString(digest.Sum(nil)), "pool_mtime_unix_nano": info.ModTime().UnixNano(), "xray_pid": pid,
-	})
-}
-
 func (controller *healthController) nextInterval() time.Duration {
 	if controller.yielded {
 		return 0
 	}
 	interval := controller.opts.HealthInterval
+	if len(controller.transitions) > 0 && (interval <= 0 || interval > time.Second) {
+		interval = time.Second
+	}
 	for _, item := range controller.state {
 		liveness := configuredHealthDuration(item.ProbeLimits.LivenessSeconds, activeLivenessInterval)
 		failureRetry := configuredHealthDuration(item.ProbeLimits.FailureRetrySeconds, failureRetryInterval)
@@ -478,9 +461,14 @@ func blockedRecoveryHasHistory(item *policyHealthState) bool {
 
 func (controller *healthController) Tick(now time.Time) error {
 	controller.yielded = false
+	controller.processedGeneration = hotRuntimeGeneration{}
 	pool, runtimeReset, err := controller.runtime.Reload()
 	if err != nil {
 		return err
+	}
+	controller.processedPool = pool
+	if source, ok := controller.runtime.(hotRuntimeGenerationSource); ok {
+		controller.processedGeneration = source.hotRuntimeGeneration()
 	}
 	if runtimeReset {
 		controller.warmStarted = make(map[string]bool)
@@ -493,8 +481,14 @@ func (controller *healthController) Tick(now time.Time) error {
 	}
 	stateFile := statePath(controller.opts.StateRoot, "selector-health")
 	if !controller.stateLoaded {
-		controller.state = make(healthState)
-		_ = readJSON(stateFile, &controller.state)
+		loaded := make(healthState)
+		if err := readJSON(stateFile, &loaded); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read selector health state: %w", err)
+		}
+		if loaded == nil {
+			return errors.New("read selector health state: null state")
+		}
+		controller.state = loaded
 		controller.stateLoaded = true
 	}
 	managed := make(healthState)
@@ -532,7 +526,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		controller.state[policyID] = item
 		beforeSelected, beforeSwitchAt := item.Selected, item.LastSwitchAt
 		var err error
-		if !controller.warmStarted[policyID] ||
+		if controller.transitions[policyID] != nil || !controller.warmStarted[policyID] ||
 			(!controller.forceLiveness[policyID] && !now.Before(controller.regularNext[policyID])) || item.Selected == "block" {
 			delete(controller.forceLiveness, policyID)
 			err = controller.tickPolicy(now, policyID, contract, item)
@@ -548,6 +542,11 @@ func (controller *healthController) Tick(now time.Time) error {
 		if errors.Is(err, errHealthYield) {
 			controller.regularNext[policyID] = time.Time{}
 			controller.yielded = true
+			dirty = true
+			err = nil
+		}
+		if errors.Is(err, errPolicyTransitionPending) {
+			controller.regularNext[policyID] = time.Time{}
 			dirty = true
 			err = nil
 		}
@@ -581,6 +580,11 @@ func (controller *healthController) Tick(now time.Time) error {
 		}
 	}
 	controller.state = managed
+	for id := range controller.transitions {
+		if _, exists := pool.HealthPolicies[id]; !exists {
+			delete(controller.transitions, id)
+		}
+	}
 	return errors.Join(failures...)
 }
 
@@ -600,6 +604,7 @@ func newPolicyHealthState() *policyHealthState {
 		SpeedSamplesBPS: make(map[string][]int64), LastSpeedProbeAt: make(map[string]float64),
 		LastSpeedSuccessAt: make(map[string]float64), LastSpeedProbeStatus: make(map[string]string),
 		OptimizationBackoff: make(map[string]float64),
+		OutagePenalty:       make(map[string]outagePenalty),
 		FailureClass:        make(map[string]string),
 	}
 }
@@ -607,12 +612,6 @@ func newPolicyHealthState() *policyHealthState {
 func (controller *healthController) tickPolicy(now time.Time, policyID string, contract healthPolicyContract, item *policyHealthState) error {
 	ensureHealthMaps(item)
 	candidates := uniqueCandidates(contract.Candidates)
-	changedOutbounds := invalidateChangedOutboundHealth(item, candidates, contract.Nodes)
-	if len(changedOutbounds) > 0 {
-		item.LastPreflightAt = 0
-		item.PreflightClosed = nil
-		item.ScanQueue = uniqueCandidates(append(changedOutbounds, item.ScanQueue...))
-	}
 	warm := !controller.warmStarted[policyID]
 	// Preserve confirmed legacy history before a transient API error can clear it.
 	rememberWorkingSelection(contract, item)
@@ -628,6 +627,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	groupIndex, groupSelector, groupLabels := candidateGroups(contract.Groups, candidates, contract.Mode)
 	signature := strings.Join(candidates, "\n")
 	selected := item.Selected
+	replacedRemovedActive := false
 	actual, actualErr := controller.runtime.Current(policyID)
 	if actualErr != nil {
 		item.RuntimeConfirmed = false
@@ -635,15 +635,25 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		item.RuntimeObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		return actualErr
 	}
+	changedOutbounds := invalidateChangedOutboundHealth(item, candidates, contract.Nodes)
+	if len(changedOutbounds) > 0 {
+		controller.emitHealthEvent(healthEvent{Event: "health-evidence-reset", Policy: policyID,
+			Reason: "outbound-changed", Count: len(changedOutbounds)})
+		item.LastPreflightAt = 0
+		item.PreflightClosed = nil
+		item.ScanQueue = uniqueCandidates(append(changedOutbounds, item.ScanQueue...))
+	}
 	if actual != "" {
 		if !contains(candidates, actual) && actual != "block" {
-			// This is expected when the user removes the active node. Move once to
-			// a measured reserve while the Xray process and established flows stay
-			// alive. If no reserve is known, fail closed and let the outage probe
-			// find the first currently working candidate below.
-			replacement := knownHealthyReplacement(candidates, contract.Mode, groupIndex, item, p)
-			if replacement == "" {
-				replacement = "block"
+			// A changed eligibility list does not invalidate the running handler.
+			// Probe the replacement before withdrawing the working path. Cached
+			// reserve quality determines probe order, not present availability.
+			replacement, pending, transitionErr := controller.transitionRemovedActive(now, policyID, contract, item, actual, p)
+			if transitionErr != nil {
+				return transitionErr
+			}
+			if pending {
+				return errPolicyTransitionPending
 			}
 			if err := controller.runtime.Select(policyID, replacement); err != nil {
 				item.RuntimeConfirmed = false
@@ -652,13 +662,16 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				return err
 			}
 			selected, actual = replacement, replacement
+			replacedRemovedActive = replacement != "block"
 			item.Selected = replacement
 			item.RuntimeSelected = replacement
 			item.RuntimeConfirmed = true
 			item.CooldownUntil = switchCooldownUntil(now, "active-removed", p.cooldown)
 			item.LastSwitchAt = now.UTC().Format(time.RFC3339)
 			item.LastSwitchReason = "active-removed"
+			delete(controller.transitions, policyID)
 		} else {
+			delete(controller.transitions, policyID)
 			selected = actual
 			item.Selected = actual
 			item.RuntimeSelected = actual
@@ -671,7 +684,9 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	if !contains(candidates, selected) && selected != "block" {
 		selected = candidates[0]
 	}
-	if contract.Mode == "priority" && item.CandidateSignature != "" && item.CandidateSignature != signature && contains(candidates, selected) {
+	// A parallel transition may finish before a preferred candidate's fresh
+	// probe. Do not immediately replace its winner with that candidate's cache.
+	if !replacedRemovedActive && contract.Mode == "priority" && item.CandidateSignature != "" && item.CandidateSignature != signature && contains(candidates, selected) {
 		for _, candidate := range candidates {
 			if candidate == selected {
 				break
@@ -759,6 +774,9 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			item.AvailabilityFailures[selected] = 0
 			outage = false
 		}
+		if outage {
+			recordConfirmedOutage(now, item, selected)
+		}
 	}
 	if outage {
 		emergencyAttempted = true
@@ -785,6 +803,10 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			item.ScanQueue = without(item.ScanQueue, probeTargets)
 		} else {
 			probeTargets = regularProbeTargets(now, selected, candidates, shortlist, item, p)
+		}
+		if item.OptimizationCandidate != "" && outagePenaltyActive(now, item, item.OptimizationCandidate) {
+			clearOptimizationCandidate(item)
+			item.OptimizationRetryAfter = 0
 		}
 		if item.OptimizationCandidate != "" {
 			if !item.AvailabilityOK[item.OptimizationCandidate] ||
@@ -846,9 +868,19 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		}
 		if candidate == selected && !measured[candidate].OK {
 			item.FailureClass[selected] = string(measured[candidate].Failure)
+			recoveringFromUnderlay := item.UnderlayFailure != ""
 			if controller.suppressForUnderlayFailure(now, measured[candidate], item) {
 				controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID, Node: selected,
 					Failure: measured[candidate].Failure, Underlay: item.UnderlayFailure, Targets: probeTargetResults(measured[candidate])})
+				item.AvailabilityFailures[selected] = 0
+				delete(measured, candidate)
+				continue
+			}
+			if recoveringFromUnderlay && item.UnderlayFailure == "" && measured[candidate].Failure != probeFailureTLS {
+				// Match the fast lane: a first path-level failure just after the
+				// common underlay recovers may be stale socket evidence.
+				controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID, Node: selected,
+					Failure: measured[candidate].Failure, Reason: "underlay-recovered", Targets: probeTargetResults(measured[candidate])})
 				item.AvailabilityFailures[selected] = 0
 				delete(measured, candidate)
 				continue
@@ -863,6 +895,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if candidate == selected && !measured[candidate].OK &&
 			item.AvailabilityFailures[selected]+1 >= startupFailureConfirmationThreshold(measured[candidate], p.failureThreshold, warm) {
 			// Confirmed outage: probe reserves now, not after the backup timer.
+			recordConfirmedOutage(now, item, selected)
 			outage = true
 			item.AvailabilityFailures[selected] = p.failureThreshold
 			emergency := p
@@ -960,6 +993,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		item.LastProbeAt[candidate] = float64(now.Unix())
 		if evidence.OK {
 			item.LastGoodAt[candidate] = float64(now.Unix())
+			finishOutageEpisode(item, candidate)
 		}
 	}
 	for _, candidate := range speedTargets {
@@ -1083,6 +1117,11 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	desired, reason := selectDesired(now, contract.Mode, selected, candidates, groupIndex, dailyStats, medians, speedMedians, measured, qualityOK, availabilityOK, item, p)
 	if emergencySwitched {
 		desired, reason = selected, emergencyReason
+	} else if replacedRemovedActive && selected != "block" && item.AvailabilityFailures[selected] < p.failureThreshold {
+		// Keep a freshly validated membership replacement for this Tick even
+		// when cooldown is disabled. Later ticks may optimize it normally;
+		// a confirmed failure above still retains the ordinary emergency path.
+		desired, reason = selected, ""
 	}
 	var comparison *optimizationComparison
 	if len(optimizationProbeTargets) == 2 {

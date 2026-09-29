@@ -162,6 +162,49 @@ func TestNativeRuntimePublishesPrevalidatedMarkerBeforeXrayRestart(t *testing.T)
 	}
 }
 
+func TestNativeRuntimeArmsPlannedRecoveryUnderApplyGuard(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "live", "xray.json")
+	if err := os.MkdirAll(filepath.Dir(live), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(live, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{"xray.json": live})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := store.Prepare(strings.Repeat("d", 64), map[string][]byte{"xray.json": []byte("new\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(root, "run", "apply-in-progress")
+	armed := false
+	controller := &recordingRuntimeController{observe: func() {
+		if !armed {
+			t.Error("Xray restarted before RouterOS planned recovery was armed")
+		}
+	}}
+	runtime := &nativeRuntime{options: RuntimeOptions{ApplyGuardFile: guard}, store: store, controller: controller,
+		validate: func(context.Context, runtimeconfig.RuntimeCandidate, []string) error { return nil }}
+	if _, err := runtime.activateWithXrayRestartHook(context.Background(), candidate, func(context.Context) error {
+		if _, err := os.Stat(guard); err != nil {
+			t.Errorf("planned recovery ran without the Apply guard: %v", err)
+		}
+		armed = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !armed {
+		t.Fatal("planned recovery hook was not called")
+	}
+	if _, err := os.Stat(guard); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Apply guard remained after activation: %v", err)
+	}
+}
+
 func TestAffectedProgramsAreUniqueAndStable(t *testing.T) {
 	got := affectedPrograms([]string{
 		"transparent-exclusions.txt", "xray.json", "urltest-pool.json", "policy-dns.json", "nginx.conf", "watchdog.env",
@@ -188,7 +231,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 		"xray.json":         filepath.Join(liveRoot, "xray.json"),
 		"urltest-pool.json": filepath.Join(liveRoot, "urltest-pool.json"),
 	}
-	for name, body := range map[string]string{"xray.json": "old-xray\n", "urltest-pool.json": "old-pool\n"} {
+	for name, body := range map[string]string{"xray.json": "old-xray\n", "urltest-pool.json": hotPolicyOldPool} {
 		if err := os.WriteFile(destinations[name], []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +240,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 	if err != nil {
 		t.Fatal(err)
 	}
-	poolBody := []byte("new-pool\n")
+	poolBody := []byte(hotPolicyNewPool)
 	candidate, err := store.Prepare(strings.Repeat("d", 64), map[string][]byte{
 		"xray.json": []byte("new-xray\n"), "urltest-pool.json": poolBody,
 	})
@@ -226,7 +269,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 					published <- statErr
 					return
 				}
-				marker := []byte(`{"pool_sha256":"` + hex.EncodeToString(digest[:]) + `","pool_mtime_unix_nano":` + fmt.Sprint(info.ModTime().UnixNano()) + `,"xray_pid":4321}`)
+				marker := []byte(`{"pool_sha256":"` + hex.EncodeToString(digest[:]) + `","pool_mtime_unix_nano":` + fmt.Sprint(info.ModTime().UnixNano()) + `,"xray_pid":4321,"policy_selections":{"route":"new"}}`)
 				published <- os.WriteFile(hotReady, marker, 0o600)
 			}()
 			return nil
@@ -266,7 +309,7 @@ func TestHotRuntimeMarkerRejectsEarlierPublicationOfSamePoolContent(t *testing.T
 	}
 	runtime := &nativeRuntime{options: RuntimeOptions{XrayReadyFile: ready, XrayHotRuntimeReadyFile: marker}}
 	staleCtx, staleCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	err = runtime.waitHotRuntime(staleCtx, pool)
+	err = runtime.waitHotRuntime(staleCtx, pool, hotRuntimeScope{})
 	staleCancel()
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("stale marker accepted: %v", err)
@@ -275,7 +318,7 @@ func TestHotRuntimeMarkerRejectsEarlierPublicationOfSamePoolContent(t *testing.T
 	if err := os.WriteFile(marker, fresh, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.waitHotRuntime(context.Background(), pool); err != nil {
+	if err := runtime.waitHotRuntime(context.Background(), pool, hotRuntimeScope{}); err != nil {
 		t.Fatal(err)
 	}
 }

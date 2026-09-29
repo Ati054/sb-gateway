@@ -23,8 +23,10 @@ func (server *Server) systemLogs(response http.ResponseWriter, request *http.Req
 	path := server.opts.Runtime.ControlPlaneLog
 	filterLifecycle := false
 	filterRouting := false
+	filterSystem := false
 	switch source {
 	case "system":
+		filterSystem = true
 	case "routing":
 		filterRouting = true
 	case "nginx":
@@ -43,9 +45,9 @@ func (server *Server) systemLogs(response http.ResponseWriter, request *http.Req
 	if filterLifecycle {
 		readLimit = maximumSystemLogLines
 	}
-	if filterRouting {
+	if filterRouting || filterSystem {
 		// Filter before applying the visible line limit. A busy control-plane
-		// log must not hide still-recent route decisions from this view.
+		// log must not hide either route decisions or non-route events.
 		readLimit = maximumSystemLogBytes
 	}
 	lines, info, truncated, err := readLogTail(path, readLimit, maximumSystemLogBytes)
@@ -60,11 +62,17 @@ func (server *Server) systemLogs(response http.ResponseWriter, request *http.Req
 		server.internalStateError(response, request, err)
 		return
 	}
-	if filterLifecycle || filterRouting {
+	if filterLifecycle || filterRouting || filterSystem {
 		filtered := make([]string, 0, len(lines))
 		for _, line := range lines {
 			if filterRouting {
 				if strings.Contains(line, "agent: route-health ") {
+					filtered = append(filtered, line)
+				}
+				continue
+			}
+			if filterSystem {
+				if !strings.Contains(line, "agent: route-health ") {
 					filtered = append(filtered, line)
 				}
 				continue

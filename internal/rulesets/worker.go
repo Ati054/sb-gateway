@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -328,10 +329,20 @@ func Validate(payload map[string]any) error {
 }
 
 func RefreshPack(pack ServicePack, root string, fetch Fetch) (map[string]any, error) {
-	if pack.UpdateMode != "catalog" || pack.UpstreamName == nil || *pack.UpstreamName == "" {
+	if (pack.UpdateMode != "catalog" && pack.UpdateMode != "geoip") || pack.UpstreamName == nil || *pack.UpstreamName == "" {
 		return nil, errors.New("this pack uses bundled official endpoints")
 	}
-	payload, err := CompileDomainList(*pack.UpstreamName, fetch)
+	var payload map[string]any
+	var err error
+	if pack.UpdateMode == "geoip" {
+		var source string
+		source, err = fetch(*pack.UpstreamName)
+		if err == nil {
+			payload, err = CompileGeoIPList(source)
+		}
+	} else {
+		payload, err = CompileDomainList(*pack.UpstreamName, fetch)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -353,6 +364,38 @@ func RefreshPack(pack ServicePack, root string, fetch Fetch) (map[string]any, er
 	}, nil
 }
 
+// CompileGeoIPList keeps country CIDRs as a bounded, portable JSON ruleset.
+// It never introduces a dependency on an external geoip.dat at runtime.
+func CompileGeoIPList(source string) (map[string]any, error) {
+	if len(source) > maxSourceBytes {
+		return nil, errors.New("GeoIP source exceeds the size limit")
+	}
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(source, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(line)
+		if err != nil || !prefix.IsValid() {
+			return nil, errors.New("GeoIP source contains an invalid CIDR")
+		}
+		seen[prefix.Masked().String()] = struct{}{}
+		if len(seen) > 50_000 {
+			return nil, errors.New("GeoIP source contains too many CIDRs")
+		}
+	}
+	if len(seen) == 0 {
+		return nil, errors.New("GeoIP source has no CIDRs")
+	}
+	cidrs := make([]string, 0, len(seen))
+	for cidr := range seen {
+		cidrs = append(cidrs, cidr)
+	}
+	sort.Strings(cidrs)
+	return map[string]any{"version": 3, "rules": []any{map[string]any{"ip_cidr": cidrs}}}, nil
+}
+
 func RefreshAll(options Options, packs []ServicePack) (map[string]any, error) {
 	catalog, err := Catalog()
 	if err != nil {
@@ -368,7 +411,7 @@ func RefreshAll(options Options, packs []ServicePack) (map[string]any, error) {
 	results := make(map[string]any, len(packs))
 	index := catalogIndex(catalog)
 	for _, pack := range packs {
-		if pack.UpdateMode != "catalog" {
+		if pack.UpdateMode != "catalog" && pack.UpdateMode != "geoip" {
 			results[pack.ID] = map[string]any{
 				"status": "bundled", "checked_at": time.Now().UTC().Format(time.RFC3339Nano),
 				"message": "Built-in service rules are shipped with this SB Gateway release.",
@@ -407,6 +450,9 @@ func HTTPFetch(timeout time.Duration) Fetch {
 			return "", errors.New("invalid upstream rule-set name")
 		}
 		target := upstreamBase + url.PathEscape(name)
+		if geoIPNamePattern.MatchString(name) {
+			target = "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/" + url.PathEscape(strings.TrimPrefix(name, "geoip-")) + ".txt"
+		}
 		parsed, err := url.Parse(target)
 		if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "raw.githubusercontent.com" {
 			return "", errors.New("rule-set source is outside the trusted host")

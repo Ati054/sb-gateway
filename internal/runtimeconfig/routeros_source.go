@@ -363,6 +363,22 @@ func RequiredCDNFeeds(config map[string]any) ([]string, error) {
 	return result, nil
 }
 
+// RequiresRouterOSCloudflareUpdater reports whether a committed public ingress
+// actually uses the legacy Cloudflare address list. Merely configuring a CDN
+// profile does not require the daily RouterOS updater.
+func RequiresRouterOSCloudflareUpdater(config map[string]any) (bool, error) {
+	ingress, _, _, err := routerOSPublicIngress(config)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range ingress {
+		if entry.SourceAddressList == "SB_CLOUDFLARE_V4" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func routerOSPublicIngress(config map[string]any) ([]RouterOSPublicIngress, []RouterOSPublicSourceList, []string, error) {
 	candidates := make([]routerOSPublicIngressCandidate, 0)
 	sourceLists := make(map[string]RouterOSPublicSourceList)

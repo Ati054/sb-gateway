@@ -129,6 +129,76 @@ func TestBuildXrayRouteSourceBuildsOrderedManagedRoutes(t *testing.T) {
 	}
 }
 
+func TestBuildXrayRouteSourceCustomRulesPrecedeServicePacks(t *testing.T) {
+	config := map[string]any{
+		"dns": map[string]any{},
+		"policies": []any{map[string]any{
+			"id": "route", "enabled": true, "traffic_mode": "vless_with_wan_exceptions",
+			"custom_routes": []any{
+				map[string]any{"kind": "domain", "value": "example.com", "target": "vless"},
+				map[string]any{"kind": "ip", "value": "203.0.113.42", "protocols": "http", "target": "wan"},
+				map[string]any{"kind": "port", "value": "5000-5010", "network": "udp", "target": "vless"},
+				map[string]any{"kind": "domain", "value": "secure.example.com", "protocols": "tls,quic", "target": "wan"},
+			},
+			"direct_services": []any{"youtube"},
+		}},
+		"local_clients": []any{map[string]any{"id": "pc", "enabled": true, "policy_id": "route", "source_cidrs": []any{"192.0.2.5/32"}}},
+	}
+	result, err := BuildXrayRouteSource(config, nil, []map[string]any{{"tag": "route"}, {"tag": "direct-wan"}, {"tag": "block"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := objectSlice(result["rules"])
+	customIndexes := []int{}
+	serviceIndex := -1
+	for index, rule := range rules {
+		if !containsText(stringSlice(rule["source_ip_cidr"]), "192.0.2.5/32") {
+			continue
+		}
+		if len(stringSlice(rule["rule_set"])) != 0 && serviceIndex < 0 {
+			serviceIndex = index
+		}
+		if containsText(stringSlice(rule["domain_suffix"]), "example.com") || containsText(stringSlice(rule["ip_cidr"]), "203.0.113.42/32") || rule["port"] == "5000-5010" || containsText(stringSlice(rule["protocol"]), "tls") {
+			customIndexes = append(customIndexes, index)
+		}
+	}
+	if len(customIndexes) != 4 || serviceIndex < 0 || customIndexes[0] >= serviceIndex || customIndexes[1] >= serviceIndex || customIndexes[2] >= serviceIndex || customIndexes[3] >= serviceIndex {
+		t.Fatalf("custom routes must precede service packs: indexes=%v service=%d rules=%#v", customIndexes, serviceIndex, rules)
+	}
+	if rules[customIndexes[0]]["outbound"] != "route" || rules[customIndexes[1]]["outbound"] != "direct-wan" || !containsText(stringSlice(rules[customIndexes[1]]["protocol"]), "http") || rules[customIndexes[2]]["network"] != "udp" {
+		t.Fatalf("custom route targets or protocol changed: %#v", rules)
+	}
+	if rules[customIndexes[3]]["outbound"] != "direct-wan" || !containsText(stringSlice(rules[customIndexes[3]]["protocol"]), "quic") || !containsText(stringSlice(rules[customIndexes[3]]["domain_suffix"]), "secure.example.com") {
+		t.Fatalf("custom sniffed-protocol route missing: %#v", rules[customIndexes[3]])
+	}
+}
+
+func TestBuildXrayRouteSourceKeepsGeoSiteAndGeoIPOnSameWANPath(t *testing.T) {
+	config := map[string]any{
+		"dns": map[string]any{},
+		"policies": []any{map[string]any{
+			"id": "route", "enabled": true, "traffic_mode": "vless_with_wan_exceptions",
+			"direct_services": []any{"cn-baidu", "geoip-cn"},
+		}},
+		"local_clients": []any{map[string]any{"id": "pc", "enabled": true, "policy_id": "route", "source_cidrs": []any{"192.0.2.5/32"}}},
+	}
+	result, err := BuildXrayRouteSource(config, nil, []map[string]any{{"tag": "route"}, {"tag": "direct-wan"}, {"tag": "block"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := objectSlice(result["rules"])
+	for _, tag := range []string{"service-cn-baidu", "service-geoip-cn"} {
+		rule := findXraySourceRule(rules, func(rule map[string]any) bool {
+			return textValue(rule["outbound"]) == "direct-wan" &&
+				containsText(stringSlice(rule["source_ip_cidr"]), "192.0.2.5/32") &&
+				containsText(stringSlice(rule["rule_set"]), tag)
+		})
+		if rule == nil {
+			t.Fatalf("same-policy WAN rule %s missing: %#v", tag, rules)
+		}
+	}
+}
+
 func TestBuildXrayRouteSourceFailsClosedForMissingPolicyAndDisabledIPv6(t *testing.T) {
 	config := map[string]any{
 		"system":       map[string]any{"networking": map[string]any{"remote_ipv6_mode": "disabled"}},

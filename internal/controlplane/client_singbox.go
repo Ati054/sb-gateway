@@ -295,6 +295,11 @@ func buildSingBoxClientDNS(plan clientProfileRoutePlan) map[string]any {
 		})
 		rules = append(rules, map[string]any{"domain_suffix": plan.InternalZones, "server": "dns-internal"})
 	}
+	for _, custom := range plan.CustomRoutes {
+		if len(custom.Match.Domains) != 0 && len(custom.Match.Protocols) == 0 {
+			rules = append(rules, map[string]any{"domain_suffix": custom.Match.Domains, "server": singBoxDNSTag(custom.Target)})
+		}
+	}
 	// Service domains live only in route.rules. Duplicating the same catalog in
 	// DNS rules needlessly inflates mobile profiles. Node resolution is pinned
 	// to dns-direct on each outbound; only private DNS zones need a DNS rule.
@@ -338,6 +343,9 @@ func buildSingBoxClientRules(plan clientProfileRoutePlan) []any {
 		rules = append(rules, singBoxRouteRule(map[string]any{"ip_cidr": directPrivate}, clientRouteDirect))
 	}
 	if plan.Individual {
+		for _, custom := range plan.CustomRoutes {
+			rules = appendSingBoxClientMatchRules(rules, custom.Match, custom.Target)
+		}
 		match := plan.Match
 		match.Domains = uniqueSingBoxRuleDomains(match.Domains, seenDomains)
 		rules = appendSingBoxClientMatchRules(rules, match, plan.ExceptionTarget)
@@ -346,6 +354,12 @@ func buildSingBoxClientRules(plan clientProfileRoutePlan) []any {
 }
 
 func appendSingBoxClientMatchRules(rules []any, match clientRouteMatch, target string) []any {
+	if len(match.Domains) != 0 && len(match.Protocols) != 0 {
+		return append(rules, singBoxRouteRule(map[string]any{"domain_suffix": match.Domains, "protocol": match.Protocols}, target))
+	}
+	if len(match.IPCIDRs) != 0 && len(match.Protocols) != 0 {
+		return append(rules, singBoxRouteRule(map[string]any{"ip_cidr": match.IPCIDRs, "protocol": match.Protocols}, target))
+	}
 	if len(match.Domains) != 0 {
 		rules = append(rules, singBoxRouteRule(map[string]any{"domain_suffix": match.Domains}, target))
 	}

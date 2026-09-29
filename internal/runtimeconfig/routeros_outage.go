@@ -91,8 +91,14 @@ func routerOSOutageGroups(config map[string]any, ruleSetRoot ...string) ([]route
 						return nil, fmt.Errorf("outage card %s: %w", dependency, loadErr)
 					}
 					for _, entry := range entries {
-						domains = append(domains, entry.DomainSuffix...)
-						domains = append(domains, entry.Domain...)
+						// A trusted geosite can include single-label matches such as
+						// "baidu". Xray can use them, but RouterOS DNS must not create
+						// a broad or local-zone outage exception for them.
+						for _, candidate := range append(entry.DomainSuffix, entry.Domain...) {
+							if safe, safeErr := normalizeOutageDomain(candidate); safeErr == nil && safe != "" {
+								domains = append(domains, safe)
+							}
+						}
 					}
 				}
 				domains = append(domains, pack.FallbackDomains...)

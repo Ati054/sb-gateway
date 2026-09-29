@@ -19,6 +19,7 @@ import (
 	"github.com/sb-gateway/sb-gateway/internal/appliance"
 	"github.com/sb-gateway/sb-gateway/internal/controlplane"
 	"github.com/sb-gateway/sb-gateway/internal/diagnosticlog"
+	"github.com/sb-gateway/sb-gateway/internal/geoiprefresh"
 	"github.com/sb-gateway/sb-gateway/internal/monitor"
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
 	"github.com/sb-gateway/sb-gateway/internal/recovery"
@@ -86,6 +87,15 @@ func main() {
 		if err := runRulesets(os.Args[2:]); err != nil {
 			log.Fatalf("rulesets: %v", err)
 		}
+	case "geoip-activate":
+		if len(os.Args) != 2 {
+			log.Fatal("geoip-activate accepts no arguments")
+		}
+		changed, err := geoiprefresh.Activate(context.Background(), geoiprefresh.OptionsFromEnvironment(), &geoiprefresh.State{})
+		if err != nil {
+			log.Fatalf("geoip-activate: %v", err)
+		}
+		fmt.Printf("GEOIP_ROUTING_CHANGED=%t\n", changed)
 	case "recovery-apply-pending":
 		if err := runRecoveryApplyPending(os.Args[2:]); err != nil {
 			log.Fatalf("recovery: %v", err)
@@ -120,7 +130,7 @@ func configureDiagnosticLog(command string) func() {
 		log.Printf("diagnostic log unavailable: %v", err)
 		return func() {}
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, writer))
+	log.SetOutput(io.MultiWriter(diagnosticlog.ConsoleWriter{Output: os.Stderr}, writer))
 	return func() { _ = writer.Close() }
 }
 
@@ -189,6 +199,10 @@ func runRulesets(arguments []string) error {
 		return err
 	}
 	_, err = rulesets.RefreshAll(options, packs)
+	if err != nil {
+		return err
+	}
+	_, err = geoiprefresh.Activate(context.Background(), geoiprefresh.OptionsFromEnvironment(), &geoiprefresh.State{})
 	return err
 }
 
@@ -392,5 +406,5 @@ func runDNSProbe(arguments []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sb-gateway <appliance|api|monitor|agent|dns|dns-probe|watchdog|rulesets|recovery-apply-pending|prune-update-backups|tcp-ready|xray-balancers|wireguard-egress-plan|version> [options]")
+	fmt.Fprintln(os.Stderr, "usage: sb-gateway <appliance|api|monitor|agent|dns|dns-probe|watchdog|rulesets|geoip-activate|recovery-apply-pending|prune-update-backups|tcp-ready|xray-balancers|wireguard-egress-plan|version> [options]")
 }

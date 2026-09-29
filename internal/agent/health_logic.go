@@ -215,6 +215,9 @@ func ensureHealthMaps(item *policyHealthState) {
 	if item.OptimizationBackoff == nil {
 		item.OptimizationBackoff = make(map[string]float64)
 	}
+	if item.OutagePenalty == nil {
+		item.OutagePenalty = make(map[string]outagePenalty)
+	}
 	if item.FailureClass == nil {
 		item.FailureClass = make(map[string]string)
 	}
@@ -325,7 +328,7 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 			age := float64(now.Unix()) - lastProbe
 			freshForSoftSwitch := lastProbe > 0 && age >= 0 && age <= float64(minInt(p.backup, maxInt(p.active*2, 120)))
 			if candidate != selected && quality[candidate] && known(candidate, p.recoveryThreshold) &&
-				item.AvailabilityFailures[candidate] == 0 && freshForSoftSwitch {
+				item.AvailabilityFailures[candidate] == 0 && freshForSoftSwitch && !outagePenaltyActive(now, item, candidate) {
 				stable = append(stable, candidate)
 			}
 		}
@@ -426,6 +429,13 @@ func meaningfullyBetter(selected string, candidates []string, delays map[string]
 // comparisons may move traffic. This prevents a stale speed sample or one
 // transient latency window from becoming a ten-minute sticky selection.
 func gatePlannedOptimization(now time.Time, selected, desired, reason string, comparison *optimizationComparison, item *policyHealthState, p effectivePolicySettings) (string, string) {
+	if item.OptimizationCandidate != "" && outagePenaltyActive(now, item, item.OptimizationCandidate) {
+		clearOptimizationCandidate(item)
+		item.OptimizationRetryAfter = 0
+	}
+	if desired != selected && outagePenaltyActive(now, item, desired) && reason != "active-unavailable" {
+		return selected, ""
+	}
 	if desired != selected && reason != "meaningfully-faster" {
 		clearOptimizationCandidate(item)
 		item.OptimizationRetryAfter = 0

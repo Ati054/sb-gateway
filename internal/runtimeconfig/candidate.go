@@ -316,8 +316,28 @@ func (store *CandidateStore) ActivateAfter(candidate RuntimeCandidate, validate 
 }
 
 func (store *CandidateStore) Rollback(receipt ActivationReceipt) error {
+	return store.RollbackAfter(receipt, nil)
+}
+
+// RollbackAfter lets the caller capture the exact restoring contract before
+// publication, under the same lock as activation. An empty path denotes an
+// artifact absent before activation; the callback must not modify these files.
+func (store *CandidateStore) RollbackAfter(receipt ActivationReceipt, prepare func(map[string]string) error) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if prepare != nil {
+		restoring := make(map[string]string, len(receipt.changed))
+		for _, name := range receipt.changed {
+			if receipt.previousPresent[name] {
+				restoring[name] = filepath.Join(receipt.previous, name)
+			} else {
+				restoring[name] = ""
+			}
+		}
+		if err := prepare(restoring); err != nil {
+			return err
+		}
+	}
 	return store.rollbackLocked(receipt)
 }
 

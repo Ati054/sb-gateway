@@ -275,6 +275,67 @@ func TestHealthControllerBlocksOnlyWhenEveryCandidateConfirmedDown(t *testing.T)
 	}
 }
 
+func TestHealthControllerDoesNotOverwriteUnreadableHistory(t *testing.T) {
+	for _, body := range []string{"{invalid", "null"} {
+		t.Run(body, func(t *testing.T) {
+			root := t.TempDir()
+			path := statePath(root, "selector-health")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runtime := &fakeSelectorRuntime{pool: healthFixture(false), probes: map[string]probeEvidence{
+				"de": successfulEvidence(30), "nl": successfulEvidence(40),
+			}}
+			controller := &healthController{opts: Options{StateRoot: root}, runtime: runtime, warmStarted: make(map[string]bool)}
+			if err := controller.Tick(time.Unix(10, 0)); err == nil {
+				t.Fatal("unreadable history was accepted")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != body || len(runtime.selections) != 0 {
+				t.Fatalf("unreadable history was overwritten or route changed: %q, %v", got, runtime.selections)
+			}
+		})
+	}
+}
+
+func TestHealthControllerPreservesHistoryAfterRestartWithUnchangedOutbounds(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 9, 28, 2, 0, 0, 0, time.UTC)
+	pool := healthFixture(false)
+	contract := pool.HealthPolicies["europe"]
+	contract.Nodes["de"] = healthNode{Label: "Germany", Country: "DE", Fingerprint: "stable-de"}
+	contract.Nodes["nl"] = healthNode{Label: "Netherlands", Country: "NL", Fingerprint: "stable-nl"}
+	pool.HealthPolicies["europe"] = contract
+	item := newPolicyHealthState()
+	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
+	item.CandidateSignature = "de\nnl"
+	item.CandidateNodes = contract.Nodes
+	item.LastSwitchAt = "2026-09-27T20:00:00Z"
+	item.HistoryDays["de"] = map[string]dayBucket{"2026-09-27": {Samples: 23, Successes: 23}}
+	if err := writeJSONAtomic(statePath(root, "selector-health"), healthState{"europe": item}); err != nil {
+		t.Fatal(err)
+	}
+	for restart := range 2 {
+		runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"}, probes: map[string]probeEvidence{
+			"de": successfulEvidence(30), "nl": successfulEvidence(40),
+		}}
+		controller := &healthController{opts: Options{StateRoot: root}, runtime: runtime, warmStarted: make(map[string]bool)}
+		if err := controller.Tick(now.Add(time.Duration(restart) * time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		var saved healthState
+		if err := readJSON(statePath(root, "selector-health"), &saved); err != nil {
+			t.Fatal(err)
+		}
+		if saved["europe"].HistoryDays["de"]["2026-09-27"].Samples != 23 || saved["europe"].LastSwitchAt != item.LastSwitchAt {
+			t.Fatalf("history or selection was reset on restart %d", restart)
+		}
+	}
+}
+
 func TestBlockedPolicyRecoversOnFirstUsableFreshPath(t *testing.T) {
 	root := t.TempDir()
 	falseValue := false

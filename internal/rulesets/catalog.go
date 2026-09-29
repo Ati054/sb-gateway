@@ -12,6 +12,7 @@ import (
 var servicePackCatalog []byte
 
 var upstreamNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var geoIPNamePattern = regexp.MustCompile(`^geoip-[a-z]{2}$`)
 
 type ServicePack struct {
 	ID               string   `json:"id"`
@@ -62,13 +63,24 @@ func CustomPack(upstream, name string) (ServicePack, error) {
 	if !upstreamNamePattern.MatchString(normalized) {
 		return ServicePack{}, fmt.Errorf("invalid upstream rule-set name")
 	}
+	if strings.HasPrefix(normalized, "geoip-") && !geoIPNamePattern.MatchString(normalized) {
+		return ServicePack{}, fmt.Errorf("GeoIP country must be a two-letter code")
+	}
 	fallback := []string(nil)
 	if normalized == "binance" {
 		fallback = []string{"token.awswaf.com"}
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		name = normalized
+		if geoIPNamePattern.MatchString(normalized) {
+			name = "GeoIP " + strings.ToUpper(strings.TrimPrefix(normalized, "geoip-"))
+		} else {
+			name = normalized
+		}
+	}
+	if geoIPNamePattern.MatchString(normalized) {
+		return ServicePack{ID: normalized, Name: name, Category: "GeoIP",
+			UpstreamName: &normalized, UpdateMode: "geoip"}, nil
 	}
 	return ServicePack{
 		ID: normalized, Name: name, Category: "Пользовательский",

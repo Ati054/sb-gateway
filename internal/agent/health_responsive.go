@@ -349,6 +349,9 @@ func (controller *healthController) checkDuringProbe(now time.Time, pool healthP
 			continue
 		}
 		contract := pool.HealthPolicies[id]
+		if transition := controller.transitions[id]; transition != nil && transition.previous == item.Selected {
+			contract.Candidates = append(append([]string(nil), contract.Candidates...), item.Selected)
+		}
 		if item.AvailabilityFailures[item.Selected] >= policySettings(contract.Policy, contract.Mode).failureThreshold {
 			continue
 		}

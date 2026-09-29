@@ -585,6 +585,86 @@ func TestValidateCurrentConfigRejectsPolicyValuesTheSelectorWouldOtherwiseClamp(
 	}
 }
 
+func TestValidateCurrentConfigRequiresSafeUserNodeGroups(t *testing.T) {
+	config := currentConfigFixture(t)
+	config["policies"] = []any{map[string]any{
+		"id": "route", "selection_order": []any{"group:empty"},
+		"node_groups": []any{
+			map[string]any{"id": "empty", "name": "Empty"},
+			map[string]any{"id": "empty", "name": "Duplicate", "subscription_ids": []any{"feed"}},
+		},
+	}}
+	result := validateCurrentConfig(config)
+	for _, path := range []string{"policies[0].node_groups[0]", "policies[0].node_groups[1].id"} {
+		if !hasValidationPath(result.Errors, path) {
+			t.Fatalf("missing validation for %s: %#v", path, result.Errors)
+		}
+	}
+}
+
+func TestValidateCurrentConfigAcceptsAllSubscriptionGroupWithoutOptionalFields(t *testing.T) {
+	config := currentConfigFixture(t)
+	config["policies"] = []any{map[string]any{
+		"id": "route", "selection_order": []any{"group:all-feeds"},
+		"node_groups": []any{map[string]any{
+			"id": "all-feeds", "name": "All feeds", "subscription_ids": []any{"*"},
+		}},
+	}}
+	if result := validateCurrentConfig(config); !result.Valid {
+		t.Fatalf("all-subscription group should not require optional fields: %#v", result.Errors)
+	}
+}
+
+func TestValidateCurrentConfigRequiresWholeWordsForGroupExclusions(t *testing.T) {
+	config := currentConfigFixture(t)
+	group := map[string]any{"id": "filtered", "name": "Filtered", "subscription_ids": []any{"feed"}, "name_excludes": "test, резерв"}
+	config["policies"] = []any{map[string]any{"id": "route", "node_groups": []any{group}}}
+	if result := validateCurrentConfig(config); hasValidationPath(result.Errors, "policies[0].node_groups[0].name_excludes") {
+		t.Fatalf("valid comma-separated words were rejected: %#v", result.Errors)
+	}
+	group["name_excludes"] = "test server"
+	if result := validateCurrentConfig(config); !hasValidationPath(result.Errors, "policies[0].node_groups[0].name_excludes") {
+		t.Fatalf("phrase must be rejected instead of silently matching nothing: %#v", result.Errors)
+	}
+}
+
+func TestValidateCurrentConfigRejectsMalformedCustomRoutes(t *testing.T) {
+	config := currentConfigFixture(t)
+	config["policies"] = []any{map[string]any{
+		"id": "route", "custom_routes": []any{
+			map[string]any{"kind": "domain", "value": "bad host", "target": "wan"},
+			map[string]any{"kind": "ip", "value": "not-an-ip", "target": "wan"},
+			map[string]any{"kind": "port", "value": "65536-1", "network": "icmp", "target": "vless"},
+			map[string]any{"kind": "port", "value": "443", "network": "tcp", "target": "auto"},
+			map[string]any{"kind": "domain", "value": "example.com", "protocols": "tls,unknown", "target": "wan"},
+		},
+	}}
+	result := validateCurrentConfig(config)
+	for _, path := range []string{
+		"policies[0].custom_routes[0].value", "policies[0].custom_routes[1].value",
+		"policies[0].custom_routes[2].value", "policies[0].custom_routes[2].network",
+		"policies[0].custom_routes[3].target",
+		"policies[0].custom_routes[4].protocols",
+	} {
+		if !hasValidationPath(result.Errors, path) {
+			t.Fatalf("missing %s: %#v", path, result.Errors)
+		}
+	}
+}
+
+func TestValidateCurrentConfigRejectsEmojiInCountryCodeFilter(t *testing.T) {
+	config := currentConfigFixture(t)
+	config["policies"] = []any{map[string]any{
+		"id": "route", "node_groups": []any{map[string]any{
+			"id": "emoji", "name": "Emoji", "countries": []any{"⚡"},
+		}},
+	}}
+	result := validateCurrentConfig(config)
+	if !hasValidationPath(result.Errors, "policies[0].node_groups[0].countries[0]") {
+		t.Fatalf("emoji in country field must be explained: %#v", result.Errors)
+	}
+}
+
 func TestValidateCurrentConfigAcceptsEveryVisiblePolicyControlAtItsBoundary(t *testing.T) {
 	config := currentConfigFixture(t)
 	config["policies"] = []any{map[string]any{

@@ -176,6 +176,32 @@ func appendEntityDNSRules(
 ) error {
 	policyID := textValue(policy["id"])
 	trafficMode := textValue(policy["traffic_mode"])
+	for _, custom := range objectSlice(policy["custom_routes"]) {
+		if textValue(custom["kind"]) != "domain" {
+			// IP/CIDR and port rules have no domain predicate. Adding them to the
+			// DNS policy would create an unintended catch-all DNS rule.
+			continue
+		}
+		rule := identity
+		rule.DomainSuffix = []string{strings.ToLower(strings.TrimSpace(textValue(custom["value"])))}
+		switch textValue(custom["target"]) {
+		case "wan":
+			rule.Action, rule.Server = "route", "direct-public-dns"
+		case "vless":
+			if selectableNonDirect(policyID, available) {
+				server, err := policyServer(policyID)
+				if err != nil {
+					return err
+				}
+				rule.Action, rule.Server = "route", server
+			} else {
+				rule.Action = "reject"
+			}
+		default:
+			return errors.New("custom domain route target must be WAN or VLESS")
+		}
+		source.Rules = append(source.Rules, rule)
+	}
 	for _, service := range candidateServiceIDs(policy) {
 		selector := policyServiceSelectorTag(policyID, service)
 		if _, ok := available[selector]; !ok || textValue(policy["mode"]) != "priority" {

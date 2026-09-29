@@ -30,6 +30,7 @@ type xraySelectorRuntime struct {
 	pool              healthPool
 	poolSignature     string
 	poolFileSignature string
+	poolMTimeUnixNano int64
 	xrayPID           int
 	loadedDynamic     map[string]bool
 	verifiedDynamic   map[string]time.Time
@@ -141,6 +142,7 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 	}
 	if changed {
 		runtime.poolFileSignature = fileSignature
+		runtime.poolMTimeUnixNano = info.ModTime().UnixNano()
 	}
 	if pidChanged {
 		runtime.xrayPID = pid
@@ -338,7 +340,13 @@ func (runtime *xraySelectorRuntime) Current(selector string) (string, error) {
 		if runtimeTag == member {
 			if runtime.pool.Outbounds[node] != nil && !runtime.isBase(node) {
 				if runtime.policyRuntimeTag(selector, node) != member {
-					return "", errors.New("Xray selected outbound belongs to an obsolete node generation")
+					// Apply can publish a refreshed outbound without restarting Xray.
+					// Move new streams to the current generation, retaining the old
+					// handler for connections already using it.
+					if err := runtime.Select(selector, node); err != nil {
+						return "", fmt.Errorf("refresh selected outbound generation: %w", err)
+					}
+					return node, nil
 				}
 				if err := runtime.ensureOutbound(node, member); err != nil {
 					return "", err

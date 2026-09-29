@@ -65,6 +65,66 @@ func TestExecuteDirectDeltaReusesOneAuthenticatedHTTPClient(t *testing.T) {
 	}
 }
 
+func TestPlannedApplyRecoveryRequiresOwnedScriptAndEnabledGate(t *testing.T) {
+	var runs, polls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/rest/system/script":
+			_, _ = response.Write([]byte(`[{".id":"*1","name":"SB-GATEWAY-startup-fail-open","comment":"SB-GATEWAY startup fail-open"}]`))
+		case "/rest/system/script/run":
+			runs++
+			_, _ = response.Write([]byte(`{}`))
+		case "/rest/ip/firewall/mangle":
+			polls++
+			if polls == 1 {
+				_, _ = response.Write([]byte(`[{"comment":"SB-GATEWAY diversion-gate","disabled":"true"}]`))
+			} else {
+				_, _ = response.Write([]byte(`[{"comment":"SB-GATEWAY diversion-gate","disabled":"false"}]`))
+			}
+		default:
+			http.Error(response, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	client, err := NewClient(Options{BaseURL: server.URL, Username: "admin", Password: "secret", RootCAs: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	if err := client.EnterPlannedApplyFailOpen(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := client.WaitManagedDiversion(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || polls != 2 {
+		t.Fatalf("script runs=%d gate polls=%d", runs, polls)
+	}
+}
+
+func TestPlannedApplyRecoveryRejectsUnownedScript(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[{".id":"*1","name":"SB-GATEWAY-startup-fail-open","comment":"foreign"}]`))
+	}))
+	defer server.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	client, err := NewClient(Options{BaseURL: server.URL, Username: "admin", Password: "secret", RootCAs: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	if err := client.EnterPlannedApplyFailOpen(context.Background()); err == nil {
+		t.Fatal("unowned startup script was accepted")
+	}
+}
+
 func TestExecuteDirectDeltaUpdatesOnlyOwnedExactScript(t *testing.T) {
 	var patched string
 	delta := "# SB-GATEWAY generated minimal delta; complete managed sections\n# SB-GATEWAY delta sections: dns\n# SB-GATEWAY section:dns\n/ip/dns/cache/flush\n"

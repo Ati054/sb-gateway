@@ -463,7 +463,7 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /Вернуть скрытые карточки/);
   assert.doesNotMatch(policyDialogSource, /name="exception_domains"/);
   assert.doesNotMatch(policyDialogSource, /Доменные исключения через/);
-  assert.match(page, /Добавить сервис вручную из доверенного каталога/);
+  assert.match(page, /Добавить сервис, GeoSite или GeoIP из доверенного каталога/);
   assert.doesNotMatch(page, /ежедневное обновление/);
   assert.doesNotMatch(page, /Если полного пакета нет, ресурс не будет добавлен частично или молча/);
   assert.doesNotMatch(page, /Выбранный сервис пойдёт через/);
@@ -852,7 +852,7 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /Сначала выполните первичную настройку/);
   assert.match(page, /https:\/\/172\.31\.255\.1:59443/);
   assert.match(page, /Найти домены и CDN/);
-  assert.match(page, /Например: avito или avito\.ru/);
+  assert.match(page, /Например: avito\.ru, geosite:baidu, geoip:cn/);
   assert.match(page, /resolveServicePack/);
   assert.match(page, /selectedValues=\{selectedExceptionServices\}/);
   assert.match(page, /onSelectedValuesChange=\{setExceptionServices\}/);
