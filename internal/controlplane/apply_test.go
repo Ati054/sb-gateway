@@ -422,6 +422,35 @@ func TestReadinessStaysFalseWhileApplyRecoveryIsPending(t *testing.T) {
 	}
 }
 
+func TestReadinessAllowsOnlyLiveVerifiedRuntimeApply(t *testing.T) {
+	server := newTestServer(t)
+	cookie, _ := bootstrapSession(t, server)
+	config := routerOSReadyConfig(t)
+	revision, err := server.repository.stageGeneration(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.saveAuxiliary("apply-operation", map[string]any{
+		"pending": true, "state": "runtime_activated",
+		"previous_routeros_source": "unchanged", "target_routeros_source": "unchanged",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server.plannedRuntimeApply.Store(true)
+	response := performRequest(t, server, http.MethodGet, apiPrefix+"/health/ready", nil, nil, cookie)
+	if response.Code != http.StatusOK || decodeResponse(t, response)["apply_recovery_pending"] != false {
+		t.Fatalf("live runtime-only Apply did not allow lease recovery: %d %s", response.Code, response.Body.String())
+	}
+	server.plannedRuntimeApply.Store(false)
+	response = performRequest(t, server, http.MethodGet, apiPrefix+"/health/ready", nil, nil, cookie)
+	if response.Code != http.StatusServiceUnavailable || decodeResponse(t, response)["apply_recovery_pending"] != true {
+		t.Fatalf("stale journal allowed lease recovery: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestApplyRuntimeLKGWriteFailureRemainsRecoverable(t *testing.T) {
 	server := newTestServer(t)
 	active := routerOSReadyConfig(t)

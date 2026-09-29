@@ -1095,5 +1095,85 @@
     "udp_ports": [],
     "update_mode": "bundled-official",
     "upstream_name": null
+  },
+  {
+    "id": "cn-baidu", "name": "Baidu", "category": "Китай · поиск", "description": "Поиск, карты и сервисы Baidu.",
+    "upstream_name": "baidu", "fallback_domains": ["baidu.com", "bdstatic.com", "baidubce.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-bilibili", "name": "Bilibili", "category": "Китай · видео", "description": "Видео, приложение и CDN Bilibili.",
+    "upstream_name": "bilibili", "fallback_domains": ["bilibili.com", "biliapi.com", "bilivideo.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-tencent", "name": "Tencent / WeChat", "category": "Китай · сервисы", "description": "Основные сервисы Tencent, WeChat и CDN.",
+    "upstream_name": "tencent", "fallback_domains": ["qq.com", "weixin.qq.com", "tencent.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-alibaba", "name": "Alibaba / Taobao", "category": "Китай · покупки", "description": "Магазины Taobao и сервисы Alibaba.",
+    "upstream_name": "alibaba", "fallback_domains": ["taobao.com", "alibaba.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-jd", "name": "JD.com", "category": "Китай · покупки", "description": "Магазин JD.com и связанные домены.",
+    "upstream_name": "jd", "fallback_domains": ["jd.com", "3.cn"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-douyin", "name": "Douyin", "category": "Китай · видео", "description": "Видео Douyin и CDN.",
+    "upstream_name": "douyin", "fallback_domains": ["douyin.com", "douyincdn.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-iqiyi", "name": "iQIYI", "category": "Китай · видео", "description": "Видео iQIYI и медиадомены.",
+    "upstream_name": "iqiyi", "fallback_domains": ["iqiyi.com", "iqiyipic.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "cn-kuaishou", "name": "Kuaishou", "category": "Китай · видео", "description": "Видео Kuaishou и CDN.",
+    "upstream_name": "kuaishou", "fallback_domains": ["kuaishou.com", "kwaicdn.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-banks", "name": "Банки Ирана", "category": "Иран · платежи", "description": "Банковские домены из каталога category-bank-ir.",
+    "upstream_name": "category-bank-ir", "fallback_domains": ["bankmellat.ir", "bmi.ir", "bsi.ir", "shaparak.ir"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-snapp", "name": "Snapp", "category": "Иран · сервисы", "description": "Поездки, доставка и другие сервисы Snapp.",
+    "upstream_name": "snapp", "fallback_domains": ["snapp.ir", "snappfood.ir"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-aparat", "name": "Aparat", "category": "Иран · видео", "description": "Видеосервис Aparat и связанные домены.",
+    "upstream_name": "aparat", "fallback_domains": ["aparat.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-government", "name": "Госуслуги Ирана", "category": "Иран · государство", "description": "Государственные порталы из category-gov-ir.",
+    "upstream_name": "category-gov-ir", "fallback_domains": ["gov.ir", "adliran.ir"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-shopping", "name": "Покупки Ирана", "category": "Иран · покупки", "description": "Магазины и объявления из category-shopping-ir.",
+    "upstream_name": "category-shopping-ir", "fallback_domains": ["digikala.com", "torob.com", "divar.ir"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-payment", "name": "Платежи Ирана", "category": "Иран · платежи", "description": "Платежные сервисы из category-payment-ir.",
+    "upstream_name": "category-payment-ir", "fallback_domains": ["zarinpal.com", "shaparak.ir"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-social", "name": "Соцсети Ирана", "category": "Иран · общение", "description": "Местные соцсети из category-social-media-ir.",
+    "upstream_name": "category-social-media-ir", "fallback_domains": ["rubika.ir", "eitaa.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
+  },
+  {
+    "id": "ir-tech", "name": "ИТ-сервисы Ирана", "category": "Иран · сервисы", "description": "Каталоги приложений и облака из category-tech-ir.",
+    "upstream_name": "category-tech-ir", "fallback_domains": ["cafebazaar.ir", "arvancloud.com"],
+    "update_mode": "catalog", "broad": false, "always_direct": false, "ip_cidrs": [], "sniffed_protocols": [], "included_pack_ids": [], "tcp_ports": [], "tcp_port_ranges": [], "udp_ports": [], "udp_port_ranges": []
   }
 ]

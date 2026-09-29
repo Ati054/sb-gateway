@@ -29,6 +29,43 @@ func TestLegacyDynamicRuntimeRequiresExactHealthPoolOverlap(t *testing.T) {
 	}
 }
 
+func TestLegacyGeoIPRuntimeMigratesOnlySelectedUntaggedRules(t *testing.T) {
+	root := t.TempDir()
+	repository, err := newStateRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := map[string]any{
+		"policies":      []any{map[string]any{"id": "all", "enabled": true, "direct_services": []any{"geoip-cn"}}},
+		"service_packs": []any{map[string]any{"id": "geoip-cn", "upstream_name": "geoip-cn", "enabled": true}},
+	}
+	revision, err := revisionFor(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.writeJSON(filepath.Join(repository.generations, revision+".json"), config); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.writeJSON(filepath.Join(root, "active.json"), map[string]any{"revision": revision}); err != nil {
+		t.Fatal(err)
+	}
+	xray := filepath.Join(root, "xray.json")
+	if err := os.WriteFile(xray, []byte(`{"routing":{"rules":[{"type":"field","ip":["203.0.113.0/24"]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := legacyGeoIPRouting(root, xray)
+	if err != nil || !legacy {
+		t.Fatalf("untagged GeoIP must migrate: %t, %v", legacy, err)
+	}
+	if err := os.WriteFile(xray, []byte(`{"routing":{"rules":[{"type":"field","ruleTag":"sb-geoip-geoip-cn-0-0","ip":["203.0.113.0/24"]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err = legacyGeoIPRouting(root, xray)
+	if err != nil || legacy {
+		t.Fatalf("tagged GeoIP migrated again: %t, %v", legacy, err)
+	}
+}
+
 func TestUpdateRuntimeRevisionPreservesActiveMetadata(t *testing.T) {
 	repository, err := newStateRepository(t.TempDir())
 	if err != nil {

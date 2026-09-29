@@ -330,6 +330,13 @@ func (server *Server) commitSubscriptionNodes(subscription map[string]any, body 
 	if err != nil {
 		return nil, err
 	}
+	var activeConfig map[string]any
+	if activeRevision != "" {
+		activeConfig, err = server.repository.loadGeneration(activeRevision)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Prefer the applied identity during migration from position-based IDs.
 	endpointAppliedCounts := map[string]int{}
 	logicalAppliedCounts := map[string]int{}
@@ -413,10 +420,6 @@ func (server *Server) commitSubscriptionNodes(subscription map[string]any, body 
 			return nil, snapshotErr
 		}
 		if len(snapshot) == 0 {
-			activeConfig, loadErr := server.repository.loadGeneration(activeRevision)
-			if loadErr != nil {
-				return nil, loadErr
-			}
 			activeNodes := runtimeSubscriptionNodes(activeConfig, state)
 			values := make([]any, len(activeNodes))
 			for index := range activeNodes {
@@ -456,8 +459,22 @@ func (server *Server) commitSubscriptionNodes(subscription map[string]any, body 
 		"countries": countries, "cities": cities, "locations_pending": countPendingLocations(storedNodes),
 		"fingerprint": fingerprint, "provider": provider, "refreshed_at": refreshedAt,
 		"update_channel": map[string]any{"kind": channel.Kind, "outbound": channel.Outbound, "label": channel.Label},
-		"activated":      false, "message": "Узлы загружены. Для действующей подписки runtime обновится автоматически; новая подписка подключается после Apply.",
+		"activated":      false, "message": subscriptionRefreshActivationMessage(activeConfig, subscription),
 	}, nil
+}
+
+func subscriptionRefreshActivationMessage(activeConfig, refreshed map[string]any) string {
+	for _, raw := range collectionArray(activeConfig["subscriptions"]) {
+		applied, ok := raw.(map[string]any)
+		if !ok || subscriptionText(applied["id"]) != subscriptionText(refreshed["id"]) {
+			continue
+		}
+		if applied["enabled"] != false && mustSubscriptionSourceRevision(applied) == mustSubscriptionSourceRevision(refreshed) {
+			return "Узлы загружены. Действующая подписка обновится в runtime автоматически."
+		}
+		return "Узлы загружены. Изменения подписки ожидают применения конфигурации."
+	}
+	return "Узлы загружены. Новая подписка начнёт работать после первого применения конфигурации."
 }
 
 func (server *Server) subscriptionRefreshChannels(subscription map[string]any) ([]subscriptionRefreshChannel, error) {

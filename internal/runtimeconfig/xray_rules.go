@@ -28,7 +28,7 @@ func ConvertXrayRules(
 		cache:       make(map[string][]map[string]any),
 	}
 	result := make([]map[string]any, 0, len(objectSlice(values))+1)
-	for _, raw := range objectSlice(values) {
+	for sourceIndex, raw := range objectSlice(values) {
 		action := textValue(raw["action"])
 		if action == "sniff" || action == "hijack-dns" {
 			continue
@@ -46,10 +46,13 @@ func ConvertXrayRules(
 		if err != nil {
 			return nil, err
 		}
-		for _, conditions := range expanded {
+		for expandedIndex, conditions := range expanded {
 			rule, err := convertXrayRuleConditions(conditions, target, selectable)
 			if err != nil {
 				return nil, err
+			}
+			if pack := textValue(conditions["_sb_geoip_pack"]); pack != "" {
+				rule["ruleTag"] = fmt.Sprintf("sb-geoip-%s-%d-%d", pack, sourceIndex, expandedIndex)
 			}
 			result = append(result, rule)
 		}
@@ -74,6 +77,12 @@ func convertXrayRuleConditions(conditions map[string]any, target string, selecta
 	}
 	for _, value := range stringSlice(conditions["domain"]) {
 		domains = append(domains, "full:"+value)
+	}
+	for _, value := range stringSlice(conditions["domain_keyword"]) {
+		domains = append(domains, "keyword:"+value)
+	}
+	for _, value := range stringSlice(conditions["domain_regex"]) {
+		domains = append(domains, "regexp:"+value)
 	}
 	if len(domains) != 0 {
 		rule["domain"] = domains
@@ -126,7 +135,10 @@ func (compiler *xrayRuleCompiler) expand(raw map[string]any) ([]map[string]any, 
 		valid := 0
 		for _, entry := range entries {
 			merged := cloneWithoutKey(base, "")
-			for _, key := range []string{"domain_suffix", "domain", "ip_cidr", "port", "port_range"} {
+			if strings.HasPrefix(name, "geoip-") {
+				merged["_sb_geoip_pack"] = name
+			}
+			for _, key := range []string{"domain_suffix", "domain", "domain_keyword", "domain_regex", "ip_cidr", "port", "port_range"} {
 				if _, exists := entry[key]; exists {
 					merged[key] = stringOrList(entry[key])
 				}
@@ -249,7 +261,7 @@ func joinStringOrList(value any) string {
 }
 
 func hasXrayMatchCondition(value map[string]any) bool {
-	for _, key := range []string{"domain_suffix", "domain", "ip_cidr", "protocol", "network", "port", "port_range"} {
+	for _, key := range []string{"domain_suffix", "domain", "domain_keyword", "domain_regex", "ip_cidr", "protocol", "network", "port", "port_range"} {
 		if joinStringOrList(value[key]) != "" {
 			return true
 		}

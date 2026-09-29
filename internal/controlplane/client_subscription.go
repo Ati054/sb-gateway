@@ -638,6 +638,9 @@ func buildCombinedXrayProfile(config, user map[string]any, nodes []clientProfile
 		})
 	}
 	if plan.Individual {
+		for _, custom := range plan.CustomRoutes {
+			rules = appendXrayClientMatchRules(rules, custom.Match, custom.Target, proxyTarget, useBalancer)
+		}
 		rules = appendXrayClientMatchRules(rules, plan.Match, plan.ExceptionTarget, proxyTarget, useBalancer)
 	}
 	rules = append(rules, xrayClientTarget(map[string]any{
@@ -774,6 +777,13 @@ func buildMihomoProfile(config, user map[string]any, nodes []clientProfileNode) 
 	plan, err := buildClientProfileRoutePlan(config, user, nodes)
 	if err != nil {
 		return nil, err
+	}
+	if plan.Individual {
+		for _, custom := range plan.CustomRoutes {
+			if len(custom.Match.Protocols) != 0 {
+				return nil, errors.New("Mihomo cannot export custom sniffed-protocol routing; use Xray/sing-box or remove the protocol rule")
+			}
+		}
 	}
 	proxies := make([]any, len(nodes))
 	names := make([]any, len(nodes))

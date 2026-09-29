@@ -204,6 +204,12 @@ func stablePolicySelectorMembers(allowed map[string]struct{}, blockTag, policyID
 }
 
 func policyCandidateGroups(policy map[string]any, nodes []map[string]any) []policyCandidateGroup {
+	definedGroups := make(map[string]map[string]any)
+	for _, group := range objectSlice(policy["node_groups"]) {
+		if id := textValue(group["id"]); id != "" {
+			definedGroups[id] = group
+		}
+	}
 	selectors := make([]string, 0)
 	for _, raw := range stringSlice(policy["selection_order"]) {
 		if normalized := normalizeLocationSelector(raw); normalized != "" {
@@ -229,7 +235,15 @@ func policyCandidateGroups(policy map[string]any, nodes []map[string]any) []poli
 			if _, used := claimed[tag]; used {
 				continue
 			}
-			if locationSelectorMatches(kind, value, node, policyAllKnownCountries) {
+			matches := false
+			if kind == "group" {
+				if group, exists := definedGroups[value]; exists {
+					matches = subscriptionNodeGroupMatches(group, node)
+				}
+			} else {
+				matches = locationSelectorMatches(kind, value, node, policyAllKnownCountries)
+			}
+			if matches {
 				members = append(members, tag)
 				claimed[tag] = struct{}{}
 			}
@@ -251,6 +265,12 @@ func normalizeLocationSelector(value string) string {
 	if raw, ok := strings.CutPrefix(value, "region:"); ok {
 		if _, exists := policyRegionCountries[raw]; exists || raw == "other" {
 			return "region:" + raw
+		}
+		return ""
+	}
+	if raw, ok := strings.CutPrefix(value, "group:"); ok {
+		if serviceIDPattern.MatchString(raw) {
+			return "group:" + raw
 		}
 		return ""
 	}
@@ -296,6 +316,69 @@ func normalizeLocationSelector(value string) string {
 		}
 	}
 	return ""
+}
+
+// Subscription groups are local, explicit filters. URI feeds do not have a
+// portable upstream group identifier, so membership is recalculated from the
+// current inventory after every refresh. Empty filters never claim all nodes;
+// an explicit "*" subscription filter claims nodes from every feed.
+func subscriptionNodeGroupMatches(group, node map[string]any) bool {
+	subscriptionIDs := stringSlice(group["subscription_ids"])
+	countries := stringSlice(group["countries"])
+	protocols := stringSlice(group["protocols"])
+	nameParts := strings.Split(textValue(group["name_contains"]), ",")
+	nameTokens := make([]string, 0, len(nameParts))
+	for _, part := range nameParts {
+		if token := normalizedGroupName(part); token != "" {
+			nameTokens = append(nameTokens, token)
+		}
+	}
+	if len(subscriptionIDs)+len(countries)+len(protocols)+len(nameTokens) == 0 {
+		return false
+	}
+	if len(subscriptionIDs) != 0 {
+		subscriptionID := textValue(node["subscription_id"])
+		if subscriptionID == "" || (!stringInSlice(subscriptionIDs, "*") && !stringInSlice(subscriptionIDs, subscriptionID)) {
+			return false
+		}
+	}
+	if len(countries) != 0 && !stringInSlice(countries, strings.ToUpper(textValue(node["country"]))) {
+		return false
+	}
+	if len(protocols) != 0 && !stringInSlice(protocols, strings.ToLower(textValue(node["protocol"]))) {
+		return false
+	}
+	label := normalizedGroupName(textValue(node["label"]))
+	for _, token := range nameTokens {
+		if !strings.Contains(label, token) {
+			return false
+		}
+	}
+	if excluded := strings.TrimSpace(textValue(group["name_excludes"])); excluded != "" {
+		words := strings.FieldsFunc(label, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		})
+		for _, part := range strings.Split(excluded, ",") {
+			word := normalizedGroupName(part)
+			if word != "" && stringInSlice(words, word) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func normalizedGroupName(value string) string {
+	return strings.ToLower(strings.TrimSpace(strings.NewReplacer("\ufe0e", "", "\ufe0f", "").Replace(value)))
+}
+
+func stringInSlice(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func locationSelectorMatches(kind, value string, node map[string]any, allKnown map[string]struct{}) bool {

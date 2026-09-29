@@ -155,10 +155,13 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 		"revision": result["revision"], "apply_mode": result["apply_mode"],
 		"routeros_apply_kind": result["routeros_apply_kind"],
 	})
+	server.wakeRouterOSManagedScripts()
 	server.writeJSON(response, http.StatusOK, result)
 }
 
 func (server *Server) applyConfiguration(ctx context.Context, config map[string]any, actor string) (map[string]any, int, error) {
+	defer server.plannedRuntimeApply.Store(false)
+	defer server.plannedHotPolicyApply.Store(false)
 	normalizeXHTTPModeCompatibility(config)
 	check := validateCurrentConfig(config)
 	if !check.Valid {
@@ -180,6 +183,15 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		return nil, http.StatusInternalServerError, err
 	}
 	previousRuntimeRevision, _ := metadata["runtime_revision"].(string)
+	if err := server.refreshNewSelectedCatalogPacks(active, config); err != nil {
+		log.Printf("control-plane: selected catalog refresh failed: %v", err)
+		check.Valid = false
+		check.Errors = append(check.Errors, validationIssue{
+			Path: "policies", Code: "catalog_unavailable",
+			Message: "A selected service catalog card could not be loaded. The active configuration was not changed; retry when the source is available.",
+		})
+		return nil, http.StatusUnprocessableEntity, applyValidationError{result: check}
+	}
 	nodes, err := server.routerOSPlanNodes(config)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
@@ -248,6 +260,12 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 
 	var receipt runtimeconfig.ActivationReceipt
 	var activated bool
+	var recoveryRouterOS *routeros.Client
+	defer func() {
+		if recoveryRouterOS != nil {
+			recoveryRouterOS.CloseIdleConnections()
+		}
+	}()
 	var stateCommitted bool
 	runtimeCleanupPending := false
 	runtimeCommitPending := false
@@ -260,13 +278,39 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			return err
 		}
 		var activateErr error
-		receipt, activateErr = server.runtime.activate(operationContext, candidate)
+		if native, ok := server.runtime.(*nativeRuntime); ok && !routerOSChanged {
+			receipt, activateErr = native.activateWithHooks(operationContext, candidate, func(hookContext context.Context) error {
+				client, _, clientErr := server.newRouterOSRESTClient(config)
+				if clientErr != nil {
+					return clientErr
+				}
+				if armErr := client.EnterPlannedApplyFailOpen(hookContext); armErr != nil {
+					client.CloseIdleConnections()
+					return armErr
+				}
+				recoveryRouterOS = client
+				return nil
+			}, func(context.Context) error {
+				if err := server.markApplyRecoveryState("runtime_hot_activating"); err != nil {
+					return err
+				}
+				server.plannedHotPolicyApply.Store(true)
+				return nil
+			})
+		} else {
+			receipt, activateErr = server.runtime.activate(operationContext, candidate)
+		}
 		activated = len(receipt.Changed()) > 0
-		runtimeReady = activateErr == nil
 		if activateErr == nil {
 			activateErr = server.markApplyRecoveryState("runtime_activated")
-			runtimeReady = activateErr == nil
 		}
+		if activateErr == nil && recoveryRouterOS != nil {
+			server.plannedRuntimeApply.Store(true)
+			gateContext, cancelGate := context.WithTimeout(operationContext, 100*time.Second)
+			activateErr = recoveryRouterOS.WaitManagedDiversion(gateContext)
+			cancelGate()
+		}
+		runtimeReady = activateErr == nil
 		return activateErr
 	}
 	rollbackRuntime := func() error {

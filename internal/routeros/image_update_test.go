@@ -73,6 +73,7 @@ func TestScheduleImageUpdateInstallsBoundedWorkerBeforeScheduler(t *testing.T) {
 		`\"traffic_ready\":true`,
 		`comment="SB-GATEWAY container rollback"`,
 		`sbGatewayImageProbation`,
+		`:if (($sbGatewayImageMisses < 60) && ($restartCount = 0)) do={ :return true }`,
 		`[/container/get $candidate stopped] = true`,
 		`[/container/get $failed stopped] = true`,
 		`[/container/get $current stopped] = true`,

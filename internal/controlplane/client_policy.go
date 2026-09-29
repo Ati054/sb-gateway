@@ -57,12 +57,18 @@ type clientRouteMatch struct {
 	UDPPorts  []string
 }
 
+type clientCustomRoute struct {
+	Match  clientRouteMatch
+	Target string
+}
+
 type clientProfileRoutePlan struct {
 	Individual        bool
 	ExceptionTarget   string
 	DefaultTarget     string
 	DomainStrategy    string
 	Match             clientRouteMatch
+	CustomRoutes      []clientCustomRoute
 	AllowedLANCIDRs   []string
 	AllowedLANPorts   []int
 	InternalZones     []string
@@ -146,6 +152,49 @@ func buildClientProfileRoutePlan(config, user map[string]any, nodes []clientProf
 		normalizedClientDomains(append(stringsOf(policy["direct_domains"]), stringsOf(user["direct_domains"])...))...,
 	))
 	plan.Match = match
+	for _, rule := range objects(policy["custom_routes"]) {
+		custom := clientCustomRoute{}
+		switch text(rule["target"]) {
+		case "wan":
+			custom.Target = clientRouteDirect
+		case "vless":
+			custom.Target = clientRouteProxy
+		default:
+			return clientProfileRoutePlan{}, errors.New("custom client route target must be WAN or VLESS")
+		}
+		value := strings.TrimSpace(text(rule["value"]))
+		if value == "" {
+			return clientProfileRoutePlan{}, errors.New("custom client route value cannot be empty")
+		}
+		switch text(rule["kind"]) {
+		case "domain":
+			custom.Match.Domains = []string{strings.ToLower(value)}
+			if protocols := strings.TrimSpace(text(rule["protocols"])); protocols != "" {
+				custom.Match.Protocols = strings.Split(protocols, ",")
+			}
+		case "ip":
+			if address, err := netip.ParseAddr(value); err == nil {
+				value = netip.PrefixFrom(address, address.BitLen()).String()
+			} else if _, err := netip.ParsePrefix(value); err != nil {
+				return clientProfileRoutePlan{}, fmt.Errorf("invalid custom client route IP %q", value)
+			}
+			custom.Match.IPCIDRs = []string{value}
+			if protocols := strings.TrimSpace(text(rule["protocols"])); protocols != "" {
+				custom.Match.Protocols = strings.Split(protocols, ",")
+			}
+		case "port":
+			if text(rule["network"]) == "udp" {
+				custom.Match.UDPPorts = []string{value}
+			} else if text(rule["network"]) == "tcp" {
+				custom.Match.TCPPorts = []string{value}
+			} else {
+				return clientProfileRoutePlan{}, errors.New("custom client port route needs TCP or UDP")
+			}
+		default:
+			return clientProfileRoutePlan{}, fmt.Errorf("unsupported custom client route kind %q", text(rule["kind"]))
+		}
+		plan.CustomRoutes = append(plan.CustomRoutes, custom)
+	}
 	return plan, nil
 }
 
@@ -198,6 +247,9 @@ func buildClientRouteMatch(serviceIDs []string, catalog map[string]rulesets.Serv
 		pack, ok := catalog[id]
 		if !ok {
 			return fmt.Errorf("client route references unknown service %q", id)
+		}
+		if pack.UpdateMode == "geoip" {
+			return fmt.Errorf("GeoIP country %q is gateway-only and cannot be exported in an individual client profile", id)
 		}
 		seenPacks[id] = true
 		match.Domains = append(match.Domains, normalizedClientDomains(pack.FallbackDomains)...)
@@ -537,6 +589,18 @@ func appendXrayClientMatchRules(rules []any, match clientRouteMatch, target, pro
 	base := func() map[string]any {
 		return map[string]any{"type": "field", "inboundTag": []any{"tun-in"}}
 	}
+	if domains := xrayClientDomainMatchers(match); len(domains) != 0 && len(match.Protocols) != 0 {
+		rule := base()
+		rule["domain"], rule["protocol"] = domains, match.Protocols
+		rules = append(rules, xrayClientTarget(rule, target, proxyTarget, useBalancer))
+		return rules
+	}
+	if len(match.IPCIDRs) != 0 && len(match.Protocols) != 0 {
+		rule := base()
+		rule["ip"], rule["protocol"] = match.IPCIDRs, match.Protocols
+		rules = append(rules, xrayClientTarget(rule, target, proxyTarget, useBalancer))
+		return rules
+	}
 	if domains := xrayClientDomainMatchers(match); len(domains) != 0 {
 		rule := base()
 		rule["domain"] = domains
@@ -582,6 +646,17 @@ func buildXrayClientDNS(plan clientProfileRoutePlan) map[string]any {
 		})
 	}
 	if plan.Individual {
+		for index, custom := range plan.CustomRoutes {
+			if len(custom.Match.Protocols) != 0 {
+				continue
+			}
+			if domains := xrayClientDomainMatchers(custom.Match); len(domains) != 0 {
+				servers = append(servers, map[string]any{
+					"address": xrayClientResolverURL(clientDNSForTarget(plan, custom.Target)), "domains": domains,
+					"skipFallback": true, "finalQuery": true, "tag": fmt.Sprintf("client-dns-custom-%d", index),
+				})
+			}
+		}
 		if domains := xrayClientDomainMatchers(plan.Match); len(domains) != 0 {
 			servers = append(servers, map[string]any{
 				"address": xrayClientResolverURL(clientDNSForTarget(plan, plan.ExceptionTarget)), "domains": domains,
@@ -627,6 +702,14 @@ func appendXrayClientDNSRoutes(rules []any, plan clientProfileRoutePlan, proxyTa
 		rules = append(rules, xrayClientTarget(map[string]any{
 			"type": "field", "inboundTag": []any{"client-dns-internal"},
 		}, clientRouteProxy, proxyTarget, useBalancer))
+	}
+	for index, custom := range plan.CustomRoutes {
+		if len(custom.Match.Domains) == 0 || len(custom.Match.Protocols) != 0 {
+			continue
+		}
+		rules = append(rules, xrayClientTarget(map[string]any{
+			"type": "field", "inboundTag": []any{fmt.Sprintf("client-dns-custom-%d", index)},
+		}, custom.Target, proxyTarget, useBalancer))
 	}
 	if plan.Individual && len(xrayClientDomainMatchers(plan.Match)) != 0 {
 		rules = append(rules, xrayClientTarget(map[string]any{
@@ -696,6 +779,9 @@ func buildMihomoClientRules(plan clientProfileRoutePlan) []any {
 		rules = append(rules, kind+","+cidr+",DIRECT,no-resolve")
 	}
 	if plan.Individual {
+		for _, custom := range plan.CustomRoutes {
+			rules = appendMihomoClientMatchRules(rules, custom.Match, mihomoTarget(custom.Target))
+		}
 		rules = appendMihomoClientMatchRules(rules, plan.Match, mihomoTarget(plan.ExceptionTarget))
 	}
 	rules = append(rules, "MATCH,"+mihomoTarget(plan.DefaultTarget))
@@ -730,6 +816,12 @@ func buildMihomoClientDNS(plan clientProfileRoutePlan) map[string]any {
 		resolver := clientDNSForTarget(plan, plan.ExceptionTarget) + "#" + target
 		for _, domain := range plan.Match.Domains {
 			policy["+."+domain] = resolver
+		}
+		for _, custom := range plan.CustomRoutes {
+			resolver := clientDNSForTarget(plan, custom.Target) + "#" + mihomoTarget(custom.Target)
+			for _, domain := range custom.Match.Domains {
+				policy["+."+domain] = resolver
+			}
 		}
 	}
 	if len(policy) != 0 {

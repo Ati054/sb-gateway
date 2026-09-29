@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -67,6 +68,8 @@ type Server struct {
 	mux                       *http.ServeMux
 	now                       func() time.Time
 	trafficReadyAfter         time.Time
+	plannedRuntimeApply       atomic.Bool
+	plannedHotPolicyApply     atomic.Bool
 	mu                        sync.RWMutex
 	passwordMu                sync.Mutex
 	mutationMu                sync.Mutex
@@ -87,6 +90,7 @@ type Server struct {
 	validationResult          configValidation
 	subscriptionMu            sync.Mutex
 	subscriptionWake          chan struct{}
+	routerOSScriptWake        chan struct{}
 	xrayLoggingWake           chan struct{}
 	syncSubscriptionEndpoints func(context.Context, map[string]any, []string, bool) error
 	servicePackMu             sync.Mutex
@@ -142,6 +146,7 @@ func NewServer(opts Options) (*Server, error) {
 		trafficReadyAfter:     time.Now().UTC(),
 		fetchSubscription:     newSubscriptionFetcher(),
 		subscriptionWake:      make(chan struct{}, 1),
+		routerOSScriptWake:    make(chan struct{}, 1),
 		xrayLoggingWake:       make(chan struct{}, 1),
 		fetchViaProxy:         newSubscriptionProxyFetcher(),
 		routeSimulator:        routeSimulator,
@@ -188,6 +193,7 @@ func Run(ctx context.Context, opts Options) error {
 	go server.runApplyRecoveryScheduler(runContext)
 	go server.runRouterOSLiveNetworkScheduler(runContext)
 	go server.runRouterOSFetchLogScheduler(runContext)
+	go server.runRouterOSManagedScriptsScheduler(runContext)
 	go server.runCDNFeedScheduler(runContext)
 	go server.runACMEScheduler(runContext)
 	if server.runtime != nil {

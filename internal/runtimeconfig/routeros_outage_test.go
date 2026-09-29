@@ -191,11 +191,11 @@ func TestOutageCustomRuleSetAcceptsReviewedTLDAndIgnoresEmptyForSingleLANDevice(
 	}
 }
 
-func TestOutageCustomRuleSetReportsOriginalUnsafeDomain(t *testing.T) {
+func TestOutageCustomRuleSetSkipsSingleLabelAndKeepsSafeDomain(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(
 		filepath.Join(root, "unsafe-device.json"),
-		[]byte(`{"rules":[{"domain_suffix":["not-a-domain"]}]}`),
+		[]byte(`{"rules":[{"domain_suffix":["not-a-domain", "example.com"]}]}`),
 		0600,
 	); err != nil {
 		t.Fatal(err)
@@ -204,9 +204,12 @@ func TestOutageCustomRuleSetReportsOriginalUnsafeDomain(t *testing.T) {
 		"id": "single-device", "enabled": true, "container_outage": "lan_only",
 		"source_cidrs": []any{"192.168.50.20/32"}, "direct_services": []any{"unsafe-device"},
 	}}}
-	_, err := routerOSOutageGroups(config, root)
-	if err == nil || !strings.Contains(err.Error(), `unsafe outage domain "not-a-domain"`) {
-		t.Fatalf("unsafe source domain was not preserved: %v", err)
+	groups, err := routerOSOutageGroups(config, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || !reflect.DeepEqual(groups[0].Domains, []string{"example.com"}) {
+		t.Fatalf("unsafe geosite label entered RouterOS outage DNS: %#v", groups)
 	}
 }
 
