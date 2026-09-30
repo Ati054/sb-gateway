@@ -221,6 +221,16 @@ func (runtime *responsiveSelectorRuntime) UnderlayStatus() underlayEvidence {
 }
 
 func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool) map[string]probeEvidence {
+	return runtime.probeAvailabilityParallel(candidates, onResult, true)
+}
+
+func (runtime *responsiveSelectorRuntime) ProbeEmergencyAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool) map[string]probeEvidence {
+	// Recover the confirmed outage before unrelated routine checks can preempt
+	// a ready reserve. Runtime replacement and shutdown still cancel the batch.
+	return runtime.probeAvailabilityParallel(candidates, onResult, false)
+}
+
+func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies bool) map[string]probeEvidence {
 	measured := make(map[string]probeEvidence, len(candidates))
 	lanes := runtime.backgrounds
 	if len(lanes) == 0 && runtime.background != nil {
@@ -291,6 +301,12 @@ func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates [
 	for remaining > 0 {
 		select {
 		case value := <-results:
+			if generationStamp(runtime.generationPaths) != stamp || ctx.Err() != nil {
+				cancel()
+				<-done
+				runtime.interrupted = errHealthYield
+				return measured
+			}
 			remaining--
 			measured[value.candidate] = value.evidence
 			if onResult != nil && onResult(value.candidate, value.evidence) {
@@ -305,7 +321,7 @@ func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates [
 				runtime.interrupted = errHealthYield
 				return measured
 			}
-			if runtime.check != nil {
+			if checkOtherPolicies && runtime.check != nil {
 				if err := runtime.check(); err != nil {
 					cancel()
 					<-done
@@ -321,6 +337,9 @@ func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates [
 		}
 	}
 	<-done
+	if generationStamp(runtime.generationPaths) != stamp || ctx.Err() != nil {
+		runtime.interrupted = errHealthYield
+	}
 	return measured
 }
 
