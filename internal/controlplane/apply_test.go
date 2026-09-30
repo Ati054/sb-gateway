@@ -227,6 +227,9 @@ func TestFirstApplyRollbackConfigRemovesTrafficAndExposure(t *testing.T) {
 }
 
 func TestApplyOperationContextSurvivesClientDisconnectAndRemainsBounded(t *testing.T) {
+	if applyResponseTimeout < applyOperationTimeout+xrayRuntimeReadinessTimeout+time.Minute {
+		t.Fatal("Apply response deadline does not cover recovery of a large GeoIP runtime")
+	}
 	parent, cancelParent := context.WithCancel(context.Background())
 	operation, cancelOperation := applyOperationContext(parent)
 	defer cancelOperation()
