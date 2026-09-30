@@ -186,6 +186,18 @@ func (runtime *nativeRuntime) activateWithXrayRestartHook(ctx context.Context, c
 
 const hotPolicyActivationTimeout = 90 * time.Second
 
+// Include the runner's 180-second routing compilation window and setup time.
+const xrayRuntimeReadinessTimeout = 210 * time.Second
+
+func runtimeReadinessTimeout(programs []string) time.Duration {
+	for _, program := range programs {
+		if program == "xray" {
+			return xrayRuntimeReadinessTimeout
+		}
+	}
+	return 30 * time.Second
+}
+
 func hotPolicyChange(changed []string) bool {
 	return len(changed) == 1 && changed[0] == "urltest-pool.json"
 }
@@ -243,7 +255,7 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 	if err := runtime.controller.Restart(ctx, programs); err != nil {
 		return receipt, fmt.Errorf("restart runtime: %w", err)
 	}
-	probeContext, cancelProbe := context.WithTimeout(ctx, 30*time.Second)
+	probeContext, cancelProbe := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
 	defer cancelProbe()
 	if err := runtime.controller.Probe(probeContext, programs); err != nil {
 		return receipt, fmt.Errorf("probe runtime: %w", err)
@@ -423,7 +435,7 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 	if err := runtime.controller.Restart(ctx, programs); err != nil {
 		return err
 	}
-	probeContext, cancelProbe := context.WithTimeout(ctx, 30*time.Second)
+	probeContext, cancelProbe := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
 	defer cancelProbe()
 	return runtime.controller.Probe(probeContext, programs)
 }

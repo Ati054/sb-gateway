@@ -32,15 +32,11 @@ else
   rm -f "$prevalidated_marker"
 fi
 
-# A normal Apply already validated this exact config and gets the shortest
-# interruption budget. Cold container/runtime starts need more room for large
-# RouterOS/ARM64 configs, including large active GeoIP country sets. The
-# prevalidation marker is one-shot, so a timed-out fast attempt automatically
-# retries through the cold recovery budget.
+# Prevalidation skips the syntax check, but the running core still compiles
+# routing conditions. Apply and cold starts both need room for large GeoIP
+# country sets on ARM64. Readiness ends this window as soon as startup succeeds.
 if [ -n "$configured_startup_timeout_seconds" ]; then
   startup_timeout_seconds="$configured_startup_timeout_seconds"
-elif [ "$skip_validation" -eq 1 ]; then
-  startup_timeout_seconds=15
 else
   startup_timeout_seconds=180
 fi
