@@ -47,8 +47,6 @@ func TestXrayStartupUsesOneBoundedReadinessAndRestoreBudget(t *testing.T) {
 	script := string(body)
 	for _, required := range []string{
 		`configured_startup_timeout_seconds="${SB_XRAY_STARTUP_TIMEOUT_SECONDS:-}"`,
-		`elif [ "$skip_validation" -eq 1 ]; then`,
-		`startup_timeout_seconds=15`,
 		`startup_timeout_seconds=180`,
 		`startup_deadline=$((startup_started + startup_timeout_seconds))`,
 		`while [ "$xray_api_ready" -ne 1 ]; do`,
@@ -64,8 +62,8 @@ func TestXrayStartupUsesOneBoundedReadinessAndRestoreBudget(t *testing.T) {
 	if strings.Contains(script, `tun_attempt`) || strings.Contains(script, `xray_api_attempt`) {
 		t.Fatal("startup still contains sequential readiness retry budgets")
 	}
-	if strings.Index(script, `rm -f "$prevalidated_marker"`) > strings.Index(script, `elif [ "$skip_validation" -eq 1 ]; then`) {
-		t.Fatal("one-shot prevalidation marker must be consumed before choosing the fast Apply budget")
+	if strings.Contains(script, `startup_timeout_seconds=15`) {
+		t.Fatal("prevalidation must not shorten the running core's GeoIP compilation budget")
 	}
 }
 

@@ -81,7 +81,7 @@ type routerOSApplyFunc func(
 
 const (
 	applyOperationTimeout = 5 * time.Minute
-	applyResponseTimeout  = applyOperationTimeout + time.Minute
+	applyResponseTimeout  = applyOperationTimeout + xrayRuntimeReadinessTimeout + time.Minute
 )
 
 // An authenticated Apply is a transaction, not a streaming request. Restarting
@@ -317,7 +317,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		if !activated || stateCommitted {
 			return nil
 		}
-		rollbackContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rollbackContext, cancel := context.WithTimeout(context.Background(), xrayRuntimeReadinessTimeout)
 		defer cancel()
 		err := server.runtime.rollback(rollbackContext, receipt)
 		if err == nil {

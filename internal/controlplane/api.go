@@ -31,7 +31,7 @@ const (
 	apiPrefix                = "/api/v1"
 	maxRequestBytes          = 2 << 20
 	controlPlaneReadTimeout  = 10 * time.Minute
-	controlPlaneWriteTimeout = 7 * time.Minute
+	controlPlaneWriteTimeout = 10 * time.Minute
 )
 
 type Options struct {

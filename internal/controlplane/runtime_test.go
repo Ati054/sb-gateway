@@ -17,9 +17,10 @@ import (
 )
 
 type recordingRuntimeController struct {
-	restarts [][]string
-	probes   [][]string
-	observe  func()
+	restarts     [][]string
+	probes       [][]string
+	observe      func()
+	probeContext func(context.Context)
 }
 
 func (controller *recordingRuntimeController) Restart(_ context.Context, names []string) error {
@@ -30,7 +31,10 @@ func (controller *recordingRuntimeController) Restart(_ context.Context, names [
 	return nil
 }
 
-func (controller *recordingRuntimeController) Probe(_ context.Context, names []string) error {
+func (controller *recordingRuntimeController) Probe(ctx context.Context, names []string) error {
+	if controller.probeContext != nil {
+		controller.probeContext(ctx)
+	}
 	if controller.observe != nil {
 		controller.observe()
 	}
@@ -116,6 +120,52 @@ func TestArtifactRevisionIsStableAndContentAddressed(t *testing.T) {
 	changed := artifactRevision(map[string][]byte{"a": []byte("one"), "b": []byte("three")})
 	if first != second || first == changed || len(first) != 64 {
 		t.Fatalf("unexpected revisions: %q %q %q", first, second, changed)
+	}
+}
+
+func TestNativeRuntimeReadinessCoversRoutingCompilationAndRollback(t *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		artifact string
+		budget   time.Duration
+	}{
+		{"Xray country routing", "xray.json", 210 * time.Second},
+		{"Nginx only", "nginx.conf", 30 * time.Second},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			root := t.TempDir()
+			live := filepath.Join(root, scenario.artifact)
+			if err := os.WriteFile(live, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{scenario.artifact: live})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate, err := store.Prepare(strings.Repeat("f", 64), map[string][]byte{scenario.artifact: []byte("new")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller := &recordingRuntimeController{probeContext: func(ctx context.Context) {
+				deadline, ok := ctx.Deadline()
+				remaining := time.Until(deadline)
+				if !ok || remaining < scenario.budget-time.Second || remaining > scenario.budget {
+					t.Errorf("readiness budget = %s, want %s", remaining, scenario.budget)
+				}
+			}}
+			runtime := &nativeRuntime{store: store, controller: controller,
+				validate: func(context.Context, runtimeconfig.RuntimeCandidate, []string) error { return nil }}
+			receipt, err := runtime.activate(context.Background(), candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.rollback(context.Background(), receipt); err != nil {
+				t.Fatal(err)
+			}
+			if len(controller.probes) != 2 {
+				t.Fatalf("activation and rollback probes = %v", controller.probes)
+			}
+		})
 	}
 }
 
