@@ -27,6 +27,10 @@ type parallelAvailabilityRuntime interface {
 	ProbeAvailabilityParallel([]string, func(string, probeEvidence) bool) map[string]probeEvidence
 }
 
+type emergencyAvailabilityRuntime interface {
+	ProbeEmergencyAvailabilityParallel([]string, func(string, probeEvidence) bool) map[string]probeEvidence
+}
+
 func failureConfirmationThreshold(evidence probeEvidence, configured int) int {
 	switch evidence.Failure {
 	case probeFailureFatal, probeFailureTLS:
@@ -144,7 +148,9 @@ func (controller *healthController) probeEmergencyCandidates(policyID string, ca
 		selected = candidate
 		return true
 	}
-	if parallel, ok := controller.runtime.(parallelAvailabilityRuntime); ok && len(candidates) > 1 {
+	if urgent, ok := controller.runtime.(emergencyAvailabilityRuntime); ok && len(candidates) > 1 {
+		measured = urgent.ProbeEmergencyAvailabilityParallel(candidates, accept)
+	} else if parallel, ok := controller.runtime.(parallelAvailabilityRuntime); ok && len(candidates) > 1 {
 		measured = parallel.ProbeAvailabilityParallel(candidates, accept)
 	} else {
 		for _, candidate := range candidates {
