@@ -19,20 +19,20 @@ import (
 	"time"
 )
 
-// TestXrayV2699RendererCompatibility runs only when XRAY_TEST_BINARY names an
-// official Xray 26.9.9 executable. It verifies syntax of complete renderer
+// TestXrayPinnedRendererCompatibility runs only when XRAY_TEST_BINARY names the
+// pinned Xray 26.9.30 executable. It verifies syntax of complete renderer
 // output; it deliberately does not claim a Hysteria or Reverse data-plane
 // handshake.
-func TestXrayV2699RendererCompatibility(t *testing.T) {
+func TestXrayPinnedRendererCompatibility(t *testing.T) {
 	binary := strings.TrimSpace(os.Getenv("XRAY_TEST_BINARY"))
 	if binary == "" {
-		t.Skip("set XRAY_TEST_BINARY to an official Xray 26.9.9 binary")
+		t.Skip("set XRAY_TEST_BINARY to the pinned Xray 26.9.30 binary")
 	}
 	contextWithDeadline, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	version, err := exec.CommandContext(contextWithDeadline, binary, "version").CombinedOutput()
-	if err != nil || !strings.Contains(string(version), "Xray 26.9.9") {
-		t.Fatalf("XRAY_TEST_BINARY must be Xray 26.9.9: %v: %s", err, version)
+	if err != nil || !strings.Contains(string(version), "Xray 26.9.30") {
+		t.Fatalf("XRAY_TEST_BINARY must be Xray 26.9.30: %v: %s", err, version)
 	}
 
 	certificatePath, keyPath := writeXrayCompatCertificate(t)
@@ -72,7 +72,7 @@ func TestXrayV2699RendererCompatibility(t *testing.T) {
 		},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			candidate := xrayV2699RendererCandidate(t, certificatePath, keyPath, scenario.quic, scenario.masquerade)
+			candidate := xrayPinnedRendererCandidate(t, certificatePath, keyPath, scenario.quic, scenario.masquerade)
 			hysteria := findXraySourceRule(objectSlice(candidate.Config["inbounds"]), func(inbound map[string]any) bool {
 				return inbound["tag"] == "hysteria2-direct"
 			})
@@ -101,7 +101,7 @@ func TestXrayV2699RendererCompatibility(t *testing.T) {
 			}
 			output, runErr := exec.CommandContext(contextWithDeadline, binary, "run", "-test", "-config", configPath).CombinedOutput()
 			if runErr != nil {
-				t.Fatalf("Xray 26.9.9 rejected renderer output: %v: %s", runErr, output)
+				t.Fatalf("Xray 26.9.30 rejected renderer output: %v: %s", runErr, output)
 			}
 		})
 	}
@@ -134,11 +134,11 @@ func TestXrayV2699RendererCompatibility(t *testing.T) {
 	}
 	output, err := exec.CommandContext(contextWithDeadline, binary, "run", "-test", "-config", configPath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("Xray 26.9.9 rejected UDP hopping client profile: %v: %s", err, output)
+		t.Fatalf("Xray 26.9.30 rejected UDP hopping client profile: %v: %s", err, output)
 	}
 }
 
-func xrayV2699RendererCandidate(t *testing.T, certificatePath, keyPath string, quic, masquerade map[string]any) (result XrayCandidateArtifacts) {
+func xrayPinnedRendererCandidate(t *testing.T, certificatePath, keyPath string, quic, masquerade map[string]any) (result XrayCandidateArtifacts) {
 	t.Helper()
 	config := map[string]any{
 		"system": map[string]any{"networking": map[string]any{

@@ -1,0 +1,429 @@
+diff --git a/app/proxyman/outbound/outbound.go b/app/proxyman/outbound/outbound.go
+index 5de00fb..4eb8f53 100644
+--- a/app/proxyman/outbound/outbound.go
++++ b/app/proxyman/outbound/outbound.go
+@@ -166,14 +166,14 @@ func (m *Manager) ListHandlers(ctx context.Context) []outbound.Handler {
+ 
+ // Select implements outbound.HandlerSelector.
+ func (m *Manager) Select(selectors []string) []string {
++	m.access.RLock()
++	defer m.access.RUnlock()
++
+ 	key := strings.Join(selectors, ",")
+ 	if cache, ok := m.tagsCache.Load(key); ok {
+ 		return cache.([]string)
+ 	}
+ 
+-	m.access.RLock()
+-	defer m.access.RUnlock()
+-
+ 	tags := make([]string, 0, len(selectors))
+ 
+ 	for tag := range m.taggedHandler {
+diff --git a/transport/internet/tls/config.go b/transport/internet/tls/config.go
+index f33e829..e2d4737 100644
+--- a/transport/internet/tls/config.go
++++ b/transport/internet/tls/config.go
+@@ -13,6 +13,8 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"google.golang.org/protobuf/proto"
++
+ 	"github.com/xtls/xray-core/common/errors"
+ 	"github.com/xtls/xray-core/common/net"
+ 	"github.com/xtls/xray-core/common/ocsp"
+@@ -47,11 +49,41 @@ func (c *Config) loadSelfCertPool() (*x509.CertPool, error) {
+ 
+ // BuildCertificates builds a list of TLS certificates from proto definition.
+ func (c *Config) BuildCertificates() []*tls.Certificate {
+-	certs := make([]*tls.Certificate, 0, len(c.Certificate))
+-	for _, entry := range c.Certificate {
+-		if entry.Usage != Certificate_ENCIPHERMENT {
++	return c.buildCertificateSnapshots().load()
++}
++
++type certificateSnapshots struct {
++	access sync.RWMutex
++	certs  []*tls.Certificate
++}
++
++func (s *certificateSnapshots) load() []*tls.Certificate {
++	s.access.RLock()
++	defer s.access.RUnlock()
++	return slices.Clone(s.certs)
++}
++
++func (s *certificateSnapshots) append(certificate *tls.Certificate) int {
++	s.access.Lock()
++	defer s.access.Unlock()
++	s.certs = append(s.certs, certificate)
++	return len(s.certs) - 1
++}
++
++func (s *certificateSnapshots) store(index int, certificate *tls.Certificate) {
++	s.access.Lock()
++	defer s.access.Unlock()
++	s.certs[index] = certificate
++}
++
++func (c *Config) buildCertificateSnapshots() *certificateSnapshots {
++	snapshots := &certificateSnapshots{certs: make([]*tls.Certificate, 0, len(c.Certificate))}
++	for _, configured := range c.Certificate {
++		if configured.Usage != Certificate_ENCIPHERMENT {
+ 			continue
+ 		}
++		// Each ticker owns its proto state; published TLS certificates are immutable.
++		entry := proto.Clone(configured).(*Certificate)
+ 		getX509KeyPair := func() *tls.Certificate {
+ 			keyPair, err := tls.X509KeyPair(entry.Certificate, entry.Key)
+ 			if err != nil {
+@@ -65,14 +97,16 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
+ 			}
+ 			return &keyPair
+ 		}
+-		if keyPair := getX509KeyPair(); keyPair != nil {
+-			certs = append(certs, keyPair)
+-		} else {
++		keyPair := getX509KeyPair()
++		if keyPair == nil {
+ 			continue
+ 		}
+-		index := len(certs) - 1
++		index := snapshots.append(keyPair)
+ 		setupOcspTicker(entry, func(isReloaded, isOcspstapling bool) {
+-			cert := certs[index]
++			if !isReloaded && !isOcspstapling {
++				return
++			}
++			cert := snapshots.load()[index]
+ 			if isReloaded {
+ 				if newKeyPair := getX509KeyPair(); newKeyPair != nil {
+ 					cert = newKeyPair
+@@ -84,13 +118,15 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
+ 				if newOCSPData, err := ocsp.GetOCSPForCert(cert.Certificate); err != nil {
+ 					errors.LogWarningInner(context.Background(), err, "ignoring invalid OCSP")
+ 				} else if string(newOCSPData) != string(cert.OCSPStaple) {
+-					cert.OCSPStaple = newOCSPData
++					updated := *cert
++					updated.OCSPStaple = newOCSPData
++					cert = &updated
+ 				}
+ 			}
+-			certs[index] = cert
++			snapshots.store(index, cert)
+ 		})
+ 	}
+-	return certs
++	return snapshots
+ }
+ 
+ func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
+@@ -243,8 +279,9 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
+ 	}
+ }
+ 
+-func getNewGetCertificateFunc(certs []*tls.Certificate, rejectUnknownSNI bool) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
++func getNewGetCertificateFunc(snapshots *certificateSnapshots, rejectUnknownSNI bool) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+ 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
++		certs := snapshots.load()
+ 		if len(certs) == 0 {
+ 			return nil, errNoCertificates
+ 		}
+@@ -411,7 +448,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
+ 	if len(caCerts) > 0 {
+ 		config.GetCertificate = getGetCertificateFunc(config, caCerts)
+ 	} else {
+-		config.GetCertificate = getNewGetCertificateFunc(c.BuildCertificates(), c.RejectUnknownSni)
++		config.GetCertificate = getNewGetCertificateFunc(c.buildCertificateSnapshots(), c.RejectUnknownSni)
+ 	}
+ 
+ 	if sn := c.parseServerName(); len(sn) > 0 {
+diff --git a/transport/internet/splithttp/client.go b/transport/internet/splithttp/client.go
+index 7059258..7aee0d4 100644
+--- a/transport/internet/splithttp/client.go
++++ b/transport/internet/splithttp/client.go
+@@ -53,11 +53,14 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 	// logs
+ 	gotConn := done.New()
+ 	dialErr := make(chan error, 1)
++	var connOnce sync.Once
+ 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+ 		GotConn: func(connInfo httptrace.GotConnInfo) {
+-			remoteAddr = connInfo.Conn.RemoteAddr()
+-			localAddr = connInfo.Conn.LocalAddr()
+-			gotConn.Close()
++			connOnce.Do(func() {
++				remoteAddr = connInfo.Conn.RemoteAddr()
++				localAddr = connInfo.Conn.LocalAddr()
++				gotConn.Close()
++			})
+ 		},
+ 	})
+ 
+@@ -72,7 +75,8 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 	}
+ 	c.transportConfig.FillStreamRequest(req, sessionId, "")
+ 
+-	wrc = &WaitReadCloser{wait: done.New()}
++	responseBody := &WaitReadCloser{wait: done.New()}
++	wrc = responseBody
+ 	release := c.owner.AcquireDialer()
+ 	go func() {
+ 		defer release()
+@@ -85,7 +89,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 			dialErr <- err
+ 			gotConn.Close()
+ 			common.Close(body)
+-			wrc.Close()
++			responseBody.Close()
+ 			return
+ 		}
+ 		if resp.StatusCode != 200 && !uploadOnly {
+@@ -95,10 +99,10 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 			io.Copy(io.Discard, resp.Body)
+ 			resp.Body.Close() // if it is called immediately, the upload will be interrupted also
+ 			common.Close(body)
+-			wrc.Close()
++			responseBody.Close()
+ 			return
+ 		}
+-		wrc.(*WaitReadCloser).Set(resp.Body)
++		responseBody.Set(resp.Body)
+ 	}()
+ 
+ 	<-gotConn.Wait()
+diff --git a/app/proxyman/outbound/handler_test.go b/app/proxyman/outbound/handler_test.go
+index 7029442..afd97bc 100644
+--- a/app/proxyman/outbound/handler_test.go
++++ b/app/proxyman/outbound/handler_test.go
+@@ -107,11 +107,11 @@ func TestTagsCache(t *testing.T) {
+ 	v.AddFeature(ohm)
+ 	ctx := context.WithValue(context.Background(), xrayKey, v)
+ 
+-	stop_add_rm := false
++	var stop_add_rm atomic.Bool
+ 	wg_add_rm := sync.WaitGroup{}
+ 	addHandlers := func() {
+ 		defer wg_add_rm.Done()
+-		for !stop_add_rm {
++		for !stop_add_rm.Load() {
+ 			time.Sleep(delay)
+ 			idx := counter.Add(1)
+ 			tag := fmt.Sprintf("%s%d", tags_prefix, idx)
+@@ -134,7 +134,7 @@ func TestTagsCache(t *testing.T) {
+ 
+ 	rmHandlers := func() {
+ 		defer wg_add_rm.Done()
+-		for !stop_add_rm {
++		for !stop_add_rm.Load() {
+ 			time.Sleep(delay)
+ 			tags.Range(func(key interface{}, value interface{}) bool {
+ 				if _, ok := tags.LoadAndDelete(key); ok {
+@@ -149,10 +149,10 @@ func TestTagsCache(t *testing.T) {
+ 
+ 	selectors := []string{tags_prefix}
+ 	wg_get := sync.WaitGroup{}
+-	stop_get := false
++	var stop_get atomic.Bool
+ 	getTags := func() {
+ 		defer wg_get.Done()
+-		for !stop_get {
++		for !stop_get.Load() {
+ 			time.Sleep(delay)
+ 			_ = ohm.Select(selectors)
+ 			// t.Logf("get tags: %v", tag)
+@@ -168,8 +168,8 @@ func TestTagsCache(t *testing.T) {
+ 	}
+ 
+ 	time.Sleep(test_duration)
+-	stop_add_rm = true
++	stop_add_rm.Store(true)
+ 	wg_add_rm.Wait()
+-	stop_get = true
++	stop_get.Store(true)
+ 	wg_get.Wait()
+ }
+diff --git a/transport/internet/splithttp/splithttp_test.go b/transport/internet/splithttp/splithttp_test.go
+index 62ca858..9c5b2dd 100644
+--- a/transport/internet/splithttp/splithttp_test.go
++++ b/transport/internet/splithttp/splithttp_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"runtime"
++	"sync/atomic"
+ 	"testing"
+ 	"time"
+ 
+@@ -248,7 +249,7 @@ func Test_ListenXHAndDial_QUIC(t *testing.T) {
+ 		},
+ 	}
+ 
+-	serverClosed := false
++	var serverClosed atomic.Bool
+ 	listen, err := ListenXH(context.Background(), net.LocalHostIP, listenPort, streamSettings, func(conn stat.Connection) {
+ 		go func() {
+ 			defer conn.Close()
+@@ -264,7 +265,7 @@ func Test_ListenXHAndDial_QUIC(t *testing.T) {
+ 				common.Must2(conn.Write(b.Bytes()))
+ 			}
+ 
+-			serverClosed = true
++			serverClosed.Store(true)
+ 		}()
+ 	})
+ 	common.Must(err)
+@@ -298,7 +299,7 @@ func Test_ListenXHAndDial_QUIC(t *testing.T) {
+ 
+ 	conn.Close()
+ 	time.Sleep(100 * time.Millisecond)
+-	if !serverClosed {
++	if !serverClosed.Load() {
+ 		t.Error("server did not get closed")
+ 	}
+ 
+diff --git a/transport/internet/tls/sb_certificate_snapshot_test.go b/transport/internet/tls/sb_certificate_snapshot_test.go
+new file mode 100644
+index 0000000..dd56495
+--- /dev/null
++++ b/transport/internet/tls/sb_certificate_snapshot_test.go
+@@ -0,0 +1,96 @@
++package tls
++
++import (
++	"bytes"
++	gotls "crypto/tls"
++	"crypto/x509"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/protocol/tls/cert"
++)
++
++func TestSBCertificateSnapshotPublication(t *testing.T) {
++	first := &gotls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"example.test"}}, OCSPStaple: []byte("first")}
++	second := &gotls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"example.test"}}, OCSPStaple: []byte("second")}
++	snapshots := &certificateSnapshots{}
++	index := snapshots.append(first)
++	original := snapshots.load()
++	selectCertificate := getNewGetCertificateFunc(snapshots, true)
++	var workers sync.WaitGroup
++	for range 8 {
++		workers.Go(func() {
++			for range 1000 {
++				selected, err := selectCertificate(&gotls.ClientHelloInfo{ServerName: "example.test"})
++				if err != nil || (selected != first && selected != second) {
++					t.Errorf("invalid published certificate: %v", err)
++					return
++				}
++				_ = bytes.Equal(selected.OCSPStaple, []byte("first"))
++			}
++		})
++	}
++	workers.Go(func() {
++		for range 1000 {
++			snapshots.store(index, second)
++			snapshots.store(index, first)
++		}
++	})
++	workers.Wait()
++	if original[0] != first || string(original[0].OCSPStaple) != "first" {
++		t.Fatal("publication mutated a previously returned certificate snapshot")
++	}
++}
++
++func TestSBCertificateFileReloadKeepsConfiguredStateImmutable(t *testing.T) {
++	oldCert, _ := cert.MustGenerate(nil, cert.CommonName("example.test"), cert.DNSNames("example.test"))
++	newCert, _ := cert.MustGenerate(nil, cert.CommonName("example.test"), cert.DNSNames("example.test"))
++	configured := ParseCertificate(oldCert)
++	newPEM, newKey := newCert.ToPEM()
++	configured.CertificatePath = filepath.Join(t.TempDir(), "certificate.pem")
++	configured.KeyPath = filepath.Join(filepath.Dir(configured.CertificatePath), "key.pem")
++	if err := os.WriteFile(configured.CertificatePath, newPEM, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(configured.KeyPath, newKey, 0600); err != nil {
++		t.Fatal(err)
++	}
++	originalCert, originalKey := bytes.Clone(configured.Certificate), bytes.Clone(configured.Key)
++	tlsConfig := (&Config{Certificate: []*Certificate{configured}}).GetTLSConfig()
++	expected, err := gotls.X509KeyPair(newPEM, newKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var workers sync.WaitGroup
++	for range 8 {
++		workers.Go(func() {
++			for range 1000 {
++				if _, err := tlsConfig.GetCertificate(&gotls.ClientHelloInfo{ServerName: "example.test"}); err != nil {
++					t.Error(err)
++					return
++				}
++			}
++		})
++	}
++	deadline := time.Now().Add(5 * time.Second)
++	for {
++		selected, err := tlsConfig.GetCertificate(&gotls.ClientHelloInfo{ServerName: "example.test"})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if bytes.Equal(selected.Certificate[0], expected.Certificate[0]) {
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatal("certificate file reload was not published")
++		}
++		time.Sleep(time.Millisecond)
++	}
++	workers.Wait()
++	if !bytes.Equal(configured.Certificate, originalCert) || !bytes.Equal(configured.Key, originalKey) {
++		t.Fatal("ticker changed shared proto certificate state")
++	}
++}
+diff --git a/transport/internet/splithttp/sb_open_stream_failure_test.go b/transport/internet/splithttp/sb_open_stream_failure_test.go
+new file mode 100644
+index 0000000..6ec6b27
+--- /dev/null
++++ b/transport/internet/splithttp/sb_open_stream_failure_test.go
+@@ -0,0 +1,36 @@
++package splithttp
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"sync"
++	"testing"
++
++	"github.com/xtls/xray-core/transport/internet"
++)
++
++type sbFailedRoundTripper struct{}
++
++func (sbFailedRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
++	return nil, errors.New("expected synthetic establishment failure")
++}
++
++func TestSBConcurrentFailedOpenStream(t *testing.T) {
++	client := &DefaultDialerClient{
++		transportConfig: &Config{}, owner: &internet.MemoryStreamConfig{},
++		client: &http.Client{Transport: sbFailedRoundTripper{}},
++	}
++	var workers sync.WaitGroup
++	for range 8 {
++		workers.Go(func() {
++			for range 100 {
++				body, _, _, err := client.OpenStream(context.Background(), "http://example.test/", "", nil, false)
++				if err == nil || body != nil {
++					t.Error("failed establishment returned a stream")
++				}
++			}
++		})
++	}
++	workers.Wait()
++}

@@ -1,5 +1,7 @@
 # WSL/Linux entrypoints must retain LF shebangs on Windows checkouts.
 *.sh text eol=lf
+# Unified diff context has a mandatory space before Go's tab indentation.
+*.patch text eol=lf whitespace=-space-before-tab,-blank-at-eol
 
 # A public source snapshot is created only from tracked release files. Internal
 # lab automation and private-agent metadata never enter it. Sanitized tests

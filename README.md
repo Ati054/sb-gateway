@@ -1,17 +1,23 @@
 # SB Gateway for MikroTik RouterOS 7
 
-SB Gateway 1.6.27 is a bilingual Web-managed traffic-policy gateway packaged as
-one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.9
+SB Gateway 1.6.33 is a bilingual Web-managed traffic-policy gateway packaged as
+one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.30
 only; sing-box is not shipped and there is no core switch in the UI.
 
-The server uses Xray 26.9.9; exported Reverse VLESS bridge profiles remain pinned
+The server uses Xray 26.9.30; exported Reverse VLESS bridge profiles remain pinned
 to 26.7.28 and advertise that requirement in their response header. Both use the
 current `streamSettings.method` transport field. Compatibility is accepted only
 after an end-to-end reverse data-plane test, not by connection status alone.
 
-Xray 26.9.9 is pinned by its exact upstream commit. Upstream currently marks
+Xray 26.9.30 is pinned by its exact upstream commit. Upstream currently marks
 this tag as a prerelease, so image promotion still requires the complete
 ARM64 configuration and data-plane acceptance gate.
+
+The core build applies a maintained concurrency-safety patch: selector cache
+replacement is synchronized, failed XHTTP setup retains its own response-body
+reference, and TLS file/OCSP refresh publishes immutable certificate snapshots.
+Regression tests run during the build; release acceptance also exercises the
+affected upstream packages with Go's race detector.
 
 Supported server-side connections are:
 
@@ -46,7 +52,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.27-routeros-bundle.zip` from the GitHub release and
+Download `sb-gateway-1.6.33-routeros-bundle.zip` from the GitHub release and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 

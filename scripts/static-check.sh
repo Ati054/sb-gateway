@@ -7,11 +7,14 @@ for script in "$root"/entrypoint.sh "$root"/scripts/*.sh; do
   sh -n "$script"
 done
 
-grep -Fq '52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120' "$root/Dockerfile"
+grep -Fq 'b26a91de4f3294e26a0ad0a970b81a386a41f789' "$root/Dockerfile"
 grep -Fq 'XRAY_GO_IMAGE=golang:1.27.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125' "$root/Dockerfile"
 grep -Fq 'FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build' "$root/Dockerfile"
 grep -Fq 'patch -p1 --fuzz=0 < /tmp/xray-vision-padding-overflow.patch' "$root/Dockerfile"
 grep -Fq 'go test ./proxy' "$root/Dockerfile"
+grep -Fq 'git apply --check /tmp/xray-concurrency-safety.patch' "$root/Dockerfile"
+grep -Fq './transport/internet/tls ./transport/internet/httpupgrade' "$root/Dockerfile"
+grep -Fq 'io.sb-gateway.dependency.xray.concurrency-safety="true"' "$root/Dockerfile"
 grep -Fq 'io.sb-gateway.dependency.xray.vision-padding-overflow-compat="true"' "$root/Dockerfile"
 grep -Fq 'xray run -test -config /tmp/xray-build-validation.json' "$root/Dockerfile"
 if grep -Fq 'COPY tests ' "$root/Dockerfile" \

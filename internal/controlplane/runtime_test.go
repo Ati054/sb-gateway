@@ -123,6 +123,41 @@ func TestArtifactRevisionIsStableAndContentAddressed(t *testing.T) {
 	}
 }
 
+func TestNativeRuntimeDoesNotPublishIfGuardCannotBeCreated(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "nginx.conf")
+	if err := os.WriteFile(live, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{"nginx.conf": live})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := store.Prepare(strings.Repeat("e", 64), map[string][]byte{"nginx.conf": []byte("new\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardParent := filepath.Join(root, "guard-parent-file")
+	if err := os.WriteFile(guardParent, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(guardParent, "guard")
+	controller := &recordingRuntimeController{}
+	runtime := &nativeRuntime{
+		options: RuntimeOptions{ApplyGuardFile: guard}, store: store, controller: controller,
+		validate: func(context.Context, runtimeconfig.RuntimeCandidate, []string) error { return nil },
+	}
+	if _, err := runtime.activate(context.Background(), candidate); err == nil {
+		t.Fatal("broken guard accepted")
+	}
+	if body, err := os.ReadFile(live); err != nil || string(body) != "old\n" {
+		t.Fatalf("unguarded config published: %q %v", body, err)
+	}
+	if len(controller.restarts) != 0 {
+		t.Fatal("unguarded program restarted")
+	}
+}
+
 func TestNativeRuntimeReadinessCoversRoutingCompilationAndRollback(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string
@@ -311,15 +346,26 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 	runtime := &nativeRuntime{
 		options: RuntimeOptions{XrayHealthPool: destinations["urltest-pool.json"], XrayReadyFile: ready, XrayHotRuntimeReadyFile: hotReady},
 		store:   store, controller: controller,
-		validate: func(context.Context, runtimeconfig.RuntimeCandidate, []string) error {
+		validate: func(ctx context.Context, _ runtimeconfig.RuntimeCandidate, _ []string) error {
 			go func() {
-				time.Sleep(100 * time.Millisecond)
-				info, statErr := os.Stat(destinations["urltest-pool.json"])
-				if statErr != nil {
-					published <- statErr
-					return
+				// Validation precedes publication; acknowledge the actual live generation.
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				var mtime int64
+				for {
+					actual, generation, err := hashFileGeneration(destinations["urltest-pool.json"])
+					if err == nil && actual == hex.EncodeToString(digest[:]) {
+						mtime = generation
+						break
+					}
+					select {
+					case <-ctx.Done():
+						published <- ctx.Err()
+						return
+					case <-ticker.C:
+					}
 				}
-				marker := []byte(`{"pool_sha256":"` + hex.EncodeToString(digest[:]) + `","pool_mtime_unix_nano":` + fmt.Sprint(info.ModTime().UnixNano()) + `,"xray_pid":4321,"policy_selections":{"route":"new"}}`)
+				marker := []byte(`{"pool_sha256":"` + hex.EncodeToString(digest[:]) + `","pool_mtime_unix_nano":` + fmt.Sprint(mtime) + `,"xray_pid":4321,"policy_selections":{"route":"new"}}`)
 				published <- os.WriteFile(hotReady, marker, 0o600)
 			}()
 			return nil

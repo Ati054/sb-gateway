@@ -16,7 +16,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/runtimeproof"
 )
 
 const (
@@ -29,23 +32,29 @@ var managedRuleTag = regexp.MustCompile(`^sb-geoip-(geoip-[a-z]{2})-[0-9]+-[0-9]
 var ErrDeferred = errors.New("Xray routing activation is waiting for Apply or startup")
 
 type Options struct {
-	XrayConfig string
-	RulesetDir string
-	ReadyFile  string
-	ApplyGuard string
-	APIServer  string
-	XrayBinary string
-	Run        func(context.Context, string, ...string) ([]byte, error)
+	XrayConfig         string
+	RulesetDir         string
+	ReadyFile          string
+	ApplyGuard         string
+	ApplyOperationFile string
+	ValidatedFile      string
+	ProcRoot           string
+	APIServer          string
+	XrayBinary         string
+	Run                func(context.Context, string, ...string) ([]byte, error)
 }
 
 func OptionsFromEnvironment() Options {
 	return Options{
-		XrayConfig: env("SB_XRAY_CONFIG", "/config/generated/xray.json"),
-		RulesetDir: env("SB_RULESET_DIR", "/config/rulesets"),
-		ReadyFile:  env("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
-		ApplyGuard: env("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
-		APIServer:  env("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
-		XrayBinary: env("SB_XRAY_BINARY", "/usr/local/bin/xray"),
+		XrayConfig:         env("SB_XRAY_CONFIG", "/config/generated/xray.json"),
+		RulesetDir:         env("SB_RULESET_DIR", "/config/rulesets"),
+		ReadyFile:          env("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
+		ApplyGuard:         env("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
+		ApplyOperationFile: filepath.Join(env("SB_GATEWAY_STATE_DIR", "/state/control-plane"), "apply-operation.json"),
+		ValidatedFile:      env("SB_XRAY_VALIDATED_FILE", "/run/sb-gateway/xray-validated"),
+		ProcRoot:           "/proc",
+		APIServer:          env("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
+		XrayBinary:         env("SB_XRAY_BINARY", "/usr/local/bin/xray"),
 	}
 }
 
@@ -57,7 +66,26 @@ func env(key, fallback string) string {
 }
 
 type State struct {
-	confirmed string
+	mu                sync.Mutex
+	baselineProof     string
+	mayReuseStartup   bool
+	generation        string
+	mutationAttempted bool
+	confirmed         string
+}
+
+// The appliance retains this state across monitor-only restarts. A newly
+// attached monitor must not assume an older core still has baseline routing.
+func NewState(options Options) *State {
+	state := &State{}
+	body, err := boundedRead(options.ValidatedFile, 256)
+	if err == nil {
+		state.baselineProof = string(body)
+		state.mayReuseStartup = true
+	} else if errors.Is(err, os.ErrNotExist) {
+		state.mayReuseStartup = true
+	}
+	return state
 }
 
 // Activate replaces the complete Xray routing table atomically through its
@@ -68,7 +96,9 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 	if state == nil {
 		return false, errors.New("GeoIP activation state is required")
 	}
-	if guarded(options.ApplyGuard) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if activationGuarded(options) {
 		return false, ErrDeferred
 	}
 	pid, err := readyPID(options.ReadyFile)
@@ -143,15 +173,41 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 		}
 	}
 	want := hex.EncodeToString(signature.Sum(nil))
+	coreSum := sha256.Sum256(body)
+	coreHash := hex.EncodeToString(coreSum[:])
+	validated := runtimeproof.XrayValidated(options.ValidatedFile, options.ReadyFile, options.XrayConfig, options.ProcRoot, coreHash)
+	generation := pid
+	if options.ProcRoot != "" {
+		generation = runtimeproof.XrayGeneration(options.ReadyFile, options.XrayConfig, options.ProcRoot)
+		if generation == "" {
+			return false, ErrDeferred
+		}
+	}
+	proof := ""
+	if validated {
+		proofBody, proofErr := boundedRead(options.ValidatedFile, 256)
+		if proofErr != nil {
+			return false, ErrDeferred
+		}
+		proof = string(proofBody)
+	}
+	if state.generation != generation {
+		state.generation, state.confirmed, state.mutationAttempted = generation, "", false
+	}
 	if state.confirmed == want {
 		return false, nil
 	}
-	if guarded(options.ApplyGuard) || !stillReady(options.ReadyFile, pid, options.XrayConfig, body) {
+	if activationGuarded(options) || !stillReady(options.ReadyFile, pid, options.XrayConfig, body) {
 		return false, ErrDeferred
 	}
 	desired, err := json.Marshal(map[string]any{"routing": routing})
 	if err != nil {
 		return false, err
+	}
+	if validated && state.mayReuseStartup && proof != state.baselineProof &&
+		!state.mutationAttempted && string(desired) == string(oldRouting) {
+		state.confirmed = want
+		return false, nil
 	}
 	// The generated config is a baseline, not a readback of Xray's live table.
 	// A prior hot update may still be active after the pack returns to that
@@ -160,6 +216,8 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 	if run == nil {
 		run = runXray
 	}
+	state.confirmed = ""
+	state.mutationAttempted = true
 	if err := applyRouting(ctx, options, run, desired); err != nil {
 		if stillReady(options.ReadyFile, pid, options.XrayConfig, body) {
 			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 330*time.Second)
@@ -306,4 +364,26 @@ func guarded(path string) bool {
 	}
 	_, err := os.Stat(path)
 	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+// The short runtime guard ends before traffic readiness is recovered; the
+// durable journal keeps a heavy hot reload out of the remaining Apply phases.
+func activationGuarded(options Options) bool {
+	if guarded(options.ApplyGuard) {
+		return true
+	}
+	if options.ApplyOperationFile == "" {
+		return false
+	}
+	body, err := boundedRead(options.ApplyOperationFile, 64<<10)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	var operation struct {
+		Pending bool `json:"pending"`
+	}
+	return strings.TrimSpace(string(body)) == "null" || json.Unmarshal(body, &operation) != nil || operation.Pending
 }

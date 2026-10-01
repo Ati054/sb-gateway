@@ -51,10 +51,11 @@ test("mandatory Claude and Antigravity candidate packs stay narrow and complete"
 
 test("ARM64 image builds pinned Xray and static UI", async () => {
   const dockerfile = await text("Dockerfile");
-  assert.match(dockerfile, /ARG XRAY_VERSION=26\.9\.9/);
-  assert.match(dockerfile, /52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/);
+  assert.match(dockerfile, /ARG XRAY_VERSION=26\.9\.30/);
+  assert.match(dockerfile, /b26a91de4f3294e26a0ad0a970b81a386a41f789/);
   assert.match(dockerfile, /XRAY_GO_IMAGE=golang:1\.27\.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125/);
   assert.match(dockerfile, /FROM --platform=\$BUILDPLATFORM \$\{XRAY_GO_IMAGE\} AS xray-build/);
+  assert.match(dockerfile, /go test \.\/app\/router -run '\^TestSB'/);
   assert.match(dockerfile, /server can use the current validated core/);
   assert.match(dockerfile, /xray run -test -config \/tmp\/xray-build-validation\.json/);
   assert.doesNotMatch(dockerfile, /xray\.smoke\.json/);
@@ -204,6 +205,7 @@ test("Xray transit uses kernel TPROXY and a dedicated policy table", async () =>
   assert.match(routing, /ip route replace local default dev lo table "\$route_table"/);
   assert.match(routing, /fwmark "\$tproxy_mark" table "\$route_table"/);
   assert.match(routing, /write_ipv4_setting ip_forward 1/);
+  assert.match(routing, /chain forward \{\s+type filter hook forward priority filter; policy accept;\s+\$exclude_rule\s+iifname "\$uplink_dev" counter reject with icmpx type admin-prohibited comment "sb-public-transit-reject"/);
   assert.doesNotMatch(routing, /default dev "\$tun_dev"|gvisor|sb-tun0/);
   assert.match(runner, /configure-transparent-routing\.sh apply/);
   assert.match(runner, /startup_deadline=\$\(\(startup_started \+ startup_timeout_seconds\)\)/);

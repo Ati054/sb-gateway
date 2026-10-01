@@ -70,3 +70,13 @@ func (server *Server) rejectMutationConflict(response http.ResponseWriter, reque
 	server.writeErrorResponse(response, request, 409, "state_mutation_in_progress", "Another configuration-changing operation is still in progress. Status and diagnostics remain available.")
 	return true
 }
+
+// Draft edits must not queue behind a multi-minute runtime operation and write
+// after the management proxy has already reported a timeout to the caller.
+func (server *Server) tryLockDraftConfiguration(response http.ResponseWriter, request *http.Request) bool {
+	if server.configMu.TryLock() {
+		return true
+	}
+	server.writeErrorResponse(response, request, http.StatusConflict, "state_mutation_in_progress", "Another configuration-changing operation is still in progress. The draft was not changed; retry after it completes.")
+	return false
+}

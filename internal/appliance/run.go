@@ -9,40 +9,50 @@ import (
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/controlplane"
+	"github.com/sb-gateway/sb-gateway/internal/geoiprefresh"
 	"github.com/sb-gateway/sb-gateway/internal/monitor"
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
 )
 
 type Options struct {
-	ControlPlane    controlplane.Options
-	Monitor         monitor.Options
-	PolicyDNS       policydns.Options
-	PolicyDNSConfig string
-	NginxBinary     string
-	NginxConfig     string
-	NginxReady      string
-	ShellBinary     string
-	XrayRunner      string
-	XrayReady       string
+	ControlPlane      controlplane.Options
+	Monitor           monitor.Options
+	PolicyDNS         policydns.Options
+	PolicyDNSConfig   string
+	NginxBinary       string
+	NginxConfig       string
+	NginxReady        string
+	ShellBinary       string
+	XrayRunner        string
+	XrayReady         string
+	XrayReadyFile     string
+	XrayValidatedFile string
+	XrayConfig        string
 }
 
 func OptionsFromEnvironment() Options {
 	controlPlane := controlplane.OptionsFromEnvironment()
 	return Options{
-		ControlPlane:    controlPlane,
-		Monitor:         monitor.OptionsFromEnvironment(),
-		PolicyDNS:       policydns.OptionsFromEnvironment(),
-		PolicyDNSConfig: environment("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
-		NginxBinary:     environment("SB_NGINX_BINARY", "/usr/sbin/nginx"),
-		NginxConfig:     environment("SB_NGINX_RUNTIME_CONFIG", "/run/sb-gateway/nginx.conf"),
-		NginxReady:      environment("SB_NGINX_READY_ADDRESS", "127.0.0.1:9443"),
-		ShellBinary:     environment("SB_SHELL_BINARY", "/bin/sh"),
-		XrayRunner:      environment("SB_XRAY_RUNNER", "/opt/sb-gateway/scripts/run-xray.sh"),
-		XrayReady:       environment("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
+		ControlPlane:      controlPlane,
+		Monitor:           monitor.OptionsFromEnvironment(),
+		PolicyDNS:         policydns.OptionsFromEnvironment(),
+		PolicyDNSConfig:   environment("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
+		NginxBinary:       environment("SB_NGINX_BINARY", "/usr/sbin/nginx"),
+		NginxConfig:       environment("SB_NGINX_RUNTIME_CONFIG", "/run/sb-gateway/nginx.conf"),
+		NginxReady:        environment("SB_NGINX_READY_ADDRESS", "127.0.0.1:9443"),
+		ShellBinary:       environment("SB_SHELL_BINARY", "/bin/sh"),
+		XrayRunner:        environment("SB_XRAY_RUNNER", "/opt/sb-gateway/scripts/run-xray.sh"),
+		XrayReady:         environment("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
+		XrayReadyFile:     environment("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
+		XrayValidatedFile: environment("SB_XRAY_VALIDATED_FILE", "/run/sb-gateway/xray-validated"),
+		XrayConfig:        environment("SB_XRAY_CONFIG", "/config/generated/xray.json"),
 	}
 }
 
 func Run(ctx context.Context, options Options) error {
+	if options.Monitor.GeoIPState == nil {
+		options.Monitor.GeoIPState = geoiprefresh.NewState(options.Monitor.GeoIP)
+	}
 	if migrated, err := controlplane.EnsureStartupNginxTrafficReadiness(options.NginxConfig); err != nil {
 		return err
 	} else if migrated {
@@ -69,7 +79,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	xray, err := CommandProgram(
 		"xray", options.ShellBinary, []string{options.XrayRunner},
-		WaitProbe(TCPProbe(options.XrayReady, time.Second), 250*time.Millisecond),
+		WaitProbe(xrayStartupProbe(options, "/proc"), 250*time.Millisecond),
 	)
 	if err != nil {
 		return err
