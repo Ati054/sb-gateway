@@ -7,7 +7,7 @@ ARG RUNTIME_IMAGE=alpine:3.23
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG SB_GATEWAY_VERSION=1.6.32
+ARG SB_GATEWAY_VERSION=1.6.33
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -29,8 +29,8 @@ FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build
 ARG TARGETARCH
 # The server can use the current validated core. Xray's simplified Reverse
 # regression is bridge-side; exported reverse clients are pinned separately.
-ARG XRAY_VERSION=26.9.9
-ARG XRAY_COMMIT=52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120
+ARG XRAY_VERSION=26.9.30
+ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
 RUN test "${TARGETARCH}" = "arm64"
 RUN apk add --no-cache git patch
@@ -40,6 +40,7 @@ COPY patches/xray-vision-padding-overflow.patch /tmp/xray-vision-padding-overflo
 COPY patches/xray-vless-failure-signal.patch /tmp/xray-vless-failure-signal.patch
 COPY patches/xray-outbound-transport-retirement.patch /tmp/xray-outbound-transport-retirement.patch
 COPY patches/xray-routing-reload-preserve-selection.patch /tmp/xray-routing-reload-preserve-selection.patch
+COPY patches/xray-concurrency-safety.patch /tmp/xray-concurrency-safety.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -52,10 +53,13 @@ RUN git init \
     && git apply /tmp/xray-outbound-transport-retirement.patch \
     && git apply --check /tmp/xray-routing-reload-preserve-selection.patch \
     && git apply /tmp/xray-routing-reload-preserve-selection.patch \
-    && go test ./app/router -run '^$' \
+    && git apply --check /tmp/xray-concurrency-safety.patch \
+    && git apply /tmp/xray-concurrency-safety.patch \
+    && go test ./app/router -run '^TestSB' \
     && go test ./proxy ./proxy/vless/outbound ./app/proxyman/outbound \
       ./transport/internet ./transport/internet/grpc \
-      ./transport/internet/hysteria ./transport/internet/splithttp
+      ./transport/internet/hysteria ./transport/internet/splithttp \
+      ./transport/internet/tls ./transport/internet/httpupgrade
 RUN set -eux; \
     git clone --filter=blob:none --no-checkout https://github.com/XTLS/REALITY.git /src/reality; \
     git -C /src/reality fetch --depth=1 origin "${XRAY_REALITY_COMMIT}"; \
@@ -73,7 +77,7 @@ RUN set -eux; \
       -o /out/xray ./main
 
 FROM --platform=linux/arm64 alpine:3.23 AS xray-check
-ARG XRAY_VERSION=26.9.9
+ARG XRAY_VERSION=26.9.30
 COPY --from=xray-build /out/xray /out/xray
 RUN set -eux; \
     /out/xray version | tee /tmp/xray.version; \
@@ -106,10 +110,10 @@ RUN set -eux; \
     if ! grep -q '^www-data:' /etc/group; then addgroup -S www-data; fi; \
     if ! grep -q '^www-data:' /etc/passwd; then adduser -S -D -H -s /sbin/nologin -G www-data www-data; fi; \
     rm -f /etc/nginx/http.d/default.conf
-ARG XRAY_VERSION=26.9.9
-ARG XRAY_COMMIT=52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120
+ARG XRAY_VERSION=26.9.30
+ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.32
+ARG SB_GATEWAY_VERSION=1.6.33
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \
@@ -124,6 +128,7 @@ LABEL org.opencontainers.image.title="sb-gateway" \
       io.sb-gateway.dependency.xray.revision="${XRAY_COMMIT}" \
       io.sb-gateway.dependency.xray.vision-padding-overflow-compat="true" \
       io.sb-gateway.dependency.xray.outbound-transport-retirement="true" \
+      io.sb-gateway.dependency.xray.concurrency-safety="true" \
       io.sb-gateway.dependency.reality.revision="${XRAY_REALITY_COMMIT}" \
       io.sb-gateway.dependency.reality.x25519-compat="true"
 ENV SB_GATEWAY_VERSION=${SB_GATEWAY_VERSION} \

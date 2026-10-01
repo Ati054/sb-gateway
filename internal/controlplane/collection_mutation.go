@@ -65,7 +65,9 @@ func (server *Server) createCollectionItem(response http.ResponseWriter, request
 		return
 	}
 
-	server.configMu.Lock()
+	if !server.tryLockDraftConfiguration(response, request) {
+		return
+	}
 	defer server.configMu.Unlock()
 	config, err := server.getDraft()
 	if err != nil {
@@ -125,7 +127,9 @@ func (server *Server) updateCollectionItem(response http.ResponseWriter, request
 	}
 	item["id"] = entityID
 
-	server.configMu.Lock()
+	if !server.tryLockDraftConfiguration(response, request) {
+		return
+	}
 	defer server.configMu.Unlock()
 	config, err := server.getDraft()
 	if err != nil {
@@ -186,7 +190,9 @@ func (server *Server) deleteCollectionItem(response http.ResponseWriter, request
 		return
 	}
 
-	server.configMu.Lock()
+	if !server.tryLockDraftConfiguration(response, request) {
+		return
+	}
 	defer server.configMu.Unlock()
 	config, err := server.getDraft()
 	if err != nil {

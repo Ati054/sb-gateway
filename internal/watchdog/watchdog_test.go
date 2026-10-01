@@ -3,6 +3,7 @@ package watchdog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,24 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestCommandOutputPreservesDeadline(t *testing.T) {
+	_, err := commandOutput(context.Background(), 50*time.Millisecond, os.Args[0],
+		"-test.run=^TestWatchdogCommandWaitHelper$", "--", "watchdog-command-wait")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("validation deadline was hidden: %v", err)
+	}
+}
+
+func TestWatchdogCommandWaitHelper(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "watchdog-command-wait" {
+		time.Sleep(30 * time.Second)
+	}
+}
 
 func TestReadinessRecognizesPendingRouterOSRollbackGuard(t *testing.T) {
 	for _, test := range []struct {
@@ -278,13 +294,41 @@ func TestPolicyRuleMatchingIsExact(t *testing.T) {
 	}
 }
 
-func TestTransparentRulesRequireTCPAndUDP(t *testing.T) {
-	complete := "meta l4proto tcp tproxy to :12345 meta mark set 0x1 accept\nmeta l4proto udp tproxy to :12345 meta mark set 0x1 accept\n"
+func TestTransparentRulesRequireTCPUDPAndTransitGuard(t *testing.T) {
+	// nft's canonical text omits 'type' from icmpx reject; inspect JSON semantics.
+	complete := `{"nftables":[
+ {"chain":{"family":"inet","table":"sb_gateway_transparent","name":"prerouting","type":"filter","hook":"prerouting"}},
+ {"chain":{"family":"inet","table":"sb_gateway_transparent","name":"forward","type":"filter","hook":"forward"}},
+ {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"set":[{"prefix":{"addr":"172.30.79.0","len":24}}]}}},{"return":null}]}},
+ {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"tcp"}},{"tproxy":{"port":12345}},{"accept":null}]}},
+ {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"udp"}},{"tproxy":{"port":12345}},{"accept":null}]}},
+ {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"forward","comment":"sb-public-transit-reject","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"veth-sb"}},{"counter":{"packets":3,"bytes":252}},{"reject":{"type":"icmpx","expr":"admin-prohibited"}}]}}
+ ]}`
 	if !hasTransparentRules(complete, "12345") {
 		t.Fatal("complete transparent rules did not match")
 	}
-	if hasTransparentRules("meta l4proto tcp tproxy to :12345 accept", "12345") || hasTransparentRules(complete, "12346") {
-		t.Fatal("incomplete or wrong-port transparent rules matched")
+	for name, candidate := range map[string]string{
+		"malformed":              "{",
+		"text only":              "meta l4proto tcp tproxy to :12345 accept",
+		"missing udp":            strings.ReplaceAll(complete, `"right":"udp"`, `"right":"tcp"`),
+		"missing forward hook":   strings.ReplaceAll(complete, `"hook":"forward"`, `"hook":"input"`),
+		"comment only":           strings.ReplaceAll(complete, `"reject":`, `"unused":`),
+		"wrong reject":           strings.ReplaceAll(complete, `"admin-prohibited"`, `"port-unreachable"`),
+		"wrong family":           strings.ReplaceAll(complete, `"family":"inet"`, `"family":"ip"`),
+		"wrong table":            strings.ReplaceAll(complete, `"sb_gateway_transparent"`, `"other"`),
+		"wrong ingress operator": strings.ReplaceAll(complete, `"op":"=="`, `"op":"!="`),
+		"wrong port":             strings.ReplaceAll(complete, `"port":12345`, `"port":12346`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if hasTransparentRules(candidate, "12345") {
+				t.Fatal("incomplete or wrong transparent rules matched")
+			}
+		})
+	}
+	for _, port := range []string{"12346", "0", "65536", "invalid"} {
+		if hasTransparentRules(complete, port) {
+			t.Fatalf("wrong port %q matched", port)
+		}
 	}
 }
 

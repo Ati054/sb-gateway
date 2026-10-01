@@ -141,6 +141,11 @@ table inet $nft_table {
     meta mark != $tproxy_mark tcp dport $tproxy_port drop
     meta mark != $tproxy_mark udp dport $tproxy_port drop
   }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    $exclude_rule
+    iifname "$uplink_dev" counter reject with icmpx type admin-prohibited comment "sb-public-transit-reject"
+  }
 }
 EOF
   if ! ip route replace local default dev lo table "$route_table"; then

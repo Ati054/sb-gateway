@@ -1,8 +1,30 @@
+diff --git a/app/router/balancing.go b/app/router/balancing.go
+index 5b7ef60..3e6f3cd 100644
+--- a/app/router/balancing.go
++++ b/app/router/balancing.go
+@@ -151,6 +151,8 @@ func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
+ 
+ // SetOverrideTarget implements routing.BalancerOverrider
+ func (r *Router) SetOverrideTarget(tag, target string) error {
++	r.mu.Lock()
++	defer r.mu.Unlock()
+ 	if b, ok := (*r.balancers.Load())[tag]; ok {
+ 		b.override.Put(target)
+ 		return nil
+@@ -160,6 +162,8 @@ func (r *Router) SetOverrideTarget(tag, target string) error {
+ 
+ // GetOverrideTarget implements routing.BalancerOverrider
+ func (r *Router) GetOverrideTarget(tag string) (string, error) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
+ 	if b, ok := (*r.balancers.Load())[tag]; ok {
+ 		return b.override.Get(), nil
+ 	}
 diff --git a/app/router/router.go b/app/router/router.go
-index 1f75d93..30c8592 100644
+index 406f932..4628090 100644
 --- a/app/router/router.go
 +++ b/app/router/router.go
-@@ -98,5 +98,8 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
+@@ -106,6 +106,9 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
  			return err
  		}
  		balancer.InjectContext(r.ctx)
@@ -11,22 +33,71 @@ index 1f75d93..30c8592 100644
 +		}
  		newBalancers[rule.Tag] = balancer
  	}
-diff --git a/app/router/balancing.go b/app/router/balancing.go
-index 409a14d..a31e650 100644
---- a/app/router/balancing.go
-+++ b/app/router/balancing.go
-@@ -150,4 +150,6 @@ func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
- // SetOverrideTarget implements routing.BalancerOverrider
- func (r *Router) SetOverrideTarget(tag, target string) error {
-+	r.mu.Lock()
-+	defer r.mu.Unlock()
- 	if b, ok := (*r.balancers.Load())[tag]; ok {
- 		b.override.Put(target)
-@@ -158,5 +160,7 @@ func (r *Router) SetOverrideTarget(tag, target string) error {
  
- // GetOverrideTarget implements routing.BalancerOverrider
- func (r *Router) GetOverrideTarget(tag string) (string, error) {
-+	r.mu.Lock()
-+	defer r.mu.Unlock()
- 	if b, ok := (*r.balancers.Load())[tag]; ok {
- 		return b.override.Get(), nil
+diff --git a/app/router/sb_reload_test.go b/app/router/sb_reload_test.go
+new file mode 100644
+index 0000000..4dc2e0b
+--- /dev/null
++++ b/app/router/sb_reload_test.go
+@@ -0,0 +1,61 @@
++package router
++
++import (
++	"context"
++	"sync"
++	"testing"
++)
++
++func sbReloadConfig() *Config {
++	return &Config{BalancingRule: []*BalancingRule{{Tag: "policy", OutboundSelector: []string{"node-"}}}}
++}
++
++func TestSBReloadPreservesOverrideAndRemoval(t *testing.T) {
++	r := new(Router)
++	if err := r.Init(context.Background(), sbReloadConfig(), nil, nil, nil); err != nil {
++		t.Fatal(err)
++	}
++	for _, selected := range []string{"node-a", "node-b", ""} {
++		if err := r.SetOverrideTarget("policy", selected); err != nil {
++			t.Fatal(err)
++		}
++		if err := r.ReloadRules(sbReloadConfig(), false); err != nil {
++			t.Fatal(err)
++		}
++		if got, err := r.GetOverrideTarget("policy"); err != nil || got != selected {
++			t.Fatalf("reload override=%q err=%v, want %q", got, err, selected)
++		}
++	}
++	if err := r.ReloadRules(&Config{}, false); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := r.GetOverrideTarget("policy"); err == nil {
++		t.Fatal("removed balancer survived reload")
++	}
++}
++
++func TestSBReloadAndOverrideAreSerialized(t *testing.T) {
++	r := new(Router)
++	if err := r.Init(context.Background(), sbReloadConfig(), nil, nil, nil); err != nil {
++		t.Fatal(err)
++	}
++	var workers sync.WaitGroup
++	workers.Add(1)
++	go func() {
++		defer workers.Done()
++		for range 200 {
++			if err := r.SetOverrideTarget("policy", "node-a"); err != nil {
++				t.Error(err)
++			}
++		}
++	}()
++	for range 200 {
++		if err := r.ReloadRules(sbReloadConfig(), false); err != nil {
++			t.Error(err)
++		}
++	}
++	workers.Wait()
++	if got, err := r.GetOverrideTarget("policy"); err != nil || got != "node-a" {
++		t.Fatalf("concurrent reload lost selected override: %q %v", got, err)
++	}
++}
