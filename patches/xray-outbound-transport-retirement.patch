@@ -621,17 +621,20 @@ index 9bac57a..975ddba 100644
  	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
  	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
  
-@@ -116,7 +130,9 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
- 	transportConfig := streamSettings.ProtocolSettings.(*Config)
- 
+@@ -118,9 +132,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
  	dialContext := func(ctxInner context.Context) (net.Conn, error) {
--		conn, err := internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
 +		setupCtx, cancel := context.WithTimeout(ctxInner, xhttpHandshakeTimeout)
 +		defer cancel()
-+		conn, err := internet.DialSystem(setupCtx, dest, streamSettings.SocketSettings)
- 		if err != nil {
- 			return nil, err
+ 		var conn net.Conn
+ 		var err error
+ 		if streamSettings.FinalMask != nil {
+-			conn, err = streamSettings.FinalMask.DialTCP(ctxInner, dest)
++			conn, err = streamSettings.FinalMask.DialTCP(setupCtx, dest)
+ 		} else {
+-			conn, err = internet.DialSystem(ctxInner, dest, streamSettings.SocketSettings)
++			conn, err = internet.DialSystem(setupCtx, dest, streamSettings.SocketSettings)
  		}
+ 		if err != nil {
 @@ -131,17 +147,22 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
  		}
  

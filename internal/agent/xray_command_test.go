@@ -3,9 +3,24 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
+
+func TestXrayCommandPreservesDeadline(t *testing.T) {
+	_, err := runXrayCommand(context.Background(), 50*time.Millisecond, os.Args[0],
+		"-test.run=^TestXrayCommandWaitHelper$", "--", "xray-command-wait")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("subprocess deadline was hidden: %v", err)
+	}
+}
+
+func TestXrayCommandWaitHelper(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "xray-command-wait" {
+		time.Sleep(30 * time.Second)
+	}
+}
 
 func TestBackgroundCommandSlotsDoNotBlockLiveRouteCommand(t *testing.T) {
 	for i := 0; i < cap(xrayProbeCommandSlots); i++ {

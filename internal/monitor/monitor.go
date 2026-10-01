@@ -20,6 +20,7 @@ type Options struct {
 	Watchdog            watchdog.Options
 	Rulesets            rulesets.Options
 	GeoIP               geoiprefresh.Options
+	GeoIPState          *geoiprefresh.State
 	RulesetInitialDelay time.Duration
 	RulesetInterval     time.Duration
 }
@@ -35,11 +36,13 @@ type componentResult struct {
 }
 
 func OptionsFromEnvironment() Options {
+	geoIP := geoiprefresh.OptionsFromEnvironment()
 	return Options{
 		Agent:               agent.OptionsFromEnvironment(),
 		Watchdog:            watchdog.OptionsFromEnvironment(),
 		Rulesets:            rulesets.OptionsFromEnvironment(),
-		GeoIP:               geoiprefresh.OptionsFromEnvironment(),
+		GeoIP:               geoIP,
+		GeoIPState:          geoiprefresh.NewState(geoIP),
 		RulesetInitialDelay: boundedDuration("SB_RULESET_INITIAL_DELAY_SECONDS", 120, 10, 3600),
 		RulesetInterval:     boundedDuration("SB_RULESET_UPDATE_INTERVAL", 86400, 3600, 604800),
 	}
@@ -96,7 +99,10 @@ func runRulesetWorker(ctx context.Context, options Options) error {
 	if !wait(ctx, options.RulesetInitialDelay) {
 		return nil
 	}
-	geoIPState := &geoiprefresh.State{}
+	geoIPState := options.GeoIPState
+	if geoIPState == nil {
+		geoIPState = geoiprefresh.NewState(options.GeoIP)
+	}
 	for {
 		catalog, err := rulesets.Catalog()
 		if err == nil {
@@ -109,6 +115,8 @@ func runRulesetWorker(ctx context.Context, options Options) error {
 						log.Printf("monitor: GeoIP activation deferred safely: %v", activationErr)
 					} else if changed {
 						log.Printf("monitor: GeoIP routing refreshed without Xray restart")
+					} else {
+						log.Printf("monitor: GeoIP routing unchanged; hot reload skipped")
 					}
 				}
 			}

@@ -53,5 +53,5 @@ esac
 [ "${#token}" -ge 32 ] || fatal "management-api-token must contain at least 32 characters"
 
 [ -s /opt/sb-gateway/web/out/index.html ] || fatal "static Web UI export is absent"
-xray version | grep -Fq "Xray 26.9.9" \
+xray version | grep -Fq "Xray 26.9.30" \
   || fatal "unexpected Xray version"

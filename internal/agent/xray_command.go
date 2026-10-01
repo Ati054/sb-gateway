@@ -31,5 +31,10 @@ func runXrayCommand(parent context.Context, timeout time.Duration, binary string
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	return exec.CommandContext(ctx, binary, arguments...).CombinedOutput()
+	command := exec.CommandContext(ctx, binary, arguments...)
+	output, err := command.CombinedOutput()
+	if command.Process != nil && ctx.Err() != nil {
+		return output, ctx.Err()
+	}
+	return output, err
 }

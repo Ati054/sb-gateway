@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/runtimeproof"
 )
 
 const (
@@ -32,22 +34,23 @@ const (
 )
 
 type Options struct {
-	TokenFile       string
-	ReadyURL        string
-	StatusURL       string
-	XrayConfig      string
-	XrayReadyFile   string
-	PolicyDNSConfig string
-	RouteTable      string
-	RulePriority    string
-	TProxyMark      string
-	TProxyPort      string
-	SettingsFile    string
-	MarkerFile      string
-	ApplyGuardFile  string
-	RestartFile     string
-	RestartEvidence string
-	XrayBinary      string
+	TokenFile         string
+	ReadyURL          string
+	StatusURL         string
+	XrayConfig        string
+	XrayReadyFile     string
+	XrayValidatedFile string
+	PolicyDNSConfig   string
+	RouteTable        string
+	RulePriority      string
+	TProxyMark        string
+	TProxyPort        string
+	SettingsFile      string
+	MarkerFile        string
+	ApplyGuardFile    string
+	RestartFile       string
+	RestartEvidence   string
+	XrayBinary        string
 }
 
 type settings struct {
@@ -118,22 +121,23 @@ func OptionsFromEnvironment() Options {
 	port := envOr("SB_GATEWAY_API_PORT", "8080")
 	base := "http://" + host + ":" + port
 	return Options{
-		TokenFile:       filepath.Join(secrets, "management-api-token"),
-		ReadyURL:        base + "/api/health/ready",
-		StatusURL:       base + "/api/v1/runtime/watchdog",
-		XrayConfig:      envOr("SB_XRAY_CONFIG", "/config/generated/xray.json"),
-		XrayReadyFile:   envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
-		PolicyDNSConfig: envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
-		RouteTable:      envOr("SB_TRANSPARENT_ROUTE_TABLE", "1002"),
-		RulePriority:    envOr("SB_TRANSPARENT_RULE_PRIORITY", "1100"),
-		TProxyMark:      envOr("SB_TPROXY_MARK", "1"),
-		TProxyPort:      envOr("SB_TPROXY_PORT", "12345"),
-		SettingsFile:    envOr("SB_WATCHDOG_CONFIG", "/config/generated/watchdog.env"),
-		MarkerFile:      envOr("SB_WATCHDOG_MARKER", "/run/sb-gateway/router-ready"),
-		ApplyGuardFile:  envOr("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
-		RestartFile:     envOr("SB_WATCHDOG_RESTART_FILE", "/state/watchdog-restarts"),
-		RestartEvidence: envOr("SB_WATCHDOG_RESTART_EVIDENCE", "/state/watchdog-last-restart.json"),
-		XrayBinary:      envOr("SB_XRAY_BIN", "xray"),
+		TokenFile:         filepath.Join(secrets, "management-api-token"),
+		ReadyURL:          base + "/api/health/ready",
+		StatusURL:         base + "/api/v1/runtime/watchdog",
+		XrayConfig:        envOr("SB_XRAY_CONFIG", "/config/generated/xray.json"),
+		XrayReadyFile:     envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
+		XrayValidatedFile: envOr("SB_XRAY_VALIDATED_FILE", "/run/sb-gateway/xray-validated"),
+		PolicyDNSConfig:   envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
+		RouteTable:        envOr("SB_TRANSPARENT_ROUTE_TABLE", "1002"),
+		RulePriority:      envOr("SB_TRANSPARENT_RULE_PRIORITY", "1100"),
+		TProxyMark:        envOr("SB_TPROXY_MARK", "1"),
+		TProxyPort:        envOr("SB_TPROXY_PORT", "12345"),
+		SettingsFile:      envOr("SB_WATCHDOG_CONFIG", "/config/generated/watchdog.env"),
+		MarkerFile:        envOr("SB_WATCHDOG_MARKER", "/run/sb-gateway/router-ready"),
+		ApplyGuardFile:    envOr("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
+		RestartFile:       envOr("SB_WATCHDOG_RESTART_FILE", "/state/watchdog-restarts"),
+		RestartEvidence:   envOr("SB_WATCHDOG_RESTART_EVIDENCE", "/state/watchdog-last-restart.json"),
+		XrayBinary:        envOr("SB_XRAY_BIN", "xray"),
 	}
 }
 
@@ -541,14 +545,20 @@ func (r *runner) runDeepProbe(ctx context.Context, current settings, now time.Ti
 	if output, err := commandOutput(ctx, 5*time.Second, "ip", "route", "show", "table", r.opts.RouteTable); err != nil || !strings.Contains(string(output), "local default dev lo") {
 		mark("tproxy_local_route")
 	}
-	if output, err := commandOutput(ctx, 5*time.Second, "nft", "list", "table", "inet", "sb_gateway_transparent"); err != nil || !hasTransparentRules(string(output), r.opts.TProxyPort) {
+	if output, err := commandOutput(ctx, 5*time.Second, "nft", "-j", "list", "table", "inet", "sb_gateway_transparent"); err != nil || !hasTransparentRules(string(output), r.opts.TProxyPort) {
 		mark("transparent_nft")
 	}
 
 	if configSignature != "" && configSignature != r.checkedConfigSignature {
-		if _, err := commandOutput(ctx, 60*time.Second, r.opts.XrayBinary, "run", "-test", "-config", r.opts.XrayConfig); err != nil {
+		started := time.Now()
+		if runtimeproof.XrayValidated(r.opts.XrayValidatedFile, r.opts.XrayReadyFile, r.opts.XrayConfig, "/proc", configSignature) {
+			log.Print("watchdog: Xray config validation reused from current startup")
+			r.checkedConfigSignature = configSignature
+		} else if _, err := commandOutput(ctx, 60*time.Second, r.opts.XrayBinary, "run", "-test", "-config", r.opts.XrayConfig); err != nil {
+			log.Printf("watchdog: Xray config validation failed elapsed=%s: %v", time.Since(started).Round(time.Millisecond), err)
 			mark("config_validation")
 		} else {
+			log.Printf("watchdog: Xray config validation completed elapsed=%s", time.Since(started).Round(time.Millisecond))
 			r.checkedConfigSignature = configSignature
 		}
 	}
@@ -680,9 +690,84 @@ func hasPolicyRule(output, priority, table, mark string) bool {
 }
 
 func hasTransparentRules(output, port string) bool {
-	target := "tproxy to :" + port
-	return strings.Contains(output, "meta l4proto tcp "+target) &&
-		strings.Contains(output, "meta l4proto udp "+target)
+	target, err := strconv.Atoi(port)
+	if err != nil || target < 1 || target > 65535 {
+		return false
+	}
+	type expression struct {
+		Match *struct {
+			Op   string `json:"op"`
+			Left struct {
+				Meta struct {
+					Key string `json:"key"`
+				} `json:"meta"`
+			} `json:"left"`
+			Right json.RawMessage `json:"right"`
+		} `json:"match"`
+		TProxy *struct {
+			Port int `json:"port"`
+		} `json:"tproxy"`
+		Reject *struct {
+			Type string `json:"type"`
+			Expr string `json:"expr"`
+		} `json:"reject"`
+	}
+	var document struct {
+		NFTables []struct {
+			Chain *struct {
+				Family string `json:"family"`
+				Table  string `json:"table"`
+				Name   string `json:"name"`
+				Type   string `json:"type"`
+				Hook   string `json:"hook"`
+			} `json:"chain"`
+			Rule *struct {
+				Family  string       `json:"family"`
+				Table   string       `json:"table"`
+				Chain   string       `json:"chain"`
+				Comment string       `json:"comment"`
+				Expr    []expression `json:"expr"`
+			} `json:"rule"`
+		} `json:"nftables"`
+	}
+	if json.Unmarshal([]byte(output), &document) != nil {
+		return false
+	}
+	var prerouting, forward, tcp, udp, guard bool
+	for _, item := range document.NFTables {
+		if chain := item.Chain; chain != nil && chain.Family == "inet" && chain.Table == "sb_gateway_transparent" && chain.Type == "filter" {
+			prerouting = prerouting || chain.Name == "prerouting" && chain.Hook == "prerouting"
+			forward = forward || chain.Name == "forward" && chain.Hook == "forward"
+		}
+		rule := item.Rule
+		if rule == nil || rule.Family != "inet" || rule.Table != "sb_gateway_transparent" {
+			continue
+		}
+		var protocol, ingress string
+		var tproxy, reject bool
+		for _, expr := range rule.Expr {
+			if match := expr.Match; match != nil && match.Op == "==" {
+				var right string
+				if json.Unmarshal(match.Right, &right) != nil {
+					continue
+				}
+				switch match.Left.Meta.Key {
+				case "l4proto":
+					protocol = right
+				case "iifname":
+					ingress = right
+				}
+			}
+			tproxy = tproxy || expr.TProxy != nil && expr.TProxy.Port == target
+			reject = reject || expr.Reject != nil && expr.Reject.Type == "icmpx" && expr.Reject.Expr == "admin-prohibited"
+		}
+		if rule.Chain == "prerouting" && tproxy {
+			tcp = tcp || protocol == "tcp"
+			udp = udp || protocol == "udp"
+		}
+		guard = guard || rule.Chain == "forward" && rule.Comment == "sb-public-transit-reject" && ingress != "" && reject
+	}
+	return prerouting && forward && tcp && udp && guard
 }
 
 func (r *runner) applyActive(now time.Time) bool {
@@ -833,7 +918,12 @@ func atomicWrite(path string, body []byte, mode os.FileMode) error {
 func commandOutput(parent context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, name, args...)
+	output, err := command.CombinedOutput()
+	if command.Process != nil && ctx.Err() != nil {
+		return output, ctx.Err()
+	}
+	return output, err
 }
 
 func readJSON(path string, destination any) error {
