@@ -361,7 +361,7 @@ func (runtime *xraySelectorRuntime) Current(selector string) (string, error) {
 func (runtime *xraySelectorRuntime) selectedRuntimeMember(selector string) (string, error) {
 	output, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "bi", "--server="+runtime.opts.XrayAPIServer, selector)
 	if err != nil {
-		return "", errors.New("Xray selector state is unavailable")
+		return "", fmt.Errorf("Xray selector state is unavailable: %w", err)
 	}
 	section := false
 	for _, line := range strings.Split(string(output), "\n") {

@@ -509,7 +509,9 @@ func (server *Server) putDraft(response http.ResponseWriter, request *http.Reque
 			return
 		}
 	}
-	server.configMu.Lock()
+	if !server.tryLockDraftConfiguration(response, request) {
+		return
+	}
 	defer server.configMu.Unlock()
 	server.persistDraft(response, request, payload, config, "draft.save")
 }
@@ -557,7 +559,9 @@ func (server *Server) patchDraft(response http.ResponseWriter, request *http.Req
 		}
 	}
 
-	server.configMu.Lock()
+	if !server.tryLockDraftConfiguration(response, request) {
+		return
+	}
 	defer server.configMu.Unlock()
 	config, err := server.getDraft()
 	if err != nil {
@@ -575,7 +579,9 @@ func (server *Server) resetDraft(response http.ResponseWriter, request *http.Req
 	if !ok {
 		return
 	}
-	server.configMu.Lock()
+	if !server.tryLockDraftConfiguration(response, request) {
+		return
+	}
 	defer server.configMu.Unlock()
 	activeRevision, err := server.repository.activeRevision()
 	if err != nil {
@@ -903,7 +909,7 @@ func runtimeBuildInfo() map[string]any {
 			break
 		}
 	}
-	version := envOr("SB_XRAY_VERSION", "26.9.9")
+	version := envOr("SB_XRAY_VERSION", "26.9.30")
 	runtimeCore := "starting"
 	if running {
 		runtimeCore = "xray"

@@ -77,7 +77,7 @@ diff --git a/proxy/vless/outbound/outbound.go b/proxy/vless/outbound/outbound.go
  		var err error
  		if conn, err = h.encryption.Handshake(conn); err != nil {
 +			signalSBServerFailure(ctx, ob.Tag, "handshake")
- 			return errors.New("ML-KEM-768 handshake failed").Base(err).AtInfo()
+ 			return errors.New("ML-KEM-768 handshake failed").Base(err)
 diff --git a/proxy/vless/outbound/failure_signal_test.go b/proxy/vless/outbound/failure_signal_test.go
 new file mode 100644
 --- /dev/null

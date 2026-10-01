@@ -7,7 +7,8 @@ poll_seconds="${SB_XRAY_CONFIG_POLL_SECONDS:-10}"
 configured_startup_timeout_seconds="${SB_XRAY_STARTUP_TIMEOUT_SECONDS:-}"
 prevalidated_marker="${SB_XRAY_PREVALIDATED_MARKER:-/run/sb-gateway/xray-prevalidated.sha256}"
 selectors_ready="${SB_XRAY_READY_FILE:-/run/sb-gateway/xray-selectors-ready}"
-rm -f "$selectors_ready"
+validated_file="${SB_XRAY_VALIDATED_FILE:-/run/sb-gateway/xray-validated}"
+rm -f "$selectors_ready" "$validated_file"
 
 while [ ! -s "$config" ]; do
   if [ -s "$lkg" ]; then
@@ -53,6 +54,7 @@ fi
 if [ "$skip_validation" -ne 1 ]; then
   xray run -test -config "$config"
 fi
+validated_digest="$(sha256sum "$config" | awk '{print $1}')"
 
 # RouterOS-native WireGuard exits use deterministic loopback source identities.
 # RouterOS policy-routes only these identities to the selected interface, so a
@@ -127,7 +129,7 @@ GOMEMLIMIT="$xray_gomemlimit" xray run -config "$config" >>"$process_log" 2>&1 &
 xray_pid=$!
 
 stop_xray() {
-  rm -f "$selectors_ready"
+  rm -f "$selectors_ready" "$validated_file"
   /bin/sh /opt/sb-gateway/scripts/configure-transparent-routing.sh cleanup \
     >/dev/null 2>&1 || true
   kill -TERM "$xray_pid" 2>/dev/null || true
@@ -205,12 +207,19 @@ if [ "$startup_finished" -gt "$startup_deadline" ]; then
   exit 78
 fi
 printf '%s\n' "Xray traffic admitted after $((startup_finished - startup_started))s (budget ${startup_timeout_seconds}s)"
+if [ "$(sha256sum "$config" | awk '{print $1}')" = "$validated_digest" ]; then
+  started_ticks="$(awk '{print $22}' "/proc/$xray_pid/stat")"
+  mkdir -p "$(dirname "$validated_file")"
+  printf '%s %s %s\n' "$xray_pid" "$started_ticks" "$validated_digest" >"$validated_file.tmp-$xray_pid"
+  chmod 0600 "$validated_file.tmp-$xray_pid"
+  mv "$validated_file.tmp-$xray_pid" "$validated_file"
+fi
 mkdir -p "$(dirname "$selectors_ready")"
 printf '%s\n' "$xray_pid" >"$selectors_ready"
 
 xray_status=0
 wait "$xray_pid" || xray_status=$?
-rm -f "$selectors_ready"
+rm -f "$selectors_ready" "$validated_file"
 /bin/sh /opt/sb-gateway/scripts/configure-transparent-routing.sh cleanup \
   >/dev/null 2>&1 || true
 exit "$xray_status"

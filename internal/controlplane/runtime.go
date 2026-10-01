@@ -204,6 +204,8 @@ func hotPolicyChange(changed []string) bool {
 
 func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart, beforeHotPolicy func(context.Context) error) (runtimeconfig.ActivationReceipt, error) {
 	var policyScope hotRuntimeScope
+	releaseGuard := func() {}
+	defer func() { releaseGuard() }()
 	receipt, err := runtime.store.ActivateAfter(candidate, func(changed []string) error {
 		if err := runtime.validate(ctx, candidate, changed); err != nil {
 			return err
@@ -218,6 +220,17 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 			}
 			if beforeHotPolicy != nil {
 				return beforeHotPolicy(ctx)
+			}
+			return nil
+		}
+		if len(runtime.restartOrder(changed)) > 0 {
+			var guardErr error
+			// Protect publication itself: watchdog must not validate a new
+			// config against the previous core before Restart is called.
+			releaseGuard, guardErr = runtime.beginApplyGuard()
+			if guardErr != nil {
+				releaseGuard = func() {}
+				return fmt.Errorf("create watchdog apply guard: %w", guardErr)
 			}
 		}
 		return nil
@@ -242,11 +255,6 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 			log.Printf("runtime Xray prevalidation marker: %v", err)
 		}
 	}
-	releaseGuard, err := runtime.beginApplyGuard()
-	if err != nil {
-		return receipt, fmt.Errorf("create watchdog apply guard: %w", err)
-	}
-	defer releaseGuard()
 	if containsRuntimeArtifact(receipt.Changed(), "xray.json") && beforeXrayRestart != nil {
 		if err := beforeXrayRestart(ctx); err != nil {
 			return receipt, fmt.Errorf("prepare planned Xray restart on RouterOS: %w", err)
@@ -407,6 +415,13 @@ func hashFileGeneration(path string) (string, int64, error) {
 func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfig.ActivationReceipt) error {
 	var policyScope hotRuntimeScope
 	var err error
+	if !hotPolicyChange(receipt.Changed()) && len(runtime.restartOrder(receipt.Changed())) > 0 {
+		releaseGuard, guardErr := runtime.beginApplyGuard()
+		if guardErr != nil {
+			return fmt.Errorf("create watchdog rollback guard: %w", guardErr)
+		}
+		defer releaseGuard()
+	}
 	if hotPolicyChange(receipt.Changed()) {
 		policyScope, err = runtime.restoreHotPolicyScope(receipt)
 	} else {
@@ -427,11 +442,6 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 			log.Printf("runtime rollback Xray prevalidation marker: %v", err)
 		}
 	}
-	releaseGuard, err := runtime.beginApplyGuard()
-	if err != nil {
-		return fmt.Errorf("create watchdog rollback guard: %w", err)
-	}
-	defer releaseGuard()
 	if err := runtime.controller.Restart(ctx, programs); err != nil {
 		return err
 	}
