@@ -74,3 +74,39 @@ func TestDegradedSwitchJournalIncludesOnlyNumericDecisionEvidence(t *testing.T) 
 		t.Fatal("outage switch gained unrelated quality payload")
 	}
 }
+
+func TestOptimizationSwitchJournalIncludesFreshComparison(t *testing.T) {
+	controller, item, _ := stagedOptimizationController(t)
+	var events []healthEvent
+	controller.eventSink = func(event healthEvent) { events = append(events, event) }
+	for _, at := range []int64{1_060, 1_120} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(events) != 1 || events[0].Event != "switch" || events[0].Reason != "meaningfully-faster" {
+		t.Fatalf("expected one confirmed optimization event: %+v", events)
+	}
+	comparison := events[0].Comparison
+	if comparison == nil || comparison.Result != optimizationWin || comparison.Reason != "better" ||
+		comparison.Candidate != events[0].To || comparison.At != events[0].At ||
+		comparison.ActiveDelayMS == nil || *comparison.ActiveDelayMS != 600 ||
+		comparison.CandidateDelayMS == nil || *comparison.CandidateDelayMS != 500 ||
+		comparison.ActiveSpeedBPS == nil || *comparison.ActiveSpeedBPS != 12_000 ||
+		comparison.CandidateSpeedBPS == nil || *comparison.CandidateSpeedBPS != 16_000 {
+		t.Fatalf("switch lost its paired decision evidence: %+v", comparison)
+	}
+	body, err := json.Marshal(events[0])
+	if err != nil || !strings.Contains(string(body), `"candidate_speed_bps":16000`) ||
+		strings.Contains(string(body), "candidate_nodes") || strings.Contains(string(body), "https://") {
+		t.Fatalf("unsafe or incomplete optimization event: %s (%v)", body, err)
+	}
+	if switchOptimizationEvidence(item, "reserve", "active-unavailable") != nil ||
+		switchOptimizationEvidence(item, "other", "meaningfully-faster") != nil {
+		t.Fatal("another switch reused optimization evidence")
+	}
+	item.LastSwitchAt = time.Unix(1_180, 0).UTC().Format(time.RFC3339)
+	if switchOptimizationEvidence(item, "reserve", "meaningfully-faster") != nil {
+		t.Fatal("later switch reused old optimization evidence")
+	}
+}

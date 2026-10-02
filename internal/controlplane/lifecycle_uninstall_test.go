@@ -16,6 +16,8 @@ func TestNativeFullUninstallRequiresLiveMatchingOwnedContainer(t *testing.T) {
 			_, _ = response.Write([]byte(`[{".id":"*1","comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root"}]`))
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script":
 			_, _ = response.Write([]byte(`[]`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/logging":
+			_, _ = response.Write([]byte(`[]`))
 		case request.Method == http.MethodPut && request.URL.Path == "/rest/system/script":
 			_, _ = response.Write([]byte(`{".id":"*2"}`))
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler":
