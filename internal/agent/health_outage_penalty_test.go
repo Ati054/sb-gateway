@@ -79,3 +79,59 @@ func TestOutagePenaltyCancelsPendingOptimization(t *testing.T) {
 		t.Fatalf("hold-down blocked emergency: %q %q", desired, reason)
 	}
 }
+
+func TestFasterRecoveredCandidateWaitsForPenaltyAndFreshComparisons(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	activeDelay, reserveDelay := 480, 393
+	runtime.probes["active"] = successfulEvidence(activeDelay)
+	runtime.probes["reserve"] = successfulEvidence(reserveDelay)
+	runtime.speeds["active"], runtime.speeds["reserve"] = 12_200_000, 17_000_000
+	for candidate, delay := range map[string]*int{"active": &activeDelay, "reserve": &reserveDelay} {
+		item.Samples[candidate] = []healthSample{{OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}}
+		item.SpeedSamplesBPS[candidate] = []int64{runtime.speeds[candidate]}
+	}
+	item.OptimizationChecks = 1
+	if !recordConfirmedOutage(time.Unix(1_000, 0), item, "reserve") {
+		t.Fatal("first confirmed outage was not recorded")
+	}
+	finishOutageEpisode(item, "reserve")
+	if !recordConfirmedOutage(time.Unix(1_060, 0), item, "reserve") {
+		t.Fatal("second confirmed outage was not recorded")
+	}
+	until := int64(item.OutagePenalty["reserve"].Until)
+	if until != 1_060+4*60*60 {
+		t.Fatalf("repeated outage penalty did not escalate: %+v", item.OutagePenalty["reserve"])
+	}
+
+	for _, at := range []int64{1_060, 1_120, 1_180, 1_240, until - 60} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+		if item.Selected != "active" || item.OptimizationCandidate != "" || item.OptimizationChecks != 0 {
+			t.Fatalf("faster but penalized reserve became eligible at %d", at)
+		}
+	}
+	if item.Recoveries["reserve"] < 3 || !item.QualityOK["reserve"] || !item.AvailabilityOK["reserve"] {
+		t.Fatal("reserve did not regain stable quality during its penalty")
+	}
+
+	for index, at := range []int64{until, until + 60, until + 120} {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+		if index < 2 && (item.Selected != "active" || item.OptimizationChecks != index) {
+			t.Fatalf("return skipped fresh comparison %d: selected=%q checks=%d", index, item.Selected, item.OptimizationChecks)
+		}
+	}
+	if item.Selected != "reserve" || item.LastSwitchReason != "meaningfully-faster" {
+		t.Fatalf("stable recovered reserve was never selected: %q %q", item.Selected, item.LastSwitchReason)
+	}
+	for at := until + 180; at <= until+840; at += 60 {
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if item.Selected != "reserve" || len(runtime.selections) != 1 {
+		t.Fatalf("unchanged recovered measurements caused flapping: %v", runtime.selections)
+	}
+}

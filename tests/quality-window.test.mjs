@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { latestSpeedSince, qualityStatsSince } from "../app/quality-window.ts";
+import { activeQualityMetrics, latestSpeedSince, qualityStatsSince } from "../app/quality-window.ts";
 
 test("qualityStatsSince starts a fresh visible window without changing raw history", () => {
   const history = {
@@ -35,6 +35,30 @@ test("qualityStatsSince starts a fresh visible window without changing raw histo
     p95_ms: null,
   });
   assert.deepEqual(history, before);
+});
+
+test("active metrics use the recent latency window and last successful speed, not daily history", () => {
+  const health = {
+    median_delay_ms: { active: 496 }, last_probe_at: { active: 215 }, last_good_at: { active: 210 },
+    speed_samples_bps: { active: [12_200_000, 14_650_257] },
+    speed_median_bps: { active: 12_200_000 }, last_speed_success_at: { active: 205 },
+    last_speed_probe_at: { active: 215 }, last_speed_probe_status: { active: "failed" },
+    daily_stats: { active: { median_ms: 481 } },
+  };
+  assert.deepEqual(activeQualityMetrics(health, "active"), { median: 496, speedBps: 14_650_257, medianAt: 210, speedAt: 205 });
+  assert.deepEqual(activeQualityMetrics(health, "active", 211), { median: null, speedBps: null, medianAt: null, speedAt: null });
+  assert.equal(latestSpeedSince(health.speed_samples_bps, health.last_speed_success_at, "active", 211), null);
+  assert.deepEqual(activeQualityMetrics({}, "unknown"), { median: null, speedBps: null, medianAt: null, speedAt: null });
+});
+
+test("a failed latency probe does not refresh old active metrics after a window reset", () => {
+  const health = {
+    median_delay_ms: { active: 496 }, last_good_at: { active: 200 },
+    last_probe_at: { active: 215 }, availability_ok: { active: false },
+  };
+  assert.deepEqual(activeQualityMetrics(health, "active"), { median: 496, speedBps: null, medianAt: 200, speedAt: null });
+  assert.deepEqual(activeQualityMetrics(health, "active", 211), { median: null, speedBps: null, medianAt: null, speedAt: null });
+  assert.deepEqual(activeQualityMetrics({ ...health, last_good_at: {} }, "active"), { median: null, speedBps: null, medianAt: null, speedAt: null });
 });
 
 test("latestSpeedSince hides the old median until a fresh probe arrives", () => {

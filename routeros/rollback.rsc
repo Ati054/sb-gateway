@@ -1,6 +1,12 @@
 # SB-GATEWAY scoped rollback. It never wipes a table and never removes objects
 # without the SB-GATEWAY comment/name. Existing VPNs, routes and firewall stay.
 
+# Service log preflight.
+:if (([:len [/system/logging/find where comment~"^SB-GATEWAY auth-log v1 "]] > 0) || ([:len [/system/logging/find where disabled=no and regex="^(\$|[^u])"]] > 0)) do={
+  :error "SB-GATEWAY: restore service account logging before manual rollback; see docs/ROUTEROS.md"
+}
+# End service log preflight.
+
 :local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]
 :if ([:len $gate] = 1) do={ /ip/firewall/mangle/disable $gate }
 /ip/firewall/connection/remove [find where connection-mark="sb-managed"]

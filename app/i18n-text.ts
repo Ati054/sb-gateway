@@ -1,4 +1,6 @@
 export const englishText: Record<string, string> = {
+  "Короткое окно · {value1}": "Recent window · {value1}",
+  "Последний успешный замер · {value1}": "Last successful measurement · {value1}",
   "Правило отбора обновляет состав при загрузке подписки": "The selection rule refreshes membership when the subscription updates",
   "Правило группы удалено": "Group rule removed",
   "Пользовательские группы узлов": "Custom node groups",

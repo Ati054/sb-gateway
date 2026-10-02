@@ -1,13 +1,13 @@
 diff --git a/app/router/balancing.go b/app/router/balancing.go
-index 5b7ef60..3e6f3cd 100644
+index 5b7ef60..5a067cd 100644
 --- a/app/router/balancing.go
 +++ b/app/router/balancing.go
 @@ -151,6 +151,8 @@ func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
  
  // SetOverrideTarget implements routing.BalancerOverrider
  func (r *Router) SetOverrideTarget(tag, target string) error {
-+	r.mu.Lock()
-+	defer r.mu.Unlock()
++	r.overrideMu.Lock()
++	defer r.overrideMu.Unlock()
  	if b, ok := (*r.balancers.Load())[tag]; ok {
  		b.override.Put(target)
  		return nil
@@ -15,41 +15,87 @@ index 5b7ef60..3e6f3cd 100644
  
  // GetOverrideTarget implements routing.BalancerOverrider
  func (r *Router) GetOverrideTarget(tag string) (string, error) {
-+	r.mu.Lock()
-+	defer r.mu.Unlock()
++	r.overrideMu.RLock()
++	defer r.overrideMu.RUnlock()
  	if b, ok := (*r.balancers.Load())[tag]; ok {
  		return b.override.Get(), nil
  	}
 diff --git a/app/router/router.go b/app/router/router.go
-index 406f932..4628090 100644
+index 406f932..8fa77cf 100644
 --- a/app/router/router.go
 +++ b/app/router/router.go
-@@ -106,6 +106,9 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
- 			return err
- 		}
- 		balancer.InjectContext(r.ctx)
-+		if previous, found := oldBalancers[rule.Tag]; found {
-+			balancer.override.Put(previous.override.Get())
-+		}
- 		newBalancers[rule.Tag] = balancer
+@@ -27,6 +27,7 @@ type Router struct {
+ 	ohm        outbound.Manager
+ 	dispatcher routing.Dispatcher
+ 	mu         sync.Mutex
++	overrideMu sync.RWMutex
+ }
+ 
+ // Route is an implementation of routing.Route.
+@@ -140,8 +141,18 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
+ 		newRules = append(newRules, rr)
  	}
  
++	// Compile against the immutable old routing while selector API stays live.
++	// Carry the latest override only at publication, including changes made
++	// while expensive GeoIP conditions were being built.
++	r.overrideMu.Lock()
++	for tag, balancer := range newBalancers {
++		if previous, found := oldBalancers[tag]; found {
++			balancer.override.Put(previous.override.Get())
++		}
++	}
+ 	r.balancers.Store(&newBalancers)
+ 	r.rules.Store(&newRules)
++	r.overrideMu.Unlock()
+ 	if !shouldAppend {
+ 		closeWebhooks(oldRules)
+ 	}
 diff --git a/app/router/sb_reload_test.go b/app/router/sb_reload_test.go
 new file mode 100644
-index 0000000..4dc2e0b
+index 0000000..4908eaa
 --- /dev/null
 +++ b/app/router/sb_reload_test.go
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,90 @@
 +package router
 +
 +import (
 +	"context"
 +	"sync"
 +	"testing"
++	"time"
 +)
 +
 +func sbReloadConfig() *Config {
 +	return &Config{BalancingRule: []*BalancingRule{{Tag: "policy", OutboundSelector: []string{"node-"}}}}
++}
++
++func TestSBOverrideDoesNotWaitForRoutingCompilation(t *testing.T) {
++	r := new(Router)
++	if err := r.Init(context.Background(), sbReloadConfig(), nil, nil, nil); err != nil {
++		t.Fatal(err)
++	}
++	r.mu.Lock()
++	done := make(chan error, 1)
++	go func() {
++		if err := r.SetOverrideTarget("policy", "node-b"); err != nil {
++			done <- err
++			return
++		}
++		_, err := r.GetOverrideTarget("policy")
++		done <- err
++	}()
++	select {
++	case err := <-done:
++		r.mu.Unlock()
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		r.mu.Unlock()
++		<-done
++		t.Fatal("selector API blocked behind routing compilation")
++	}
 +}
 +
 +func TestSBReloadPreservesOverrideAndRemoval(t *testing.T) {
