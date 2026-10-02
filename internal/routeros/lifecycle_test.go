@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -16,6 +18,8 @@ func TestScheduleFullUninstallStagesWorkerBeforeOneShotScheduler(t *testing.T) {
 		requests = append(requests, request.Method+" "+request.URL.RequestURI())
 		response.Header().Set("Content-Type", "application/json")
 		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/logging":
+			_, _ = response.Write([]byte(`[]`))
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script":
 			_, _ = response.Write([]byte(`[]`))
 		case request.Method == http.MethodPut && request.URL.Path == "/rest/system/script":
@@ -54,6 +58,7 @@ func TestScheduleFullUninstallStagesWorkerBeforeOneShotScheduler(t *testing.T) {
 		t.Fatalf("schedule result = %#v", result)
 	}
 	want := []string{
+		"GET " + serviceLogRuleProperties,
 		"GET /rest/system/script?.proplist=.id,name,comment",
 		"PUT /rest/system/script",
 		"GET /rest/system/scheduler?.proplist=.id,name,comment",
@@ -85,5 +90,25 @@ func TestFullUninstallIncludesRetainedImageBeforeRemovingStorage(t *testing.T) {
 	}
 	if strings.Contains(worker, `comment~"^SB-GATEWAY"]`) || !strings.Contains(worker, `comment~"^SB-GATEWAY "]`) {
 		t.Fatal("uninstall must not claim foreign comment prefixes without the ownership delimiter")
+	}
+}
+
+func TestManualTeardownStopsBeforeMutationWithManagedLogFilters(t *testing.T) {
+	for _, name := range []string{"uninstall.rsc", "rollback.rsc"} {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("..", "..", "routeros", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := string(data)
+			guard := strings.Index(source, `/system/logging/find where comment~"^SB-GATEWAY auth-log v1 "`)
+			mutation := strings.Index(source, `/ip/firewall/mangle/disable`)
+			if guard < 0 || mutation < 0 || guard > mutation || !strings.Contains(source[:mutation], `disabled=no and regex="^(\$|[^u])"`) || !strings.Contains(source[:mutation], `:error "SB-GATEWAY: restore service account logging before manual`) || !strings.Contains(source[:mutation], "# Service log preflight.") || !strings.Contains(source[:mutation], "# End service log preflight.") {
+				t.Fatal("manual teardown must reject managed or orphaned account-log filters before mutation")
+			}
+			if strings.Contains(source, "/system/logging/remove") || strings.Contains(source, "/system/logging/set") {
+				t.Fatal("manual teardown must not guess ownership or destructively clean logging rules")
+			}
+		})
 	}
 }

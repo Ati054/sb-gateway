@@ -40,6 +40,9 @@ func (client *Client) ScheduleFullUninstall(ctx context.Context, storageRoot str
 	if err != nil {
 		return nil, err
 	}
+	if _, err := client.RestoreServiceInfoLogs(ctx); err != nil {
+		return nil, fmt.Errorf("restore RouterOS account logging before uninstall: %w", err)
+	}
 	worker := renderFullUninstallWorker(root)
 	if _, err := client.installFixedManagedScript(ctx, fullUninstallWorker, worker); err != nil {
 		return nil, err

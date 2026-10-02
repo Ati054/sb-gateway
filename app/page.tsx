@@ -18,7 +18,7 @@ import {
 import { mergeRuntimeStatus, reverseAvailability } from "./runtime-status";
 import { nodePresentation, selectorCandidateIds, routeCandidateIds, compareRouteCandidates, nodeDisplayLabel, nodeLocationDetail } from "./node-presentation";
 import { confirmedUnstableRoute, qualitySheet } from "./node-quality";
-import { latestSpeedSince, qualityStatsSince } from "./quality-window";
+import { activeQualityMetrics, latestSpeedSince, qualityStatsSince } from "./quality-window";
 import { automaticCidrHint, supportsAutomaticCidr } from "./cdn-capabilities";
 import { AcmeFields, useAcmeProfile } from "./acme-fields";
 import { TlsTransferDialog } from "./tls-transfer";
@@ -4835,13 +4835,10 @@ function Routing({
         const currentDailyStats = asObject(dailyStats[selected]);
         const currentLoss = currentDailyStats.loss_percent;
         const currentP95 = currentDailyStats.p95_ms;
-        const currentMedian =
-          typeof currentDailyStats.median_ms === "number"
-            ? currentDailyStats.median_ms
-            : null;
         const nodeStats = candidateIds
           .map((candidate) => {
             const stats = asObject(dailyStats[candidate]);
+            const current = activeQualityMetrics(health, candidate, visibleBaseline ?? 0);
             const outage = asObject(asObject(health.outage_penalty)[candidate]);
             const unstable = confirmedUnstableRoute(
               outage.open === true,
@@ -4870,31 +4867,23 @@ function Routing({
                 typeof stats.availability_percent === "number"
                   ? stats.availability_percent
                   : null,
-              median: typeof stats.median_ms === "number" ? stats.median_ms : null,
+              median: candidate === selected ? current.median : typeof stats.median_ms === "number" ? stats.median_ms : null,
+              medianAt: candidate === selected ? current.medianAt : null,
+              speedAt: candidate === selected ? current.speedAt : null,
               decisionMedian: typeof asObject(health.median_delay_ms)[candidate] === "number"
                 ? Number(asObject(health.median_delay_ms)[candidate])
                 : null,
               p95: typeof stats.p95_ms === "number" ? stats.p95_ms : null,
-              speedBps: visibleBaseline
+              speedBps: candidate === selected ? current.speedBps : visibleBaseline
                 ? latestSpeedSince(
                     health.speed_samples_bps,
-                    health.last_speed_probe_at,
+                    health.last_speed_success_at,
                     candidate,
                     visibleBaseline,
                   )
                 : typeof asObject(health.speed_median_bps)[candidate] === "number"
                     ? Number(asObject(health.speed_median_bps)[candidate])
                     : null,
-              deltaMs:
-                currentMedian != null && typeof stats.median_ms === "number"
-                  ? stats.median_ms - currentMedian
-                  : null,
-              deltaPercent:
-                currentMedian != null &&
-                currentMedian > 0 &&
-                typeof stats.median_ms === "number"
-                  ? ((currentMedian - stats.median_ms) * 100) / currentMedian
-                  : null,
             };
           })
           .sort((left, right) => {
@@ -5244,7 +5233,6 @@ function Routing({
                     <th>{tr("Медиана")}</th>
                     <th>{tr("Скорость")}</th>
                     <th>p95 HTTPS</th>
-                    <th>{tr("К активному")}</th>
                     <th>{tr("Замеры")}</th>
                   </tr>
                 </thead>
@@ -5271,16 +5259,13 @@ function Routing({
                           {node.unstable ? <small>{tr("Срыв маршрута")}</small> : node.loss == null ? null : <small>({node.loss.toFixed(1)}{tr("% потерь)")}</small>}
                         </span>
                       </td>
-                      <td><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong></td>
-                      <td><strong>{node.speedBps == null ? "—" : tr("{value1} Мбит/с", { value1: (node.speedBps / 1_000_000).toFixed(1) })}</strong></td>
-                      <td>{node.p95 == null ? "—" : tr("{value1} мс", { value1: node.p95 })}</td>
-                      <td>
-                        {!node.selected && node.deltaPercent != null ? (
-                          <span className="quality-delta">
-                            {node.deltaPercent > 0 ? "▲" : node.deltaPercent < 0 ? "▼" : "="} {Math.abs(node.deltaPercent).toFixed(1)}%
-                          </span>
-                        ) : "—"}
+                      <td className="quality-measurement"><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong>
+                        {node.medianAt ? <time dateTime={new Date(node.medianAt * 1000).toISOString()} title={tr("Короткое окно · {value1}", { value1: formatTimestamp(new Date(node.medianAt * 1000).toISOString(), locale) })}>{new Date(node.medianAt * 1000).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time> : null}
                       </td>
+                      <td className="quality-measurement"><strong>{node.speedBps == null ? "—" : tr("{value1} Мбит/с", { value1: (node.speedBps / 1_000_000).toFixed(1) })}</strong>
+                        {node.speedAt ? <time dateTime={new Date(node.speedAt * 1000).toISOString()} title={tr("Последний успешный замер · {value1}", { value1: formatTimestamp(new Date(node.speedAt * 1000).toISOString(), locale) })}>{new Date(node.speedAt * 1000).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time> : null}
+                      </td>
+                      <td>{node.p95 == null ? "—" : tr("{value1} мс", { value1: node.p95 })}</td>
                       <td>{node.samples || "—"}</td>
                     </tr>
                   ))}

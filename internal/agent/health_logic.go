@@ -428,6 +428,26 @@ func meaningfullyBetter(selected string, candidates []string, delays map[string]
 // The rolling history may nominate a candidate, but only two fresh, paired
 // comparisons may move traffic. This prevents a stale speed sample or one
 // transient latency window from becoming a ten-minute sticky selection.
+func reconsiderPlannedOptimization(selected, desired, reason string, comparison *optimizationComparison, item *policyHealthState, medians map[string]*int, speeds map[string]*int64, p effectivePolicySettings) {
+	pending := item.OptimizationCandidate
+	if pending == "" || desired == selected || desired == pending || reason != "meaningfully-faster" ||
+		comparison == nil || comparison.Candidate != pending || comparison.Result != optimizationWin ||
+		item.OptimizationChecks+1 < optimizationConfirmations {
+		return
+	}
+	// selectDesired has already applied recovery, freshness, penalty and cooldown
+	// gates. Avoid an intermediate hop only for a material lead over the freshly
+	// confirmed candidate; the new nominee must still earn its own two wins.
+	delays := map[string]*int{pending: comparison.CandidateDelayMS, desired: medians[desired]}
+	throughput := map[string]*int64{pending: comparison.CandidateSpeedBPS, desired: speeds[desired]}
+	if meaningfullyBetter(pending, []string{desired}, delays, throughput, p) != desired {
+		return
+	}
+	item.OptimizationLastResult = comparison
+	clearOptimizationCandidate(item)
+	item.OptimizationRetryAfter = 0
+}
+
 func gatePlannedOptimization(now time.Time, selected, desired, reason string, comparison *optimizationComparison, item *policyHealthState, p effectivePolicySettings) (string, string) {
 	if item.OptimizationCandidate != "" && outagePenaltyActive(now, item, item.OptimizationCandidate) {
 		clearOptimizationCandidate(item)

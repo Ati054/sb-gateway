@@ -560,8 +560,9 @@ func (controller *healthController) Tick(now time.Time) error {
 		if item.RuntimeConfirmed && item.Selected != beforeSelected && item.LastSwitchAt != beforeSwitchAt {
 			controller.emitHealthEvent(healthEvent{At: item.LastSwitchAt, Event: "switch", Policy: policyID,
 				From: beforeSelected, To: item.Selected, Reason: item.LastSwitchReason,
-				Failure: probeFailureClass(item.FailureClass[beforeSelected]),
-				Quality: switchQualityEvidence(now, item, beforeSelected, item.Selected, item.LastSwitchReason)})
+				Failure:    probeFailureClass(item.FailureClass[beforeSelected]),
+				Quality:    switchQualityEvidence(now, item, beforeSelected, item.Selected, item.LastSwitchReason),
+				Comparison: switchOptimizationEvidence(item, item.Selected, item.LastSwitchReason)})
 		}
 		managed[policyID] = item
 		if controller.yielded {
@@ -788,22 +789,6 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		probeTargets = prioritizeEmergencyReserve(probeTargets,
 			knownFreshReserve(now, selected, withoutClosedCandidates(candidates, item.PreflightClosed), contract.Mode, groupIndex, item, p), item.PreflightClosed, p.batch)
 	} else if !emergencySwitched {
-		if warm {
-			probeTargets = append(probeTargets, selected)
-			for _, candidate := range changedOutbounds {
-				if candidate != selected && len(probeTargets) < p.batch {
-					probeTargets = append(probeTargets, candidate)
-				}
-			}
-			for _, candidate := range candidates {
-				if candidate != selected && !contains(probeTargets, candidate) && len(probeTargets) < p.batch {
-					probeTargets = append(probeTargets, candidate)
-				}
-			}
-			item.ScanQueue = without(item.ScanQueue, probeTargets)
-		} else {
-			probeTargets = regularProbeTargets(now, selected, candidates, shortlist, item, p)
-		}
 		if item.OptimizationCandidate != "" && outagePenaltyActive(now, item, item.OptimizationCandidate) {
 			clearOptimizationCandidate(item)
 			item.OptimizationRetryAfter = 0
@@ -828,9 +813,26 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				} else {
 					optimizationProbeTargets = []string{item.OptimizationCandidate}
 				}
-				probeTargets = append([]string(nil), optimizationProbeTargets...)
-				item.ScanQueue = without(item.ScanQueue, probeTargets)
 			}
+		}
+		if len(optimizationProbeTargets) > 0 {
+			probeTargets = append([]string(nil), optimizationProbeTargets...)
+			item.ScanQueue = without(item.ScanQueue, probeTargets)
+		} else if warm {
+			probeTargets = append(probeTargets, selected)
+			for _, candidate := range changedOutbounds {
+				if candidate != selected && len(probeTargets) < p.batch {
+					probeTargets = append(probeTargets, candidate)
+				}
+			}
+			for _, candidate := range candidates {
+				if candidate != selected && !contains(probeTargets, candidate) && len(probeTargets) < p.batch {
+					probeTargets = append(probeTargets, candidate)
+				}
+			}
+			item.ScanQueue = without(item.ScanQueue, probeTargets)
+		} else {
+			probeTargets = regularProbeTargets(now, selected, candidates, shortlist, item, p)
 		}
 	}
 
@@ -1158,14 +1160,17 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		pairSpeed := measuredSpeed
 		if p.speedEnabled && item.OptimizationActiveBPS != nil {
 			pairSpeed = map[string]int64{
-				selected:                   *item.OptimizationActiveBPS,
-				item.OptimizationCandidate: measuredSpeed[item.OptimizationCandidate],
+				selected: *item.OptimizationActiveBPS,
+			}
+			if speed, ok := measuredSpeed[item.OptimizationCandidate]; ok {
+				pairSpeed[item.OptimizationCandidate] = speed
 			}
 		}
 		comparison = compareOptimization(now, selected, item.OptimizationCandidate, pairMeasured, pairSpeed,
 			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], p)
 		clearOptimizationActiveSample(item)
 	}
+	reconsiderPlannedOptimization(selected, desired, reason, comparison, item, medians, speedMedians, p)
 	desired, reason = gatePlannedOptimization(now, selected, desired, reason, comparison, item, p)
 	serviceStatus := make(map[string]serviceHealthStatus)
 	if contract.Mode == "priority" && len(contract.Policy.CandidateServiceIDs) > 0 {

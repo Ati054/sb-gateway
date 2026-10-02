@@ -86,3 +86,20 @@ export function latestSpeedSince(
   }
   return null;
 }
+
+export function activeQualityMetrics(rawHealth: unknown, candidate: string, since = 0) {
+  const health = rawHealth && typeof rawHealth === "object"
+    ? rawHealth as Record<string, unknown> : {};
+  const valueAt = (key: string) => {
+    const values = health[key];
+    return values && typeof values === "object"
+      ? (values as Record<string, unknown>)[candidate] : undefined;
+  };
+  const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  const medianAt = positive(valueAt("last_good_at"));
+  const speedAt = positive(valueAt("last_speed_success_at"));
+  const median = medianAt !== null && medianAt >= since ? positive(valueAt("median_delay_ms")) : null;
+  const speedBps = speedAt !== null && speedAt >= since
+    ? latestSpeedSince(health.speed_samples_bps, health.last_speed_success_at, candidate, since) : null;
+  return { median, speedBps, medianAt: median === null ? null : medianAt, speedAt: speedBps === null ? null : speedAt };
+}

@@ -1,6 +1,6 @@
 # SB Gateway for MikroTik RouterOS 7
 
-SB Gateway 1.6.33 is a bilingual Web-managed traffic-policy gateway packaged as
+SB Gateway 1.6.34 is a bilingual Web-managed traffic-policy gateway packaged as
 one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.30
 only; sing-box is not shipped and there is no core switch in the UI.
 
@@ -32,8 +32,10 @@ specific LAN, Wi-Fi, WireGuard, SSTP, or OpenVPN clients through provider
 VLESS/Hysteria nodes, Reverse VLESS, or selected RouterOS WireGuard tunnels. It does not take
 ownership of existing LANs, VPNs, routes, Wi-Fi, or unrelated firewall rules.
 All project-created RouterOS objects are scoped by the `SB-GATEWAY` owner
-marker. The only mutation of a pre-existing object is the explicitly selected
-WireGuard peer's `allowed-address`; its original value is recorded and restored.
+marker. Changes to pre-existing objects are limited to the explicitly selected
+WireGuard peer's `allowed-address` and eligible logging rules used to filter
+successful service-account logins. Original values are recorded for restoration;
+other users' logins, errors, warnings and custom logging filters are preserved.
 
 An incoming WireGuard client is identified by its RouterOS peer, not by the
 shared WireGuard interface. The saved peer `.id` is stable across public-key or
@@ -52,7 +54,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.33-routeros-bundle.zip` from the GitHub release and
+Download `sb-gateway-1.6.34-routeros-bundle.zip` from the GitHub release and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 
