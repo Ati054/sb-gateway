@@ -2,6 +2,12 @@
 # directory used by this installation before importing this file. The script
 # refuses internal flash and a bare disk root.
 
+# Service log preflight.
+:if (([:len [/system/logging/find where comment~"^SB-GATEWAY auth-log v1 "]] > 0) || ([:len [/system/logging/find where disabled=no and regex="^(\$|[^u])"]] > 0)) do={
+  :error "SB-GATEWAY: restore service account logging before manual removal; see docs/ROUTEROS.md"
+}
+# End service log preflight.
+
 :global "SB_STORAGE_ROOT"
 :local storageRoot [:tostr $"SB_STORAGE_ROOT"]
 :if (([:len $storageRoot] < 5) || ([:typeof [:find $storageRoot "/"]] = "nil") || ([:typeof [:find $storageRoot ".."]] != "nil") || ([:find $storageRoot "flash"] = 0) || ([:find $storageRoot "Flash"] = 0) || ([:find $storageRoot "FLASH"] = 0) || ($storageRoot = "disk1") || ($storageRoot = "usb1") || ($storageRoot = "usb2") || ($storageRoot = "sata1") || ($storageRoot = "nvme1")) do={

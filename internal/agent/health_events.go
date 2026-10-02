@@ -10,19 +10,20 @@ import (
 // labels and failure classes. Server addresses, URLs, credentials and raw
 // network errors must not enter the management log.
 type healthEvent struct {
-	At        string            `json:"at"`
-	Event     string            `json:"event"`
-	Policy    string            `json:"policy"`
-	Node      string            `json:"node,omitempty"`
-	From      string            `json:"from,omitempty"`
-	To        string            `json:"to,omitempty"`
-	Reason    string            `json:"reason,omitempty"`
-	Failure   probeFailureClass `json:"failure,omitempty"`
-	Count     int               `json:"count,omitempty"`
-	Threshold int               `json:"threshold,omitempty"`
-	Underlay  string            `json:"underlay,omitempty"`
-	Targets   map[string]string `json:"targets,omitempty"`
-	Quality   *switchQuality    `json:"quality,omitempty"`
+	At         string                  `json:"at"`
+	Event      string                  `json:"event"`
+	Policy     string                  `json:"policy"`
+	Node       string                  `json:"node,omitempty"`
+	From       string                  `json:"from,omitempty"`
+	To         string                  `json:"to,omitempty"`
+	Reason     string                  `json:"reason,omitempty"`
+	Failure    probeFailureClass       `json:"failure,omitempty"`
+	Count      int                     `json:"count,omitempty"`
+	Threshold  int                     `json:"threshold,omitempty"`
+	Underlay   string                  `json:"underlay,omitempty"`
+	Targets    map[string]string       `json:"targets,omitempty"`
+	Quality    *switchQuality          `json:"quality,omitempty"`
+	Comparison *optimizationComparison `json:"comparison,omitempty"`
 }
 
 // Numeric decision evidence is emitted only on a switch. It contains no
@@ -49,6 +50,15 @@ func switchQualityEvidence(now time.Time, item *policyHealthState, from, to, rea
 		FromBadProbes: item.Failures[from], ToMedianMS: item.MedianDelayMS[to],
 		ToLossPercent: item.PacketLossPercent[to], ToProbeAgeSeconds: age,
 	}
+}
+
+func switchOptimizationEvidence(item *policyHealthState, to, reason string) *optimizationComparison {
+	comparison := item.OptimizationLastResult
+	if reason != "meaningfully-faster" || comparison == nil || comparison.Result != optimizationWin ||
+		comparison.Candidate != to || comparison.At != item.LastSwitchAt {
+		return nil
+	}
+	return comparison
 }
 
 func (controller *healthController) emitHealthEvent(event healthEvent) {

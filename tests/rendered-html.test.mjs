@@ -804,7 +804,9 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /<th>Медиана<\/th>/);
   assert.match(page, /<th>Скорость<\/th>/);
   assert.match(page, /<th>p95 HTTPS<\/th>/);
-  assert.match(page, /<th>К активному<\/th>/);
+  assert.doesNotMatch(page, /<th>К активному<\/th>/);
+  assert.match(page, /className="quality-measurement"/);
+  assert.match(page, /<time dateTime=/);
   assert.match(page, /node\.loss\.toFixed\(1\)\}% потерь/);
   assert.match(page, /Качество узлов/);
   assert.doesNotMatch(page, /Подробные замеры хранятся 24 часа/);
