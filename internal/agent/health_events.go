@@ -54,7 +54,7 @@ func switchQualityEvidence(now time.Time, item *policyHealthState, from, to, rea
 
 func switchOptimizationEvidence(item *policyHealthState, to, reason string) *optimizationComparison {
 	comparison := item.OptimizationLastResult
-	if reason != "meaningfully-faster" || comparison == nil || comparison.Result != optimizationWin ||
+	if !isPlannedOptimization(reason) || comparison == nil || comparison.Result != optimizationWin ||
 		comparison.Candidate != to || comparison.At != item.LastSwitchAt {
 		return nil
 	}

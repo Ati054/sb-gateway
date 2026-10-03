@@ -34,6 +34,7 @@ var healthTargets = []struct {
 }
 
 type healthPool struct {
+	ProbeBudget      int                             `json:"probe_budget,omitempty"`
 	Version          int                             `json:"version"`
 	Policies         map[string][]string             `json:"policies"`
 	HealthPolicies   map[string]healthPolicyContract `json:"health_policies"`
@@ -76,6 +77,7 @@ type healthPolicy struct {
 	SwitchImprovementMS       int                 `json:"switch_improvement_ms"`
 	SpeedCheckEnabled         *bool               `json:"speed_check_enabled"`
 	SpeedImprovementPercent   int                 `json:"speed_improvement_percent"`
+	SpeedDegradationPercent   *int                `json:"speed_degradation_percent"`
 	SpeedCheckIntervalSeconds int                 `json:"speed_check_interval_seconds"`
 	SpeedProbeBytes           int                 `json:"speed_probe_bytes"`
 	SpeedCandidateCount       int                 `json:"speed_candidate_count"`
@@ -120,72 +122,78 @@ func (policy *healthPolicy) UnmarshalJSON(body []byte) error {
 type healthState map[string]*policyHealthState
 
 type policyHealthState struct {
-	Selected               string                            `json:"selected"`
-	Failures               map[string]int                    `json:"failures"`
-	AvailabilityFailures   map[string]int                    `json:"availability_failures"`
-	Recoveries             map[string]int                    `json:"recoveries"`
-	Samples                map[string][]healthSample         `json:"samples"`
-	DailySamples           map[string][]healthSample         `json:"daily_samples"`
-	HistoryDays            map[string]map[string]dayBucket   `json:"history_days"`
-	CooldownUntil          float64                           `json:"cooldown_until"`
-	LastProbeAt            map[string]float64                `json:"last_probe_at"`
-	LastGoodAt             map[string]float64                `json:"last_good_at,omitempty"`
-	SpeedSamplesBPS        map[string][]int64                `json:"speed_samples_bps"`
-	LastSpeedProbeAt       map[string]float64                `json:"last_speed_probe_at"`
-	LastSpeedSuccessAt     map[string]float64                `json:"last_speed_success_at,omitempty"`
-	LastSpeedProbeStatus   map[string]string                 `json:"last_speed_probe_status,omitempty"`
-	CandidateSignature     string                            `json:"candidate_signature"`
-	ScanQueue              []string                          `json:"scan_queue"`
-	ProbeLane              int                               `json:"probe_lane,omitempty"`
-	NextFullScanAt         float64                           `json:"next_full_scan_at"`
-	LastSwitchAt           string                            `json:"last_switch_at,omitempty"`
-	LastSwitchReason       string                            `json:"last_switch_reason,omitempty"`
-	OptimizationBaseline   string                            `json:"optimization_baseline,omitempty"`
-	OptimizationCandidate  string                            `json:"optimization_candidate,omitempty"`
-	OptimizationChecks     int                               `json:"optimization_checks,omitempty"`
-	OptimizationNextAt     float64                           `json:"optimization_next_at,omitempty"`
-	OptimizationRetryAfter float64                           `json:"optimization_retry_after,omitempty"`
-	OptimizationIncomplete int                               `json:"optimization_incomplete,omitempty"`
-	OptimizationBackoff    map[string]float64                `json:"optimization_backoff,omitempty"`
-	OutagePenalty          map[string]outagePenalty          `json:"outage_penalty,omitempty"`
-	OptimizationLastResult *optimizationComparison           `json:"optimization_last_result,omitempty"`
-	OptimizationActiveAt   float64                           `json:"optimization_active_at,omitempty"`
-	OptimizationActiveMS   *int                              `json:"optimization_active_ms,omitempty"`
-	OptimizationActiveBPS  *int64                            `json:"optimization_active_bps,omitempty"`
-	DailyStats             map[string]healthStats            `json:"daily_stats"`
-	PeriodStats            map[string]map[string]healthStats `json:"period_stats"`
-	DelayMS                map[string]*int                   `json:"delay_ms"`
-	MedianDelayMS          map[string]*int                   `json:"median_delay_ms"`
-	PacketLossPercent      map[string]float64                `json:"packet_loss_percent"`
-	QualityOK              map[string]bool                   `json:"quality_ok"`
-	AvailabilityOK         map[string]bool                   `json:"availability_ok"`
-	FailureClass           map[string]string                 `json:"failure_class,omitempty"`
-	CandidateLabels        map[string]string                 `json:"candidate_labels"`
-	CandidateNodes         map[string]healthNode             `json:"candidate_nodes"`
-	CandidateGroups        map[string]int                    `json:"candidate_groups"`
-	GroupLabels            map[string]string                 `json:"group_labels"`
-	CandidateServiceStatus map[string]serviceHealthStatus    `json:"candidate_service_status"`
-	Shortlist              []string                          `json:"shortlist"`
-	ProbedCandidates       []string                          `json:"probed_candidates"`
-	HTTPSProbeTargets      map[string]map[string]*int        `json:"https_probe_targets"`
-	SpeedMedianBPS         map[string]*int64                 `json:"speed_median_bps"`
-	SpeedProbeTargets      []string                          `json:"speed_probe_targets"`
-	Mode                   string                            `json:"mode"`
-	CandidateCount         int                               `json:"candidate_count"`
-	HealthyReserves        int                               `json:"healthy_reserves"`
-	ProbeLimits            probeLimits                       `json:"probe_limits"`
-	QualityThresholds      qualityThresholds                 `json:"quality_thresholds"`
-	CheckedAt              string                            `json:"checked_at"`
-	RuntimeSelected        string                            `json:"runtime_selected,omitempty"`
-	RuntimeObservedAt      string                            `json:"runtime_observed_at,omitempty"`
-	RuntimeConfirmed       bool                              `json:"runtime_confirmed"`
-	RuntimeError           string                            `json:"runtime_error,omitempty"`
-	LastWorkingSelection   *workingSelection                 `json:"last_working_selection,omitempty"`
-	UnderlayFailure        string                            `json:"underlay_failure,omitempty"`
-	UnderlayCheckedAt      string                            `json:"underlay_checked_at,omitempty"`
-	OutageProbePending     bool                              `json:"-"`
-	LastPreflightAt        float64                           `json:"-"`
-	PreflightClosed        map[string]bool                   `json:"-"`
+	Selected                  string                            `json:"selected"`
+	Failures                  map[string]int                    `json:"failures"`
+	AvailabilityFailures      map[string]int                    `json:"availability_failures"`
+	Recoveries                map[string]int                    `json:"recoveries"`
+	Samples                   map[string][]healthSample         `json:"samples"`
+	DailySamples              map[string][]healthSample         `json:"daily_samples"`
+	HistoryDays               map[string]map[string]dayBucket   `json:"history_days"`
+	CooldownUntil             float64                           `json:"cooldown_until"`
+	LastProbeAt               map[string]float64                `json:"last_probe_at"`
+	LastGoodAt                map[string]float64                `json:"last_good_at,omitempty"`
+	SpeedSamplesBPS           map[string][]int64                `json:"speed_samples_bps"`
+	SpeedHistory              map[string][]speedSample          `json:"speed_history,omitempty"`
+	SpeedDegradation          *speedDegradation                 `json:"speed_degradation,omitempty"`
+	SpeedSelectionReference   *speedSelectionReference          `json:"speed_selection_reference,omitempty"`
+	SpeedProbation            map[string]speedProbation         `json:"speed_probation,omitempty"`
+	OptimizationSpeedDegraded bool                              `json:"optimization_speed_degraded,omitempty"`
+	OptimizationBudgetAfter   float64                           `json:"optimization_budget_after,omitempty"`
+	LastSpeedProbeAt          map[string]float64                `json:"last_speed_probe_at"`
+	LastSpeedSuccessAt        map[string]float64                `json:"last_speed_success_at,omitempty"`
+	LastSpeedProbeStatus      map[string]string                 `json:"last_speed_probe_status,omitempty"`
+	CandidateSignature        string                            `json:"candidate_signature"`
+	ScanQueue                 []string                          `json:"scan_queue"`
+	ProbeLane                 int                               `json:"probe_lane,omitempty"`
+	NextFullScanAt            float64                           `json:"next_full_scan_at"`
+	LastSwitchAt              string                            `json:"last_switch_at,omitempty"`
+	LastSwitchReason          string                            `json:"last_switch_reason,omitempty"`
+	OptimizationBaseline      string                            `json:"optimization_baseline,omitempty"`
+	OptimizationCandidate     string                            `json:"optimization_candidate,omitempty"`
+	OptimizationChecks        int                               `json:"optimization_checks,omitempty"`
+	OptimizationNextAt        float64                           `json:"optimization_next_at,omitempty"`
+	OptimizationRetryAfter    float64                           `json:"optimization_retry_after,omitempty"`
+	OptimizationIncomplete    int                               `json:"optimization_incomplete,omitempty"`
+	OptimizationBackoff       map[string]float64                `json:"optimization_backoff,omitempty"`
+	OutagePenalty             map[string]outagePenalty          `json:"outage_penalty,omitempty"`
+	OptimizationLastResult    *optimizationComparison           `json:"optimization_last_result,omitempty"`
+	OptimizationActiveAt      float64                           `json:"optimization_active_at,omitempty"`
+	OptimizationActiveMS      *int                              `json:"optimization_active_ms,omitempty"`
+	OptimizationActiveBPS     *int64                            `json:"optimization_active_bps,omitempty"`
+	DailyStats                map[string]healthStats            `json:"daily_stats"`
+	PeriodStats               map[string]map[string]healthStats `json:"period_stats"`
+	DelayMS                   map[string]*int                   `json:"delay_ms"`
+	MedianDelayMS             map[string]*int                   `json:"median_delay_ms"`
+	PacketLossPercent         map[string]float64                `json:"packet_loss_percent"`
+	QualityOK                 map[string]bool                   `json:"quality_ok"`
+	AvailabilityOK            map[string]bool                   `json:"availability_ok"`
+	FailureClass              map[string]string                 `json:"failure_class,omitempty"`
+	CandidateLabels           map[string]string                 `json:"candidate_labels"`
+	CandidateNodes            map[string]healthNode             `json:"candidate_nodes"`
+	CandidateGroups           map[string]int                    `json:"candidate_groups"`
+	GroupLabels               map[string]string                 `json:"group_labels"`
+	CandidateServiceStatus    map[string]serviceHealthStatus    `json:"candidate_service_status"`
+	Shortlist                 []string                          `json:"shortlist"`
+	ProbedCandidates          []string                          `json:"probed_candidates"`
+	HTTPSProbeTargets         map[string]map[string]*int        `json:"https_probe_targets"`
+	SpeedMedianBPS            map[string]*int64                 `json:"speed_median_bps"`
+	SpeedProbeTargets         []string                          `json:"speed_probe_targets"`
+	Mode                      string                            `json:"mode"`
+	CandidateCount            int                               `json:"candidate_count"`
+	HealthyReserves           int                               `json:"healthy_reserves"`
+	ProbeLimits               probeLimits                       `json:"probe_limits"`
+	QualityThresholds         qualityThresholds                 `json:"quality_thresholds"`
+	CheckedAt                 string                            `json:"checked_at"`
+	RuntimeSelected           string                            `json:"runtime_selected,omitempty"`
+	RuntimeObservedAt         string                            `json:"runtime_observed_at,omitempty"`
+	RuntimeConfirmed          bool                              `json:"runtime_confirmed"`
+	RuntimeError              string                            `json:"runtime_error,omitempty"`
+	LastWorkingSelection      *workingSelection                 `json:"last_working_selection,omitempty"`
+	UnderlayFailure           string                            `json:"underlay_failure,omitempty"`
+	UnderlayCheckedAt         string                            `json:"underlay_checked_at,omitempty"`
+	OutageProbePending        bool                              `json:"-"`
+	LastPreflightAt           float64                           `json:"-"`
+	PreflightClosed           map[string]bool                   `json:"-"`
 }
 
 type healthSample struct {
@@ -244,12 +252,20 @@ type qualityThresholds struct {
 	FailureConfirmations      int     `json:"failure_confirmations"`
 	RecoveryConfirmations     int     `json:"recovery_confirmations"`
 	CooldownSeconds           int     `json:"cooldown_seconds"`
+	SpeedDegradationPercent   int     `json:"speed_degradation_percent"`
+	ActiveSpeedSeconds        int     `json:"active_speed_seconds"`
+	BackupSpeedSeconds        int     `json:"backup_speed_seconds"`
 }
 
+var errProbeSelectorUnavailable = errors.New("Xray probe selector is unavailable")
+
 type probeEvidence struct {
-	OK      bool
-	DelayMS *int
-	Targets map[string]*int
+	ObservedAt   time.Time
+	Deferred     bool
+	LocalFailure bool
+	OK           bool
+	DelayMS      *int
+	Targets      map[string]*int
 	// TargetFailures contains only fixed health-target labels and failure classes,
 	// never endpoint URLs or response bodies.
 	TargetFailures map[string]probeFailureClass
@@ -266,6 +282,7 @@ type selectorRuntime interface {
 }
 
 type healthController struct {
+	probeBudget         *healthProbeBudget
 	priorityPolicy      string
 	opts                Options
 	runtime             selectorRuntime
@@ -497,6 +514,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		policyIDs = append(policyIDs, policyID)
 	}
 	sort.Strings(policyIDs)
+	controller.beginProbeBudget(pool, policyIDs)
 	sort.SliceStable(policyIDs, func(i, j int) bool {
 		if policyIDs[i] == controller.priorityPolicy || policyIDs[j] == controller.priorityPolicy {
 			return policyIDs[i] == controller.priorityPolicy
@@ -510,7 +528,16 @@ func (controller *healthController) Tick(now time.Time) error {
 			return item == nil || !item.RuntimeConfirmed || item.Selected == "" ||
 				item.Selected == "block" || item.AvailabilityFailures[item.Selected] > 0
 		}
-		return urgent(policyIDs[i]) && !urgent(policyIDs[j])
+		if urgent(policyIDs[i]) != urgent(policyIDs[j]) {
+			return urgent(policyIDs[i])
+		}
+		first, second := controller.probeBudget.DeferredPolicies[policyIDs[i]], controller.probeBudget.DeferredPolicies[policyIDs[j]]
+		firstDue := !first.IsZero() && !now.Before(controller.regularNext[policyIDs[i]])
+		secondDue := !second.IsZero() && !now.Before(controller.regularNext[policyIDs[j]])
+		if firstDue != secondDue {
+			return firstDue
+		}
+		return firstDue && first.Before(second)
 	})
 	var failures []error
 	dirty := runtimeReset || len(pool.HealthPolicies) != len(controller.state)
@@ -529,6 +556,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		if controller.transitions[policyID] != nil || !controller.warmStarted[policyID] ||
 			(!controller.forceLiveness[policyID] && !now.Before(controller.regularNext[policyID])) || item.Selected == "block" {
 			delete(controller.forceLiveness, policyID)
+			delete(controller.probeBudget.DeferredPolicies, policyID)
 			err = controller.tickPolicy(now, policyID, contract, item)
 			if !errors.Is(err, errHealthYield) {
 				controller.regularNext[policyID] = now.Add(controller.regularInterval(contract))
@@ -581,6 +609,9 @@ func (controller *healthController) Tick(now time.Time) error {
 		}
 	}
 	controller.state = managed
+	if len(controller.probeBudget.Used) > 0 {
+		controller.probeBudget.Cursor++
+	}
 	for id := range controller.transitions {
 		if _, exists := pool.HealthPolicies[id]; !exists {
 			delete(controller.transitions, id)
@@ -590,7 +621,16 @@ func (controller *healthController) Tick(now time.Time) error {
 }
 
 func (controller *healthController) regularInterval(contract healthPolicyContract) time.Duration {
-	qualityInterval := time.Duration(policySettings(contract.Policy, contract.Mode).active) * time.Second
+	p := policySettings(contract.Policy, contract.Mode)
+	qualityInterval := time.Duration(p.active) * time.Second
+	if p.speedEnabled {
+		// A long quality/controller interval must still service capped speed
+		// recovery work, without scheduling extra quality probes.
+		speedInterval := time.Duration(minInt(900, maxInt(180, 3*p.active))) * time.Second
+		if speedInterval < qualityInterval {
+			qualityInterval = speedInterval
+		}
+	}
 	if controller.opts.HealthInterval <= 0 || qualityInterval < controller.opts.HealthInterval {
 		return qualityInterval
 	}
@@ -692,7 +732,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			if candidate == selected {
 				break
 			}
-			if item.AvailabilityOK[candidate] {
+			if item.AvailabilityOK[candidate] && !speedProbationActive(now, item, candidate, p) {
 				selected = candidate
 				item.CooldownUntil = 0
 				item.LastSwitchAt = now.UTC().Format(time.RFC3339)
@@ -712,7 +752,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	item.RuntimeObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	item.RuntimeError = ""
 	if item.OptimizationCandidate != "" &&
-		(contract.Mode != "best" || item.OptimizationBaseline != selected ||
+		((contract.Mode != "best" && !item.OptimizationSpeedDegraded) || item.OptimizationBaseline != selected ||
 			item.OptimizationCandidate == selected || !contains(candidates, item.OptimizationCandidate)) {
 		clearOptimizationCandidate(item)
 		item.OptimizationRetryAfter = 0
@@ -751,6 +791,11 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		item.ScanQueue = append([]string(nil), candidates...)
 		item.NextFullScanAt = float64(now.Unix()) + float64(p.fullScan)
 	}
+	if item.Mode != "" && (item.Mode != contract.Mode || item.QualityThresholds.SpeedDegradationPercent != p.speedDegradationPercent) {
+		item.SpeedDegradation = nil
+		clearOptimizationCandidate(item)
+	}
+	refreshSpeedEpisode(now, selected, item, p)
 	shortlist := workingShortlist(selected, candidates, contract.Mode, groupIndex, item, p)
 
 	probeTargets := []string{}
@@ -836,6 +881,16 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		}
 	}
 
+	if !outage {
+		var deferred []string
+		probeTargets, deferred = controller.claimProbeTargets(policyID, contract, probeTargets, 0, len(optimizationProbeTargets) > 0)
+		item.ScanQueue = uniqueCandidates(append(deferred, item.ScanQueue...))
+		// A denied slot is not a failed comparison or a measured success.
+		if len(optimizationProbeTargets) > 0 && len(probeTargets) != len(optimizationProbeTargets) {
+			item.ScanQueue = uniqueCandidates(append(probeTargets, item.ScanQueue...))
+			probeTargets, optimizationProbeTargets = nil, nil
+		}
+	}
 	measured := make(map[string]probeEvidence)
 	if outage {
 		var emergencySelected string
@@ -861,12 +916,35 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			outage = false
 		}
 	}
+	if !outage && !emergencySwitched && len(probeTargets) > 1 {
+		if _, ok := controller.runtime.(parallelQualityRuntime); ok {
+			measured = controller.sharedQualityBatch(policyID, contract, probeTargets)
+			if err := controller.takeSharedProbeInterruption(); err != nil {
+				item.ScanQueue = uniqueCandidates(append(probeTargets, item.ScanQueue...))
+				return err
+			}
+		}
+	}
+	deferredQuality := []string{}
 	for index := 0; !emergencySwitched && !outage && index < len(probeTargets); index++ {
 		candidate := probeTargets[index]
-		measured[candidate] = controller.runtime.Probe(candidate)
-		if err := takeProbeInterruption(controller.runtime); err != nil {
+		if _, checked := measured[candidate]; !checked {
+			measured[candidate] = controller.sharedQualityProbe(policyID, candidate, contract)
+		}
+		if err := controller.takeSharedProbeInterruption(); err != nil {
 			item.ScanQueue = uniqueCandidates(append(probeTargets, item.ScanQueue...))
 			return err
+		}
+		if measured[candidate].Deferred {
+			delete(measured, candidate)
+			deferredQuality = append(deferredQuality, candidate)
+			item.ScanQueue = uniqueCandidates(append([]string{candidate}, item.ScanQueue...))
+			optimizationProbeTargets = nil
+			controller.deferSharedProbe(policyID)
+			continue
+		}
+		if measured[candidate].LocalFailure {
+			return errProbeSelectorUnavailable
 		}
 		if candidate == selected && !measured[candidate].OK {
 			item.FailureClass[selected] = string(measured[candidate].Failure)
@@ -920,6 +998,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			break
 		}
 	}
+	probeTargets = without(probeTargets, deferredQuality)
 	if outage && !emergencySwitched && !emergencyAttempted {
 		emergencyAttempted = true
 		var emergencySelected string
@@ -967,13 +1046,26 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				candidatesForSpeed = optimizationProbeTargets
 			}
 		}
+		var speedDeferred []string
+		candidatesForSpeed, speedDeferred = controller.claimProbeTargets(policyID, contract, candidatesForSpeed, p.speedBytes, len(optimizationProbeTargets) > 0)
+		if len(optimizationProbeTargets) > 0 && len(speedDeferred) > 0 {
+			optimizationProbeTargets = nil
+		}
 		for _, candidate := range candidatesForSpeed {
-			speedTargets = append(speedTargets, candidate)
-			speed, speedErr := controller.runtime.Throughput(candidate, p.speedBytes)
-			if err := takeProbeInterruption(controller.runtime); err != nil {
+			speed, speedErr := controller.sharedSpeedProbe(policyID, candidate, contract, p.speedBytes)
+			if err := controller.takeSharedProbeInterruption(); err != nil {
 				item.ScanQueue = uniqueCandidates(append(probeTargets, item.ScanQueue...))
 				return err
 			}
+			if errors.Is(speedErr, errSharedProbeDeferred) {
+				optimizationProbeTargets = nil
+				controller.deferSharedProbe(policyID)
+				continue
+			}
+			if errors.Is(speedErr, errProbeSelectorUnavailable) {
+				return speedErr
+			}
+			speedTargets = append(speedTargets, candidate)
 			if (speedErr == nil || errors.Is(speedErr, errSpeedWindowComplete)) && speed > 0 {
 				measuredSpeed[candidate] = speed
 				speedStatus[candidate] = "ok"
@@ -998,30 +1090,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			finishOutageEpisode(item, candidate)
 		}
 	}
-	for _, candidate := range speedTargets {
-		item.LastSpeedProbeAt[candidate] = float64(now.Unix())
-		item.LastSpeedProbeStatus[candidate] = speedStatus[candidate]
-		if speedStatus[candidate] == "ok" || speedStatus[candidate] == "time-limited" {
-			item.LastSpeedSuccessAt[candidate] = float64(now.Unix())
-		}
-	}
-	speedMedians := make(map[string]*int64)
-	for _, candidate := range candidates {
-		values := positiveSpeeds(item.SpeedSamplesBPS[candidate])
-		if value, ok := measuredSpeed[candidate]; ok {
-			values = append(values, value)
-		}
-		if len(values) > 5 {
-			values = values[len(values)-5:]
-		}
-		item.SpeedSamplesBPS[candidate] = values
-		if len(values) > 0 {
-			median := medianInt64(values)
-			speedMedians[candidate] = &median
-		} else {
-			speedMedians[candidate] = nil
-		}
-	}
+	speedMedians := updateSpeedHistory(now, selected, candidates, speedTargets, measuredSpeed, speedStatus, item, p)
 
 	updateHistories(item, candidates, measured, now)
 	dailyStats := make(map[string]healthStats)
@@ -1127,8 +1196,8 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	}
 	var comparison *optimizationComparison
 	if len(optimizationProbeTargets) == 2 {
-		comparison = compareOptimization(now, selected, item.OptimizationCandidate, measured, measuredSpeed,
-			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], p)
+		comparison = comparePlannedOptimization(now, selected, item.OptimizationCandidate, measured, measuredSpeed,
+			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], item, p)
 	} else if len(optimizationProbeTargets) == 1 && optimizationProbeTargets[0] == selected {
 		evidence := measured[selected]
 		valid := evidence.OK && evidence.DelayMS != nil
@@ -1166,8 +1235,8 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				pairSpeed[item.OptimizationCandidate] = speed
 			}
 		}
-		comparison = compareOptimization(now, selected, item.OptimizationCandidate, pairMeasured, pairSpeed,
-			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], p)
+		comparison = comparePlannedOptimization(now, selected, item.OptimizationCandidate, pairMeasured, pairSpeed,
+			qualityOK[item.OptimizationCandidate], availabilityOK[item.OptimizationCandidate], item, p)
 		clearOptimizationActiveSample(item)
 	}
 	reconsiderPlannedOptimization(selected, desired, reason, comparison, item, medians, speedMedians, p)
@@ -1192,6 +1261,12 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	if desired != selected {
 		if err := controller.runtime.Select(policyID, desired); err != nil {
 			return err
+		}
+		if reason == "speed-degraded" {
+			recordSpeedDegradationExit(now, item, selected)
+		}
+		if isPlannedOptimization(reason) && comparison != nil && comparison.Candidate == desired && comparison.Result == optimizationWin && comparison.CandidateSpeedBPS != nil {
+			item.SpeedSelectionReference = &speedSelectionReference{Node: desired, At: float64(now.Unix()), BPS: *comparison.CandidateSpeedBPS}
 		}
 		item.Selected = desired
 		item.LastSwitchAt = now.UTC().Format(time.RFC3339)
@@ -1236,7 +1311,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	// Keep draining eligible, untested candidates at the emergency interval.
 	// The cheaper block recovery interval applies after that sweep is exhausted.
 	item.OutageProbePending = item.Selected == "block" && len(outageProbeTargets(now, withoutClosedCandidates(candidates, item.PreflightClosed), item, p)) > 0
-	item.QualityThresholds = qualityThresholds{p.qualityWindow, p.maxLoss, p.maxLatency, p.improvement, p.speedEnabled, p.speedImprovement, p.speedInterval, p.speedBytes, p.speedCandidates, p.failureThreshold, p.recoveryThreshold, p.cooldown}
+	item.QualityThresholds = qualityThresholds{p.qualityWindow, p.maxLoss, p.maxLatency, p.improvement, p.speedEnabled, p.speedImprovement, p.speedInterval, p.speedBytes, p.speedCandidates, p.failureThreshold, p.recoveryThreshold, p.cooldown, p.speedDegradationPercent, minInt(900, maxInt(180, 3*p.active)), minInt(p.speedInterval, maxInt(300, 3*p.backup))}
 	item.CheckedAt = now.UTC().Format(time.RFC3339)
 	rememberWorkingSelection(contract, item)
 	return nil

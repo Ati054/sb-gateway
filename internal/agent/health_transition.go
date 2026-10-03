@@ -91,7 +91,11 @@ func (controller *healthController) transitionRemovedActive(now time.Time, polic
 		parallel.ProbeAvailabilityParallel(targets, accept)
 	} else {
 		for _, candidate := range targets {
-			if accept(candidate, controller.runtime.ProbeAvailability(candidate)) {
+			evidence := controller.runtime.ProbeAvailability(candidate)
+			if evidence.LocalFailure {
+				return "", false, errProbeSelectorUnavailable
+			}
+			if accept(candidate, evidence) {
 				break
 			}
 		}

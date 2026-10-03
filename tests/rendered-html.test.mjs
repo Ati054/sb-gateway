@@ -11,7 +11,7 @@ test("URLTest switching help separates speed and latency thresholds", async () =
   assert.match(page, /name="speed_improvement_percent"/);
   assert.match(page, /Порог приоритета скорости, %/);
   assert.match(page, /Только для выбора по отклику/);
-  assert.match(page, /При выигрыше скорости допустимо \+50 мс отклика/);
+  assert.match(page, /Минимальный выигрыш относительно активного узла при парной проверке скорости/);
   assert.match(page, /Порог HTTPS-медианы, мс/);
   assert.doesNotMatch(page, /Максимальный p95 HTTPS, мс/);
   assert.doesNotMatch(page, /Плановая смена канала не выполняется, если прирост ниже этого порога/);

@@ -85,6 +85,48 @@ func TestBuildXrayHealthPoolUsesCurrentPriorityOrder(t *testing.T) {
 	}
 }
 
+func TestBuildXrayHealthPoolPreservesLegacyBatchesUntilGlobalAuto(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		monitor map[string]any
+		batches map[string]int
+	}{
+		{"absent", nil, map[string]int{"best": 2, "priority": 3}},
+		{"empty", map[string]any{}, map[string]int{"best": 2, "priority": 3}},
+		{"auto", map[string]any{"probe_batch_size": 0}, map[string]int{"best": 5, "priority": 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := map[string]any{
+				"reverse_vless_exits": []any{map[string]any{"id": "first", "enabled": true}},
+				"policies": []any{
+					map[string]any{"id": "best", "enabled": true, "mode": "best", "selection_order": []any{"reverse:first"}, "probe_batch_size": 2},
+					map[string]any{"id": "priority", "enabled": true, "mode": "priority", "selection_order": []any{"reverse:first"}, "probe_batch_size": 3},
+				},
+			}
+			if tc.monitor != nil {
+				config["system"] = map[string]any{"routing_monitor": tc.monitor}
+			}
+			body, err := BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pool map[string]any
+			if err := json.Unmarshal(body, &pool); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := numericInt(pool["probe_budget"]); !ok || got != 5 {
+				t.Fatalf("global budget = %v, want 5", pool["probe_budget"])
+			}
+			for id, want := range tc.batches {
+				policy := objectValue(objectValue(objectValue(pool["health_policies"])[id])["policy"])
+				if got, ok := numericInt(policy["probe_batch_size"]); !ok || got != want {
+					t.Fatalf("%s batch = %v, want %d", id, policy["probe_batch_size"], want)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
 	config := map[string]any{
 		"system": map[string]any{"routing_monitor": map[string]any{
@@ -114,7 +156,10 @@ func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	policies := objectValue(pool["health_policies"])
-	for id, wantBatch := range map[string]int{"best": 2, "priority": 3} {
+	if budget, ok := numericInt(pool["probe_budget"]); !ok || budget != 5 {
+		t.Fatalf("global budget = %v", pool["probe_budget"])
+	}
+	for id, wantBatch := range map[string]int{"best": 5, "priority": 5} {
 		policy := objectValue(objectValue(policies[id])["policy"])
 		for field, want := range map[string]int{
 			"active_liveness_interval_seconds": 4,
@@ -132,19 +177,30 @@ func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
 		}
 	}
 
-	objectValue(objectValue(config["system"])["routing_monitor"])["probe_batch_size"] = json.Number("1")
-	body, err = BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(body, &pool); err != nil {
-		t.Fatal(err)
-	}
-	policies = objectValue(pool["health_policies"])
-	for _, id := range []string{"best", "priority"} {
-		policy := objectValue(objectValue(policies[id])["policy"])
-		if batch, ok := numericInt(policy["probe_batch_size"]); !ok || batch != 1 {
-			t.Fatalf("%s explicit batch = %v, want 1", id, policy["probe_batch_size"])
+	for _, batch := range []int{1, 2, 5, 6, 7, 8, 9, 10} {
+		objectValue(objectValue(config["system"])["routing_monitor"])["probe_batch_size"] = batch
+		configured := objectSlice(config["policies"])
+		configured[0]["speed_degradation_percent"] = 0
+		configured[1]["speed_degradation_percent"] = 30
+		body, err = BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(body, &pool); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := numericInt(pool["probe_budget"]); !ok || got != batch {
+			t.Fatalf("global manual budget = %v, want %d", pool["probe_budget"], batch)
+		}
+		policies = objectValue(pool["health_policies"])
+		for id, drop := range map[string]int{"best": 0, "priority": 30} {
+			policy := objectValue(objectValue(policies[id])["policy"])
+			if got, ok := numericInt(policy["probe_batch_size"]); !ok || got != batch {
+				t.Fatalf("%s explicit batch = %v, want %d", id, policy["probe_batch_size"], batch)
+			}
+			if got, ok := numericInt(policy["speed_degradation_percent"]); !ok || got != drop {
+				t.Fatalf("%s speed drop = %v, want %d", id, policy["speed_degradation_percent"], drop)
+			}
 		}
 	}
 }

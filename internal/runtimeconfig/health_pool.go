@@ -73,6 +73,10 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 	policyPrefixes := make(map[string]string)
 	healthPolicies := make(map[string]any)
 	routingMonitor := objectValue(objectValue(config["system"])["routing_monitor"])
+	probeBudget := 5
+	if configured, ok := numericInt(routingMonitor["probe_batch_size"]); ok && configured > 0 && configured <= 10 {
+		probeBudget = configured
+	}
 	for _, policy := range enabledObjects(config["policies"]) {
 		policyID := textValue(policy["id"])
 		if policyID == "" {
@@ -146,10 +150,8 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 			}
 			if batch, ok := numericInt(routingMonitor["probe_batch_size"]); ok && batch > 0 {
 				resolvedPolicy["probe_batch_size"] = batch
-			} else if mode == "best" {
-				resolvedPolicy["probe_batch_size"] = 2
 			} else {
-				resolvedPolicy["probe_batch_size"] = 3
+				resolvedPolicy["probe_batch_size"] = probeBudget
 			}
 		}
 		healthPolicies[policyID] = map[string]any{
@@ -211,7 +213,8 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 	sort.Strings(baseTags)
 
 	pool := map[string]any{
-		"version": 4, "policies": policyMembers, "health_policies": healthPolicies,
+		"probe_budget": probeBudget,
+		"version":      4, "policies": policyMembers, "health_policies": healthPolicies,
 		"local_policy_ids": localPolicyIDs,
 		"policy_prefixes":  policyPrefixes, "base_outbound_tags": baseTags,
 		"outbounds": dynamicOutbounds, "dial_targets": dialTargets,
