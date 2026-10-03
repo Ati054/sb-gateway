@@ -54,6 +54,9 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	item.RuntimeError = ""
 	evidence := controller.runtime.ProbeAvailability(selected)
 	controller.livenessAt[policyID] = now
+	if evidence.LocalFailure {
+		return true, errProbeSelectorUnavailable
+	}
 	wasFailed := item.AvailabilityFailures[selected] > 0
 	if evidence.OK {
 		finishOutageEpisode(item, selected)

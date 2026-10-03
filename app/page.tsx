@@ -5375,7 +5375,7 @@ function RoutingMonitorSettings({
                 value={values.probe_batch_size}
                 onChange={(event) => update("probe_batch_size", event.target.value)}
               >
-                <option value={0}>{tr("Авто · URLTest: 2, приоритет: 3")}</option>
+                <option value={0}>{tr("Авто · общий бюджет: 5")}</option>
                 <option value={1}>1</option>
                 <option value={2}>2</option>
                 <option value={3}>3</option>
@@ -5387,7 +5387,7 @@ function RoutingMonitorSettings({
                 <option value={9}>9</option>
                 <option value={10}>10</option>
               </select>
-              <small>{tr("При аварии — одновременно; активный пул не меняется.")}</small>
+              <small>{tr("Общий бюджет всех листов. Совпадающие узлы используют свежий общий замер; скоростные скачивания идут по очереди.")}</small>
             </label>
           </div>
           <div className="routing-monitor-actions">
@@ -12145,13 +12145,17 @@ function PolicyDialog({
     () => asObjectList(existingPolicy.custom_routes),
   );
   const [candidateLimit, setCandidateLimit] = useState(() => {
-    const saved = Number(existingPolicy.max_active_candidates);
+    const saved = Number(existingPolicy.max_active_candidates ?? existingPolicy.max_probe_candidates);
     if (Number.isFinite(saved) && saved >= 1) {
       return Math.max(1, Math.min(10, Math.trunc(saved)));
     }
-    const selected = initialSelectionOrderKey.split("\n").filter(Boolean).length;
-    return Math.max(1, Math.min(10, selected || 3));
+    return 5;
   });
+  const [speedDegradationPercent, setSpeedDegradationPercent] = useState<number | null>(
+    () => existingPolicy.speed_degradation_percent == null
+      ? null
+      : Number(existingPolicy.speed_degradation_percent),
+  );
   const [candidateServiceIds, setCandidateServiceIds] = useState<string[]>(() => {
     const saved = asStringList(existingPolicy.candidate_service_ids);
     return saved.length ? saved : ["claude", "antigravity"];
@@ -12411,11 +12415,12 @@ function PolicyDialog({
         switch_cooldown_seconds: Number(data.get("switch_cooldown_seconds") ?? existingPolicy.switch_cooldown_seconds ?? 600),
         switch_improvement_percent: undefined,
         switch_improvement_ms: Number(data.get("switch_improvement_ms") ?? existingPolicy.switch_improvement_ms ?? 50),
-        speed_check_enabled: mode === "best",
+        speed_check_enabled: mode === "best" || Number(data.get("speed_degradation_percent") ?? 0) > 0,
         speed_improvement_percent: Number(data.get("speed_improvement_percent") ?? existingPolicy.speed_improvement_percent ?? 25),
-        speed_check_interval_seconds: 10800,
-        speed_probe_bytes: 2097152,
-        speed_candidate_count: 2,
+        speed_degradation_percent: Number(data.get("speed_degradation_percent") ?? existingPolicy.speed_degradation_percent ?? (mode === "best" ? 50 : 0)),
+        speed_check_interval_seconds: Number(existingPolicy.speed_check_interval_seconds ?? 10800),
+        speed_probe_bytes: Number(existingPolicy.speed_probe_bytes ?? 2097152),
+        speed_candidate_count: Number(existingPolicy.speed_candidate_count ?? 2),
         max_active_candidates: candidateLimit,
         max_probe_candidates: candidateLimit,
         return_to_primary: true,
@@ -12667,9 +12672,9 @@ function PolicyDialog({
               </div>
               <aside className="adaptive-checks-note form-span">
                 <strong>{tr("Проверки распределены по времени")}</strong>
-                <p>{mode === "priority"
+                <p>{mode === "priority" && (speedDegradationPercent ?? 0) === 0
                   ? tr("Вся выбранная очередь проверяется малыми партиями. Доступность активного пути контролируется отдельно.")
-                  : tr("Все выбранные серверы проверяются малыми партиями. Замеры скорости чередуются: до 2 МиБ на узел, не чаще раза в 3 часа для каждого.")}</p>
+                  : tr("Активный узел получает приоритет в замерах скорости. Просадка запускает дополнительные подтверждающие замеры.")}</p>
               </aside>
               <details className="policy-check-advanced form-span">
                 <summary>{tr("Дополнительные параметры переключения")}</summary>
@@ -12704,24 +12709,31 @@ function PolicyDialog({
                     <span className="policy-check-label">{tr("Подтверждений восстановления")}</span>
                     <input name="recovery_threshold" type="number" min="1" max="20" defaultValue={asText(existingPolicy.recovery_threshold, "3")} />
                   </label>
+                  <label className="field">
+                    <span className="policy-check-label">{tr("Порог просадки скорости, %")}</span>
+                    <input name="speed_degradation_percent" type="number" min="0" max="99" step="1"
+                      value={speedDegradationPercent ?? (mode === "best" ? 50 : 0)}
+                      onChange={(event) => setSpeedDegradationPercent(Number(event.target.value))} />
+                    <small>{tr("Относительно недавней устойчивой скорости этого узла. 0 — не переключаться из-за просадки скорости.")}</small>
+                  </label>
                   {mode === "best" ? (
                     <>
+                      <label className="field">
+                        <span className="policy-check-label">{tr("Порог приоритета скорости, %")}</span>
+                        <input name="speed_improvement_percent" type="number" min="0" max="100" defaultValue={asText(existingPolicy.speed_improvement_percent, "25")} />
+                        <small>{tr("Минимальный выигрыш относительно активного узла при парной проверке скорости.")}</small>
+                      </label>
                       <label className="field">
                         <span className="policy-check-label">{tr("Порог переключения URLTest, мс")}</span>
                         <input name="switch_improvement_ms" type="number" min="0" max="30000" defaultValue={asText(existingPolicy.switch_improvement_ms, "50")} />
                         <small>{tr("Только для выбора по отклику.")}</small>
-                      </label>
-                      <label className="field">
-                        <span className="policy-check-label">{tr("Порог приоритета скорости, %")}</span>
-                        <input name="speed_improvement_percent" type="number" min="0" max="100" defaultValue={asText(existingPolicy.speed_improvement_percent, "25")} />
-                        <small>{tr("При выигрыше скорости допустимо +50 мс отклика.")}</small>
                       </label>
                     </>
                   ) : null}
                   <label className="field">
                     <span className="policy-check-label">{tr("Защита от обратного переключения, сек.")}</span>
                     <input name="switch_cooldown_seconds" type="number" min="0" max="86400" defaultValue={asText(existingPolicy.switch_cooldown_seconds, "600")} />
-                    <small>{tr("Только для планового выбора лучшего узла. Отказ, деградация и выход из блокировки выполняются без этой паузы.")}</small>
+                    <small>{tr("Пауза для плановой смены и ухудшения HTTPS-качества. Подтверждённый отказ и просадка скорости обрабатываются отдельно.")}</small>
                   </label>
                 </div>
               </details>

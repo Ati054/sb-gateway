@@ -14,8 +14,8 @@ import (
 var errHealthYield = errors.New("background probe yielded to active path or runtime change")
 
 // The controller remains the sole owner of health state and routing choices.
-// Slow quality and speed requests use one separate loopback selector. Emergency
-// availability checks may use several isolated selectors concurrently; workers
+// Quality and emergency availability use independent loopback selector lanes.
+// Throughput downloads remain sequential. Background workers
 // publish evidence through the controller callback and never own controller state.
 type responsiveSelectorRuntime struct {
 	selectorRuntime
@@ -231,6 +231,14 @@ func (runtime *responsiveSelectorRuntime) ProbeEmergencyAvailabilityParallel(can
 }
 
 func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies bool) map[string]probeEvidence {
+	return runtime.probeParallel(candidates, onResult, checkOtherPolicies, false)
+}
+
+func (runtime *responsiveSelectorRuntime) ProbeQualityParallel(candidates []string) map[string]probeEvidence {
+	return runtime.probeParallel(candidates, nil, true, true)
+}
+
+func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies, quality bool) map[string]probeEvidence {
 	measured := make(map[string]probeEvidence, len(candidates))
 	lanes := runtime.backgrounds
 	if len(lanes) == 0 && runtime.background != nil {
@@ -238,8 +246,17 @@ func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates [
 	}
 	if !runtime.parallelEnabled || len(lanes) < 2 || len(candidates) < 2 {
 		for _, candidate := range candidates {
-			evidence := runtime.selectorRuntime.ProbeAvailability(candidate)
+			var evidence probeEvidence
+			if quality {
+				evidence = runtime.Probe(candidate)
+			} else {
+				evidence = runtime.selectorRuntime.ProbeAvailability(candidate)
+			}
 			measured[candidate] = evidence
+			if evidence.LocalFailure {
+				runtime.interrupted = errProbeSelectorUnavailable
+				return measured
+			}
 			if onResult != nil && onResult(candidate, evidence) {
 				break
 			}
@@ -273,7 +290,7 @@ func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates [
 			lane.probeContext = ctx
 			if _, _, err := lane.Reload(); err != nil {
 				for candidate := range jobs {
-					results <- result{candidate: candidate, evidence: probeEvidence{Failure: probeFailureTransient}}
+					results <- result{candidate: candidate, evidence: probeEvidence{Failure: probeFailureTransient, LocalFailure: true}}
 				}
 				return
 			}
@@ -281,7 +298,13 @@ func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates [
 				if ctx.Err() != nil {
 					return
 				}
-				evidence := lane.ProbeAvailability(candidate)
+				var evidence probeEvidence
+				if quality {
+					evidence = lane.Probe(candidate)
+				} else {
+					evidence = lane.ProbeAvailability(candidate)
+				}
+				evidence.ObservedAt = time.Now()
 				select {
 				case results <- result{candidate: candidate, evidence: evidence}:
 				case <-ctx.Done():
@@ -308,6 +331,12 @@ func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates [
 				return measured
 			}
 			remaining--
+			if value.evidence.LocalFailure {
+				cancel()
+				<-done
+				runtime.interrupted = errProbeSelectorUnavailable
+				return measured
+			}
 			measured[value.candidate] = value.evidence
 			if onResult != nil && onResult(value.candidate, value.evidence) {
 				cancel()
