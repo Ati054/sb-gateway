@@ -748,7 +748,7 @@ func TestFailedPlannedComparisonBacksOffButEmergencySwitchDoesNotWait(t *testing
 	desired, reason := gatePlannedOptimization(
 		now.Add(time.Minute), "active", "reserve", "meaningfully-faster", confirmed, item, settings,
 	)
-	if desired != "active" || reason != "" || item.OptimizationCandidate != "" || item.OptimizationRetryAfter != 1660 {
+	if desired != "active" || reason != "" || item.OptimizationCandidate != "" || item.OptimizationRetryAfter != 0 || item.OptimizationBackoff["reserve"] != 1660 || item.OptimizationBudgetAfter != 1360 {
 		t.Fatalf("failed comparison did not back off: desired=%q reason=%q item=%+v", desired, reason, item)
 	}
 	desired, reason = gatePlannedOptimization(
@@ -815,6 +815,7 @@ func TestControllerBoundsPlannedComparisonToActiveAndOneCandidate(t *testing.T) 
 		item.Recoveries[candidate] = 3
 		item.LastProbeAt[candidate] = 1_000
 		item.LastSpeedProbeAt[candidate] = 1_000
+		item.LastSpeedSuccessAt[candidate] = 1_000
 		item.Samples[candidate] = []healthSample{{OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}}
 	}
 	item.SpeedSamplesBPS["active"] = []int64{12_000}
@@ -879,6 +880,7 @@ func stagedOptimizationController(t *testing.T) (*healthController, *policyHealt
 		item.AvailabilityOK[candidate], item.QualityOK[candidate] = true, true
 		item.Recoveries[candidate] = 3
 		item.LastProbeAt[candidate], item.LastSpeedProbeAt[candidate] = 1_000, 1_000
+		item.LastSpeedSuccessAt[candidate] = 1_000
 		item.Samples[candidate] = []healthSample{{OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}, {OK: true, DelayMS: delay}}
 	}
 	item.SpeedSamplesBPS["active"] = []int64{12_000}
@@ -904,7 +906,7 @@ func TestIncompleteCandidateSpeedRetriesThenRequiresTwoFreshWins(t *testing.T) {
 	if item.Selected != "active" || item.OptimizationCandidate != "reserve" || item.OptimizationIncomplete != 1 ||
 		item.OptimizationNextAt != 1_180 || item.OptimizationRetryAfter != 0 ||
 		item.OptimizationLastResult == nil || item.OptimizationLastResult.Reason != "candidate-speed-missing" ||
-		item.LastSpeedProbeStatus["reserve"] != "failed" || item.LastSpeedSuccessAt["reserve"] != 0 {
+		item.LastSpeedProbeStatus["reserve"] != "failed" || item.LastSpeedSuccessAt["reserve"] != 1_000 {
 		t.Fatalf("incomplete candidate pair was treated as a loss: %+v", item)
 	}
 	if len(item.SpeedSamplesBPS["reserve"]) != 1 || item.SpeedSamplesBPS["reserve"][0] != 16_000 {
@@ -971,7 +973,7 @@ func TestRepeatedCandidateSpeedFailureBacksOffOnlyThatCandidate(t *testing.T) {
 		}
 	}
 	if item.OptimizationCandidate != "" || item.OptimizationBackoff["reserve"] != 1_780 ||
-		item.OptimizationRetryAfter != 1_240 {
+		item.OptimizationRetryAfter != 0 || item.OptimizationBudgetAfter != 1_480 {
 		t.Fatalf("candidate failure triggered a policy-wide cooldown: %+v", item)
 	}
 	if got := withoutOptimizationBackoff(time.Unix(1_240, 0), []string{"reserve", "other"}, item); strings.Join(got, ",") != "other" {

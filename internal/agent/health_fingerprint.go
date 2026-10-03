@@ -29,6 +29,9 @@ func invalidateChangedOutboundHealth(item *policyHealthState, candidates []strin
 		delete(item.LastProbeAt, id)
 		delete(item.LastGoodAt, id)
 		delete(item.SpeedSamplesBPS, id)
+		delete(item.SpeedHistory, id)
+		delete(item.SpeedProbation, id)
+		invalidateSpeedSurveyNode(item, id)
 		delete(item.LastSpeedProbeAt, id)
 		delete(item.LastSpeedSuccessAt, id)
 		delete(item.LastSpeedProbeStatus, id)
@@ -76,6 +79,22 @@ func pruneRemovedCandidateHealth(item *policyHealthState, candidates []string) {
 	pruneNodeMap(item.LastProbeAt, active)
 	pruneNodeMap(item.LastGoodAt, active)
 	pruneNodeMap(item.SpeedSamplesBPS, active)
+	pruneNodeMap(item.SpeedHistory, active)
+	pruneNodeMap(item.SpeedProbation, active)
+	if item.SpeedDegradation != nil {
+		if !active[item.SpeedDegradation.Node] {
+			item.SpeedDegradation = nil
+		} else {
+			for node := range item.SpeedDegradation.Survey {
+				if !active[node] {
+					invalidateSpeedSurveyNode(item, node)
+				}
+			}
+			item.SpeedDegradation.SurveyTargets = keepActiveCandidates(item.SpeedDegradation.SurveyTargets, active)
+			item.SpeedDegradation.Finalists = keepActiveCandidates(item.SpeedDegradation.Finalists, active)
+			item.SpeedDegradation.Tried = keepActiveCandidates(item.SpeedDegradation.Tried, active)
+		}
+	}
 	pruneNodeMap(item.LastSpeedProbeAt, active)
 	pruneNodeMap(item.LastSpeedSuccessAt, active)
 	pruneNodeMap(item.LastSpeedProbeStatus, active)

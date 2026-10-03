@@ -32,31 +32,41 @@ const (
 )
 
 type effectivePolicySettings struct {
-	failureThreshold  int
-	recoveryThreshold int
-	qualityWindow     int
-	maxLoss           float64
-	maxLatency        int
-	cooldown          int
-	improvement       int
-	speedEnabled      bool
-	speedImprovement  int
-	speedInterval     int
-	speedBytes        int
-	speedCandidates   int
-	active            int
-	backup            int
-	fullScan          int
-	shortlist         int
-	batch             int
-	liveness          int
-	failureRetry      int
-	blockRecovery     int
+	mode                    string
+	speedDegradationPercent int
+	failureThreshold        int
+	recoveryThreshold       int
+	qualityWindow           int
+	maxLoss                 float64
+	maxLatency              int
+	cooldown                int
+	improvement             int
+	speedEnabled            bool
+	speedImprovement        int
+	speedInterval           int
+	speedBytes              int
+	speedCandidates         int
+	active                  int
+	backup                  int
+	fullScan                int
+	shortlist               int
+	batch                   int
+	liveness                int
+	failureRetry            int
+	blockRecovery           int
 }
 
 func policySettings(policy healthPolicy, mode string) effectivePolicySettings {
-	speedEnabled := mode == "best" && (policy.SpeedCheckEnabled == nil || *policy.SpeedCheckEnabled)
+	drop := 0
+	if mode == "best" {
+		drop = 50
+	}
+	if policy.SpeedDegradationPercent != nil {
+		drop = defaultIntAllowZero(*policy.SpeedDegradationPercent, drop, 0, 99)
+	}
+	speedEnabled := (mode == "best" || drop > 0) && (policy.SpeedCheckEnabled == nil || *policy.SpeedCheckEnabled)
 	return effectivePolicySettings{
+		mode: mode, speedDegradationPercent: drop,
 		failureThreshold:  defaultInt(policy.FailureThreshold, 3, 1, 20),
 		recoveryThreshold: defaultInt(policy.RecoveryThreshold, 3, 1, 20),
 		qualityWindow:     defaultInt(policy.QualityWindow, 5, 1, 60),
@@ -142,9 +152,23 @@ func knownHealthyReplacement(candidates []string, mode string, groups map[string
 	return ""
 }
 
-// Rotate bounded speed downloads across reachable candidates, not just the
-// current latency leaders. A policy-wide floor prevents a large subscription
-// from downloading a new batch on every controller tick.
+// Routine speed follows existing quality intervals. Keep recovery/reference
+// lifetimes separate: faster sampling must not weaken the anti-flap guards.
+func speedRoutineInterval(candidate, selected string, item *policyHealthState, p effectivePolicySettings) int {
+	if candidate == selected {
+		return minInt(900, maxInt(180, 3*p.active))
+	}
+	if _, recovering := item.SpeedProbation[candidate]; recovering {
+		return minInt(900, maxInt(300, 3*p.backup))
+	}
+	if contains(item.Shortlist, candidate) {
+		return minInt(p.speedInterval, maxInt(300, 3*p.backup))
+	}
+	return p.speedInterval
+}
+
+// Explore outside the working pool slowly; a per-policy batch floor bounds
+// cold-start downloads, without delaying a due active probe behind a reserve.
 func speedProbeCandidates(now time.Time, selected string, candidates []string, measured map[string]probeEvidence, item *policyHealthState, p effectivePolicySettings) []string {
 	latest := float64(0)
 	for _, at := range item.LastSpeedProbeAt {
@@ -152,7 +176,7 @@ func speedProbeCandidates(now time.Time, selected string, candidates []string, m
 			latest = at
 		}
 	}
-	if latest > 0 && float64(now.Unix())-latest < 300 {
+	if latest > 0 && float64(now.Unix())-latest < 60 && (selected == "" || float64(now.Unix())-item.LastSpeedProbeAt[selected] < float64(speedRoutineInterval(selected, selected, item, p))) {
 		return nil
 	}
 	eligible := []string{}
@@ -162,7 +186,8 @@ func speedProbeCandidates(now time.Time, selected string, candidates []string, m
 			available = evidence.OK
 		}
 		last := item.LastSpeedProbeAt[candidate]
-		if available && (last == 0 || float64(now.Unix())-last >= float64(p.speedInterval)) {
+		interval := speedRoutineInterval(candidate, selected, item, p)
+		if available && (last == 0 || float64(now.Unix())-last >= float64(interval)) {
 			eligible = append(eligible, candidate)
 		}
 	}
@@ -176,6 +201,12 @@ func speedProbeCandidates(now time.Time, selected string, candidates []string, m
 }
 
 func ensureHealthMaps(item *policyHealthState) {
+	if item.SpeedHistory == nil {
+		item.SpeedHistory = make(map[string][]speedSample)
+	}
+	if item.SpeedProbation == nil {
+		item.SpeedProbation = make(map[string]speedProbation)
+	}
 	if item.Failures == nil {
 		item.Failures = make(map[string]int)
 	}
@@ -320,7 +351,7 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 			desired, reason = "block", "all-candidates-unavailable"
 		}
 	} else {
-		stable := []string{}
+		stable, speedStable := []string{}, []string{}
 		for _, candidate := range candidates {
 			// A reachable active path must not be replaced using a reserve's
 			// old quality snapshot. Availability failover has its own fast path.
@@ -328,8 +359,25 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 			age := float64(now.Unix()) - lastProbe
 			freshForSoftSwitch := lastProbe > 0 && age >= 0 && age <= float64(minInt(p.backup, maxInt(p.active*2, 120)))
 			if candidate != selected && quality[candidate] && known(candidate, p.recoveryThreshold) &&
-				item.AvailabilityFailures[candidate] == 0 && freshForSoftSwitch && !outagePenaltyActive(now, item, candidate) {
+				item.AvailabilityFailures[candidate] == 0 && lastProbe > 0 && age >= 0 && age <= float64(maxInt(p.backup, 1800)) &&
+				!outagePenaltyActive(now, item, candidate) && !speedProbationActive(now, item, candidate, p) {
+				speedStable = append(speedStable, candidate)
+			}
+			if candidate != selected && quality[candidate] && known(candidate, p.recoveryThreshold) &&
+				item.AvailabilityFailures[candidate] == 0 && freshForSoftSwitch && !outagePenaltyActive(now, item, candidate) && !speedProbationActive(now, item, candidate, p) {
 				stable = append(stable, candidate)
+			}
+		}
+		priorityReturn := ""
+		if mode == "priority" && float64(now.Unix()) >= item.CooldownUntil {
+			higher := []string{}
+			for _, candidate := range stable {
+				if groups[candidate] < groups[selected] || (groups[candidate] == groups[selected] && candidateIndex(candidates, candidate) < candidateIndex(candidates, selected)) {
+					higher = append(higher, candidate)
+				}
+			}
+			if higher = rank(higher); len(higher) > 0 {
+				priorityReturn = higher[0]
 			}
 		}
 		if item.Failures[selected] >= p.failureThreshold && len(stable) > 0 {
@@ -337,23 +385,20 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 			// confirmed healthy reserve, and honour cooldown. Otherwise two
 			// slow paths can alternate on every tick forever.
 			desired, reason = rank(stable)[0], "active-degraded"
-		} else if mode == "priority" {
-			higher := []string{}
-			for _, candidate := range stable {
-				if groups[candidate] < groups[selected] || (groups[candidate] == groups[selected] && candidateIndex(candidates, candidate) < candidateIndex(candidates, selected)) {
-					higher = append(higher, candidate)
-				}
+		} else if priorityReturn != "" {
+			desired, reason = priorityReturn, "higher-priority-recovered"
+		} else if next := speedDegradationCandidate(now, selected, rank(speedStable), item, p); next != "" {
+			desired, reason = next, "speed-degraded"
+		} else if p.speedEnabled && p.speedDegradationPercent > 0 && item.SpeedDegradation != nil {
+			// The bounded investigation owns this decision, not the old median.
+		} else if mode != "priority" {
+			if better := meaningfullyBetter(selected, withoutOptimizationBackoff(now, stable, item), medians, speeds, p); better != "" {
+				desired, reason = better, "meaningfully-faster"
 			}
-			higher = rank(higher)
-			if len(higher) > 0 {
-				desired, reason = higher[0], "higher-priority-recovered"
-			}
-		} else if better := meaningfullyBetter(selected, withoutOptimizationBackoff(now, stable, item), medians, speeds, p); better != "" {
-			desired, reason = better, "meaningfully-faster"
 		}
 		// All soft switches respect cooldown. Confirmed availability failure
 		// is handled above and is never delayed by this guard.
-		if desired != selected && float64(now.Unix()) < item.CooldownUntil {
+		if desired != selected && reason != "speed-degraded" && float64(now.Unix()) < item.CooldownUntil {
 			desired, reason = selected, ""
 		}
 	}
@@ -449,14 +494,19 @@ func reconsiderPlannedOptimization(selected, desired, reason string, comparison 
 }
 
 func gatePlannedOptimization(now time.Time, selected, desired, reason string, comparison *optimizationComparison, item *policyHealthState, p effectivePolicySettings) (string, string) {
-	if item.OptimizationCandidate != "" && outagePenaltyActive(now, item, item.OptimizationCandidate) {
+	ensureHealthMaps(item)
+	blocked := func(node string) bool {
+		return outagePenaltyActive(now, item, node) || speedProbationActive(now, item, node, p)
+	}
+	if item.OptimizationCandidate != "" && blocked(item.OptimizationCandidate) {
 		clearOptimizationCandidate(item)
 		item.OptimizationRetryAfter = 0
 	}
-	if desired != selected && outagePenaltyActive(now, item, desired) && reason != "active-unavailable" {
+	emergency := reason == "active-unavailable" || reason == "fresh-path-available"
+	if desired != selected && blocked(desired) && !emergency {
 		return selected, ""
 	}
-	if desired != selected && reason != "meaningfully-faster" {
+	if desired != selected && !isPlannedOptimization(reason) {
 		clearOptimizationCandidate(item)
 		item.OptimizationRetryAfter = 0
 		return desired, reason
@@ -467,6 +517,27 @@ func gatePlannedOptimization(now time.Time, selected, desired, reason string, co
 			return selected, ""
 		}
 		item.OptimizationLastResult = comparison
+		if item.OptimizationSpeedDegraded && (comparison.Reason == "active-speed-missing" || comparison.Reason == "active-https-failed") {
+			if item.SpeedDegradation != nil {
+				item.SpeedDegradation.RetryAfter = float64(now.Unix() + speedActiveInterval)
+			}
+			clearOptimizationCandidate(item)
+			item.OptimizationBudgetAfter = float64(now.Unix() + 300)
+			item.OptimizationRetryAfter = 0
+			return selected, ""
+		}
+		if item.OptimizationSpeedDegraded && item.SpeedDegradation != nil {
+			item.SpeedDegradation.Pairs++
+			if handleSpeedSurveyComparison(now, comparison, item, p) {
+				return selected, ""
+			}
+		}
+		if comparison.Reason == "active-speed-recovered" || comparison.Reason == "active-https-failed" {
+			clearOptimizationCandidate(item)
+			item.OptimizationBudgetAfter = float64(now.Unix() + 300)
+			item.OptimizationRetryAfter = 0
+			return selected, ""
+		}
 		if comparison.Result == optimizationInconclusive {
 			item.OptimizationChecks = 0
 			item.OptimizationIncomplete++
@@ -474,20 +545,18 @@ func gatePlannedOptimization(now time.Time, selected, desired, reason string, co
 				item.OptimizationNextAt = float64(now.Unix() + int64(maxInt(p.active, 120)))
 				return selected, ""
 			}
-			candidate := item.OptimizationCandidate
 			if comparison.Reason == "active-speed-missing" {
 				// Another reserve cannot establish a baseline either.
+				clearOptimizationCandidate(item)
 				item.OptimizationRetryAfter = float64(now.Unix() + int64(maxInt(p.backup, 300)))
+				item.OptimizationBudgetAfter = float64(now.Unix() + 300)
 			} else {
-				item.OptimizationBackoff[candidate] = float64(now.Unix() + int64(maxInt(p.cooldown, 300)))
-				item.OptimizationRetryAfter = float64(now.Unix() + int64(maxInt(p.active, 60)))
+				failOptimizationCandidate(now, item.OptimizationCandidate, item, p)
 			}
-			clearOptimizationCandidate(item)
 			return selected, ""
 		}
 		if comparison.Result != optimizationWin {
-			clearOptimizationCandidate(item)
-			item.OptimizationRetryAfter = float64(now.Unix() + int64(p.cooldown))
+			failOptimizationCandidate(now, item.OptimizationCandidate, item, p)
 			return selected, ""
 		}
 		item.OptimizationIncomplete = 0
@@ -496,20 +565,30 @@ func gatePlannedOptimization(now time.Time, selected, desired, reason string, co
 			item.OptimizationNextAt = float64(now.Unix() + int64(p.active))
 			return selected, ""
 		}
-		candidate := item.OptimizationCandidate
+		candidate, winnerReason := item.OptimizationCandidate, "meaningfully-faster"
+		if item.OptimizationSpeedDegraded {
+			winnerReason = "speed-degraded"
+		}
 		clearOptimizationCandidate(item)
 		item.OptimizationRetryAfter = 0
-		return candidate, "meaningfully-faster"
+		return candidate, winnerReason
 	}
 
-	if desired == selected || reason != "meaningfully-faster" || float64(now.Unix()) < item.OptimizationRetryAfter {
+	if desired == selected || !isPlannedOptimization(reason) || float64(now.Unix()) < item.OptimizationRetryAfter {
+		return selected, ""
+	}
+	if reason == "speed-degraded" && !speedDegradationReady(now, selected, item, p) {
 		return selected, ""
 	}
 	item.OptimizationBaseline = selected
 	item.OptimizationCandidate = desired
+	item.OptimizationSpeedDegraded = reason == "speed-degraded"
 	item.OptimizationChecks = 0
 	item.OptimizationIncomplete = 0
 	item.OptimizationNextAt = float64(now.Unix() + int64(p.active))
+	if item.OptimizationNextAt < item.OptimizationBudgetAfter {
+		item.OptimizationNextAt = item.OptimizationBudgetAfter
+	}
 	item.OptimizationRetryAfter = 0
 	return selected, ""
 }
@@ -577,6 +656,7 @@ func compareOptimization(now time.Time, selected, candidate string, measured map
 }
 
 func clearOptimizationCandidate(item *policyHealthState) {
+	item.OptimizationSpeedDegraded = false
 	item.OptimizationBaseline = ""
 	item.OptimizationCandidate = ""
 	item.OptimizationChecks = 0

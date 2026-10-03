@@ -561,7 +561,7 @@ func TestValidateCurrentConfigRejectsPolicyValuesTheSelectorWouldOtherwiseClamp(
 		"domain_strategy": "Magic", "on_all_unavailable": "direct", "selection_order": []any{"country:DE", "country:DE"},
 		"quality_window": 2, "max_packet_loss_percent": 101, "max_latency_ms": 30001,
 		"failure_threshold": 0, "recovery_threshold": 21, "switch_cooldown_seconds": -1,
-		"switch_improvement_ms": 30001, "speed_improvement_percent": 101,
+		"switch_improvement_ms": 30001, "speed_improvement_percent": 101, "speed_degradation_percent": 100,
 		"speed_check_interval_seconds": 299, "speed_probe_bytes": 1024, "speed_candidate_count": 6,
 		"active_check_interval_seconds": 300, "backup_check_interval_seconds": 60, "full_scan_interval_seconds": 30,
 		"max_active_candidates": 11, "max_probe_candidates": 0, "probe_batch_size": 11,
@@ -574,7 +574,7 @@ func TestValidateCurrentConfigRejectsPolicyValuesTheSelectorWouldOtherwiseClamp(
 		"policies[0].on_all_unavailable", "policies[0].selection_order", "policies[0].quality_window",
 		"policies[0].max_packet_loss_percent", "policies[0].max_latency_ms", "policies[0].failure_threshold",
 		"policies[0].recovery_threshold", "policies[0].switch_cooldown_seconds", "policies[0].switch_improvement_ms",
-		"policies[0].speed_improvement_percent", "policies[0].speed_check_interval_seconds", "policies[0].speed_probe_bytes",
+		"policies[0].speed_improvement_percent", "policies[0].speed_degradation_percent", "policies[0].speed_check_interval_seconds", "policies[0].speed_probe_bytes",
 		"policies[0].speed_candidate_count", "policies[0].backup_check_interval_seconds", "policies[0].full_scan_interval_seconds",
 		"policies[0].max_active_candidates", "policies[0].max_probe_candidates", "policies[0].probe_batch_size",
 		"policies[0].candidate_service_access.country:DE",
@@ -598,6 +598,23 @@ func TestValidateCurrentConfigRequiresSafeUserNodeGroups(t *testing.T) {
 	for _, path := range []string{"policies[0].node_groups[0]", "policies[0].node_groups[1].id"} {
 		if !hasValidationPath(result.Errors, path) {
 			t.Fatalf("missing validation for %s: %#v", path, result.Errors)
+		}
+	}
+}
+
+func TestValidateSpeedDegradationPercentPreservesArbitraryThresholds(t *testing.T) {
+	for _, mode := range []string{"best", "priority"} {
+		for _, value := range []any{nil, 0, 1, 25, 30, 50, 99, -1, 100, 25.5, "30"} {
+			config := currentConfigFixture(t)
+			policy := map[string]any{"id": "route", "mode": mode, "enabled": true}
+			if value != nil {
+				policy["speed_degradation_percent"] = value
+			}
+			config["policies"] = []any{policy}
+			bad := value == -1 || value == 100 || value == 25.5 || value == "30"
+			if got := hasValidationPath(validateCurrentConfig(config).Errors, "policies[0].speed_degradation_percent"); got != bad {
+				t.Fatalf("mode=%s value=%v error=%v", mode, value, got)
+			}
 		}
 	}
 }
