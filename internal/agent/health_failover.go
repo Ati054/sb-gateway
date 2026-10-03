@@ -155,6 +155,9 @@ func (controller *healthController) probeEmergencyCandidates(policyID string, ca
 	} else {
 		for _, candidate := range candidates {
 			evidence := controller.runtime.ProbeAvailability(candidate)
+			if evidence.LocalFailure {
+				return measured, selected, errProbeSelectorUnavailable
+			}
 			measured[candidate] = evidence
 			if accept(candidate, evidence) {
 				break

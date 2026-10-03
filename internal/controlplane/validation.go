@@ -685,6 +685,7 @@ func (result *configValidation) validatePolicySettings(entities map[string][]map
 			{"switch_cooldown_seconds", 0, 86400},
 			{"switch_improvement_ms", 0, 30000},
 			{"speed_improvement_percent", 0, 100},
+			{"speed_degradation_percent", 0, 99},
 			{"speed_check_interval_seconds", 300, 86400},
 			{"speed_probe_bytes", 256 * 1024, 10 * 1024 * 1024},
 			{"speed_candidate_count", 1, 5},

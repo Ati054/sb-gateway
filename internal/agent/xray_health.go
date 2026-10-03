@@ -822,6 +822,7 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 	delays := []int{}
 	if err := runtime.Select(runtime.probeSelectorName(), candidate); err != nil {
 		evidence.Failure = classifyProbeError(err)
+		evidence.LocalFailure = true
 		return evidence
 	}
 	if availabilityOnly {
@@ -1035,7 +1036,7 @@ func (runtime *xraySelectorRuntime) Throughput(candidate string, byteLimit int) 
 		return 0, errors.New("reverse bridge is offline")
 	}
 	if err := runtime.Select(runtime.probeSelectorName(), candidate); err != nil {
-		return 0, err
+		return 0, errProbeSelectorUnavailable
 	}
 	byteLimit = maxInt(256*1024, minInt(byteLimit, 10*1024*1024))
 	return measureThroughputOverProxy(runtime.requestContext(), runtime.opts.ProbeURL,

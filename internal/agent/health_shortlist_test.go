@@ -114,10 +114,104 @@ func TestSpeedExplorationRotatesBeyondShortlistAndPersistsBudget(t *testing.T) {
 	for _, candidate := range first {
 		item.LastSpeedProbeAt[candidate] = 1000
 	}
-	if got := speedProbeCandidates(time.Unix(1299, 0), "a", nodes, nil, item, p); len(got) != 0 {
+	if got := speedProbeCandidates(time.Unix(1059, 0), "a", nodes, nil, item, p); len(got) != 0 {
 		t.Fatalf("policy-wide download budget ignored: %v", got)
 	}
-	if got := speedProbeCandidates(time.Unix(1300, 0), "a", nodes, nil, item, p); strings.Join(got, ",") != "d,e,f" {
+	if got := speedProbeCandidates(time.Unix(1060, 0), "a", nodes, nil, item, p); strings.Join(got, ",") != "d,e,f" {
 		t.Fatalf("later candidates not explored: %v", got)
+	}
+}
+
+func TestRoutineSpeedCadenceUsesQualityIntervalsWithoutChangingProbation(t *testing.T) {
+	item := newPolicyHealthState()
+	ensureHealthMaps(item)
+	item.Shortlist = []string{"a", "b"}
+	item.AvailabilityOK = map[string]bool{"a": true, "b": true, "c": true}
+	item.LastSpeedProbeAt = map[string]float64{"a": 1000, "b": 1160, "c": 1000}
+	p := policySettings(healthPolicy{}, "best")
+	if got := speedProbeCandidates(time.Unix(1180, 0), "a", []string{"a", "b", "c"}, nil, item, p); strings.Join(got, ",") != "a" {
+		t.Fatalf("reserve must not postpone due active; legacy 3h must not gate active: %v", got)
+	}
+	if speedRoutineInterval("b", "a", item, p) != 900 || speedRoutineInterval("c", "a", item, p) != 10800 {
+		t.Fatal("working reserves and full-inventory exploration must have separate schedules")
+	}
+	p.active, p.backup = 1, 1
+	if speedRoutineInterval("a", "a", item, p) != 180 || speedRoutineInterval("b", "a", item, p) != 300 {
+		t.Fatal("small quality intervals bypass resource floors")
+	}
+	p.active, p.backup = 3600, 86400
+	item.SpeedProbation["c"] = speedProbation{}
+	if speedRoutineInterval("a", "a", item, p) != 900 || speedRoutineInterval("c", "a", item, p) != 900 {
+		t.Fatal("large intervals prevent independent baseline or probation recovery")
+	}
+	if speedRecoverySpacing != 300 || speedActiveInterval != 900 || speedEpisodeLifetime != 1800 {
+		t.Fatal("routine cadence changed independent anti-flap lifetimes")
+	}
+}
+
+func TestRoutineSpeedColdStartBaselineNeedsIndependentSamples(t *testing.T) {
+	var samples []speedSample
+	for elapsed := 0; elapsed <= 900; elapsed += 180 {
+		baseline := recentSpeedBaseline(samples)
+		if elapsed < 900 && baseline != 0 || elapsed == 900 && baseline != 18_000_000 {
+			t.Fatalf("elapsed=%d baseline=%d; bursts must not manufacture independent history", elapsed, baseline)
+		}
+		samples = append(samples, speedSample{At: float64(1000 + elapsed), BPS: 18_000_000})
+	}
+}
+
+func TestRoutineSpeedCapsWakeLongIntervalController(t *testing.T) {
+	controller := &healthController{opts: Options{HealthInterval: time.Hour}}
+	contract := healthPolicyContract{Mode: "best", Policy: healthPolicy{ActiveCheckSeconds: 3600, BackupCheckSeconds: 86400}}
+	if got := controller.regularInterval(contract); got != 15*time.Minute {
+		t.Fatalf("long controller sleep bypasses speed recovery cap: %v", got)
+	}
+	contract.Mode = "priority"
+	if got := controller.regularInterval(contract); got != time.Hour {
+		t.Fatalf("priority speed-disabled scheduling accelerated: %v", got)
+	}
+}
+
+func TestRoutineSpeedCadenceThroughControllerTick(t *testing.T) {
+	pool := healthFixture(true)
+	contract := pool.HealthPolicies["europe"]
+	contract.Mode, contract.Candidates = "best", []string{"active", "b", "c"}
+	contract.Policy.ActiveCheckSeconds, contract.Policy.BackupCheckSeconds = 60, 300
+	contract.Policy.SpeedCheckIntervalSeconds = 10800
+	pool.HealthPolicies["europe"] = contract
+	item := newPolicyHealthState()
+	ensureHealthMaps(item)
+	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "active", "active", true
+	item.Mode, item.CandidateSignature = "best", strings.Join(contract.Candidates, "\n")
+	item.AvailabilityOK, item.QualityOK = map[string]bool{}, map[string]bool{}
+	item.Shortlist = contract.Candidates
+	for _, node := range contract.Candidates {
+		item.AvailabilityOK[node], item.QualityOK[node], item.Recoveries[node] = true, true, 3
+		item.LastSpeedProbeAt[node], item.LastSpeedSuccessAt[node] = 1000, 1000
+	}
+	runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "active"}, probes: map[string]probeEvidence{}, speeds: map[string]int64{}}
+	for _, node := range contract.Candidates {
+		runtime.probes[node], runtime.speeds[node] = successfulEvidence(100), 18_000_000
+	}
+	controller := &healthController{opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime, state: healthState{"europe": item}, stateLoaded: true, warmStarted: map[string]bool{"europe": true}}
+	activeTimes, backupTimes := []int64{}, []int64{}
+	for at := int64(1060); at <= 1900; at += 60 {
+		before := len(runtime.throughputCalls)
+		if err := controller.Tick(time.Unix(at, 0)); err != nil {
+			t.Fatal(err)
+		}
+		for _, node := range runtime.throughputCalls[before:] {
+			if node == "active" {
+				activeTimes = append(activeTimes, at)
+			} else {
+				backupTimes = append(backupTimes, at)
+			}
+		}
+	}
+	if !reflect.DeepEqual(activeTimes, []int64{1180, 1360, 1540, 1720, 1900}) || !reflect.DeepEqual(backupTimes, []int64{1900, 1900}) {
+		t.Fatalf("actual Tick cadence active=%v reserves=%v", activeTimes, backupTimes)
+	}
+	if len(runtime.selections) != 0 || item.QualityThresholds.ActiveSpeedSeconds != 180 || item.QualityThresholds.BackupSpeedSeconds != 900 {
+		t.Fatalf("stable cadence changed selection or telemetry: selections=%v thresholds=%+v", runtime.selections, item.QualityThresholds)
 	}
 }

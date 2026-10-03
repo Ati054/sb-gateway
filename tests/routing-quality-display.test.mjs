@@ -144,7 +144,12 @@ test("priority editor retains the whole ordered queue and decouples probe batch 
   assert.match(page, /const activePriorityItems = selectionOrder;/);
   assert.doesNotMatch(page, /selectionOrder.slice\(0, candidateLimit\)|coldPriorityItems/);
   assert.doesNotMatch(page, /probe_batch_size: mode === "best" \? 2 : 3/);
-  assert.match(page, /Авто · URLTest: 2, приоритет: 3/);
+  assert.match(page, /Авто · общий бюджет: 5/);
+});
+
+test("new URLTest pool defaults to five without overwriting explicit or legacy limits", () => {
+  assert.match(page, /Number\(existingPolicy\.max_active_candidates \?\? existingPolicy\.max_probe_candidates\)/);
+  assert.match(page, /const \[candidateLimit, setCandidateLimit\][\s\S]*?return 5;/);
 });
 
 test("route monitoring is one global form with concise scheduling controls", () => {
@@ -154,12 +159,64 @@ test("route monitoring is one global form with concise scheduling controls", () 
   assert.match(page, /Максимум проверок за цикл/);
   assert.match(page, /<option value=\{10\}>10<\/option>/);
   assert.match(page, /\["probe_batch_size", 0, 10\]/);
-  assert.match(page, /При аварии — одновременно; активный пул не меняется\./);
+  assert.match(page, /Общий бюджет всех листов\./);
   assert.match(page, /routing_monitor: routingMonitor/);
   assert.match(page, /const monitorRanges/);
   assert.doesNotMatch(page, /Сохранить мониторинг/);
   assert.doesNotMatch(page, /active_check_interval_seconds: 60/);
   assert.doesNotMatch(page, /backup_check_interval_seconds: 300/);
+});
+
+test("speed degradation threshold is shared by both modes, accepts zero and preserves hidden probe settings", async () => {
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let field;
+  function visit(node) {
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(parsed) === "label"
+      && node.getText(parsed).includes('name="speed_degradation_percent"')) field = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  assert.ok(field);
+  const compiled = ts.transpileModule(`function renderField(mode) { return (${field.getText(parsed)}); }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText;
+  for (const [mode, threshold, expected] of [["best", null, 50], ["priority", null, 0], ["priority", 30, 30], ["best", 0, 0], ["best", 99, 99]]) {
+    const render = new Function("React", "tr", "speedDegradationPercent", "setSpeedDegradationPercent", `${compiled}; return renderField;`)(React, value => value, threshold, () => {});
+    const html = renderToStaticMarkup(render(mode));
+    assert.match(html, /min="0" max="99" step="1"/);
+    assert.match(html, new RegExp(`value="${expected}"`));
+  }
+  assert.match(page, /speed_degradation_percent: Number\(data\.get\("speed_degradation_percent"\) \?\? existingPolicy\.speed_degradation_percent/);
+  assert.match(page, /speed_check_interval_seconds: Number\(existingPolicy\.speed_check_interval_seconds \?\? 10800\)/);
+  assert.match(page, /speed_probe_bytes: Number\(existingPolicy\.speed_probe_bytes \?\? 2097152\)/);
+});
+
+test("URLTest speed gain is next to degradation and absent in priority", async () => {
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let field, drop;
+  function visit(node) {
+    if (ts.isConditionalExpression(node) && node.condition.getText(parsed) === 'mode === "best"'
+      && node.whenTrue.getText(parsed).includes('name="speed_improvement_percent"')) field = node;
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(parsed) === "label"
+      && node.getText(parsed).includes('name="speed_degradation_percent"')) drop = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  assert.ok(field && drop);
+  const siblings = drop.parent.children.filter(node => ts.isJsxElement(node) || ts.isJsxExpression(node));
+  assert.equal(siblings[siblings.indexOf(drop) + 1], field.parent);
+  const compiled = ts.transpileModule(`function renderField(mode) { return (${field.getText(parsed)}); }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText;
+  const render = new Function("React", "tr", "asText", "existingPolicy", `${compiled}; return renderField;`)(
+    React, value => value, (value, fallback) => value ?? fallback, {},
+  );
+  assert.equal(renderToStaticMarkup(render("priority")), "");
+  assert.match(renderToStaticMarkup(render("best")), /name="speed_improvement_percent"/);
 });
 
 test("actual pool field JSX is absent in priority and present in URLTest", async () => {

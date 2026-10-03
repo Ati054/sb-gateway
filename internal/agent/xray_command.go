@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-// Keep live route changes and telemetry serial, while isolated emergency
-// probe selectors get a bounded independent pool. The former must never wait
-// behind ten background handler preparations during failover.
+// API subprocess preparation is CPU-heavy on small ARM64 systems. Limit it
+// separately from the HTTPS worker count; release the slot before network I/O.
+// The independent live slot must never queue behind background preparations.
 var xrayCommandSlot = make(chan struct{}, 1)
-var xrayProbeCommandSlots = make(chan struct{}, 10)
+var xrayProbeCommandSlots = make(chan struct{}, 2)
 
 type backgroundXrayCommandKey struct{}
 

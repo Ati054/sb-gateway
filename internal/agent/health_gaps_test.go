@@ -501,6 +501,25 @@ func TestResponsiveRuntimeRejectsPreReleaseV2Contract(t *testing.T) {
 	}
 }
 
+func TestResponsiveRuntimeReloadFailureDoesNotBecomeNodeEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-pool.json")
+	lanes := []*xraySelectorRuntime{
+		newXraySelectorRuntime(Options{HealthPoolFile: path}),
+		newXraySelectorRuntime(Options{HealthPoolFile: path}),
+	}
+	runtime := &responsiveSelectorRuntime{
+		selectorRuntime: &fakeSelectorRuntime{}, backgrounds: lanes,
+		ctx: context.Background(), enabled: true, parallelEnabled: true,
+	}
+	runtime.generation = generationStamp(runtime.generationPaths)
+	if measured := runtime.ProbeQualityParallel([]string{"a", "b", "c"}); len(measured) != 0 {
+		t.Fatalf("local reload failure produced node evidence: %#v", measured)
+	}
+	if !errors.Is(runtime.takeProbeInterruption(), errProbeSelectorUnavailable) {
+		t.Fatal("local reload failure did not interrupt the batch")
+	}
+}
+
 func TestResponsiveRuntimeKeepsV3SingleBackgroundLane(t *testing.T) {
 	pool := healthFixture(false)
 	pool.Version = 3
@@ -582,6 +601,15 @@ func TestEmergencyAvailabilityReturnsAfterFirstUsableParallelResult(t *testing.T
 }
 
 func TestConfiguredTenEmergencyLanesProbeConcurrently(t *testing.T) {
+	testConfiguredTenProbeLanes(t, false)
+}
+
+func TestConfiguredTenQualityLanesProbeConcurrently(t *testing.T) {
+	testConfiguredTenProbeLanes(t, true)
+}
+
+func testConfiguredTenProbeLanes(t *testing.T, quality bool) {
+	t.Helper()
 	oldTargets := healthTargets
 	defer func() { healthTargets = oldTargets }()
 	healthTargets = append(healthTargets[:0:0], oldTargets[0])
@@ -639,7 +667,12 @@ func TestConfiguredTenEmergencyLanesProbeConcurrently(t *testing.T) {
 		parallelEnabled: true, generationPaths: []string{path}, check: func() error { return nil },
 	}
 	runtime.generation = generationStamp(runtime.generationPaths)
-	measured := runtime.ProbeAvailabilityParallel(candidates, nil)
+	var measured map[string]probeEvidence
+	if quality {
+		measured = runtime.ProbeQualityParallel(candidates)
+	} else {
+		measured = runtime.ProbeAvailabilityParallel(candidates, nil)
+	}
 	if peak.Load() != 10 || len(measured) != 10 {
 		t.Fatalf("configured ten-probe batch was serialized: peak=%d results=%d", peak.Load(), len(measured))
 	}
