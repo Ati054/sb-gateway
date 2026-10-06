@@ -74,7 +74,7 @@ func (controller *healthController) transitionRemovedActive(now time.Time, polic
 	selected := ""
 	accept := func(candidate string, evidence probeEvidence) bool {
 		item.LastProbeAt[candidate] = float64(now.Unix())
-		usable := evidence.OK && (p.maxLatency <= 0 || (evidence.DelayMS != nil && *evidence.DelayMS <= p.maxLatency))
+		usable := evidence.OK
 		// A reserve which just failed must not be resurrected by the ordinary
 		// priority-reorder branch later in this same Tick.
 		if !usable {

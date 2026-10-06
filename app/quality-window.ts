@@ -66,27 +66,6 @@ export function qualityStatsSince(
   );
 }
 
-export function latestSpeedSince(
-  rawSamples: unknown,
-  rawLastProbeAt: unknown,
-  candidate: string,
-  since: number,
-): number | null {
-  const lastProbeAt = rawLastProbeAt && typeof rawLastProbeAt === "object"
-    ? Number((rawLastProbeAt as Record<string, unknown>)[candidate])
-    : 0;
-  if (!Number.isFinite(lastProbeAt) || lastProbeAt < since) return null;
-  const values = rawSamples && typeof rawSamples === "object"
-    ? (rawSamples as Record<string, unknown>)[candidate]
-    : undefined;
-  if (!Array.isArray(values)) return null;
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    const value = Number(values[index]);
-    if (Number.isFinite(value) && value > 0) return value;
-  }
-  return null;
-}
-
 export function activeQualityMetrics(rawHealth: unknown, candidate: string, since = 0) {
   const health = rawHealth && typeof rawHealth === "object"
     ? rawHealth as Record<string, unknown> : {};
@@ -97,9 +76,26 @@ export function activeQualityMetrics(rawHealth: unknown, candidate: string, sinc
   };
   const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
   const medianAt = positive(valueAt("last_good_at"));
-  const speedAt = positive(valueAt("last_speed_success_at"));
   const median = medianAt !== null && medianAt >= since ? positive(valueAt("median_delay_ms")) : null;
-  const speedBps = speedAt !== null && speedAt >= since
-    ? latestSpeedSince(health.speed_samples_bps, health.last_speed_success_at, candidate, since) : null;
-  return { median, speedBps, medianAt: median === null ? null : medianAt, speedAt: speedBps === null ? null : speedAt };
+  return { median, medianAt: median === null ? null : medianAt };
+}
+
+export function freshLatencyComparison(rawHealth: unknown, candidate: string, now: number, since = 0) {
+  const health = rawHealth && typeof rawHealth === "object"
+    ? rawHealth as Record<string, unknown> : {};
+  const comparisons = health.latency_comparisons;
+  const raw = comparisons && typeof comparisons === "object"
+    ? (comparisons as Record<string, unknown>)[candidate] : null;
+  if (health.runtime_confirmed !== true || health.runtime_error || candidate === health.runtime_selected
+    || !raw || typeof raw !== "object") return null;
+  const pair = raw as Record<string, unknown>;
+  const numbers = [pair.active_delay_ms, pair.candidate_delay_ms, pair.active_at, pair.candidate_at, pair.expires_at];
+  if (!numbers.every(value => typeof value === "number" && Number.isFinite(value) && value > 0)
+    || !Number.isFinite(now) || pair.active !== health.runtime_selected || pair.active === "block") return null;
+  const [active, reserve, activeAt, candidateAt, expires] = numbers as number[];
+  if (activeAt < since || candidateAt < since || activeAt > now || candidateAt > now
+    || expires <= now || expires <= Math.max(activeAt, candidateAt)) return null;
+  const percent = roundOne((reserve - active) * 100 / active);
+  if (!Number.isFinite(percent)) return null;
+  return { percent: Object.is(percent, -0) ? 0 : percent, activeAt, candidateAt };
 }

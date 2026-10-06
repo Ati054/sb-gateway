@@ -6,15 +6,24 @@ import { normalizeLocalizedSource } from "./source-localization.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
 
-test("URLTest switching help separates speed and latency thresholds", async () => {
+test("URLTest switching help exposes latency without download settings", async () => {
   const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
-  assert.match(page, /name="speed_improvement_percent"/);
-  assert.match(page, /Порог приоритета скорости, %/);
-  assert.match(page, /Только для выбора по отклику/);
-  assert.match(page, /Минимальный выигрыш относительно активного узла при парной проверке скорости/);
-  assert.match(page, /Порог HTTPS-медианы, мс/);
+  assert.doesNotMatch(page, /name="speed_/);
+  assert.match(page, /Минимальное преимущество свежего HTTPS-отклика над активным узлом/);
+  assert.match(page, /name="switch_improvement_ms"/);
+  assert.doesNotMatch(page, /name="max_latency_ms"/);
+  assert.doesNotMatch(page, /name="switch_cooldown_seconds"/);
+  assert.doesNotMatch(page, /Дополнительные параметры переключения/);
   assert.doesNotMatch(page, /Максимальный p95 HTTPS, мс/);
   assert.doesNotMatch(page, /Плановая смена канала не выполняется, если прирост ниже этого порога/);
+});
+
+test("URLTest tolerance uses a compact responsive number input", async () => {
+  const page = await readFile(new URL("app/page.tsx", projectRoot), "utf8");
+  const css = await readFile(new URL("app/globals.css", projectRoot), "utf8");
+  assert.match(page, /className="field form-span policy-latency-tolerance"/);
+  assert.match(css, /\.policy-editor-modal \.policy-latency-tolerance \{[^}]*max-width: 360px;/);
+  assert.match(css, /\.policy-editor-modal \.field\.policy-latency-tolerance input\[type="number"\] \{[^}]*width: 220px;[^}]*max-width: 100%;/);
 });
 
 test("node quality offers a reversible local 24-hour display baseline", async () => {
@@ -644,15 +653,15 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /policy-priority-replace/);
   assert.match(page, /selection_order:.*selectionOrder/);
   assert.match(page, /active_quality_interval_seconds: 60/);
-  assert.match(page, /reserve_check_interval_seconds: 300/);
-  assert.match(page, /full_scan_interval_seconds: 1800/);
+  assert.doesNotMatch(page, /reserve_check_interval_seconds: 300/);
+  assert.doesNotMatch(page, /full_scan_interval_seconds: 1800/);
   assert.match(page, /active_liveness_interval_seconds: 3/);
-  assert.match(page, /block_recovery_interval_seconds: 15/);
-  assert.match(page, /max_active_candidates:.*candidateLimit/);
-  assert.match(page, /max_probe_candidates:.*candidateLimit/);
+  assert.doesNotMatch(page, /block_recovery_interval_seconds: 15/);
+  assert.doesNotMatch(page, /max_active_candidates: undefined/);
+  assert.doesNotMatch(page, /max_probe_candidates: undefined/);
   assert.doesNotMatch(page, /name="switch_improvement_percent"/);
-  assert.match(page, /name="speed_improvement_percent"/);
-  assert.match(page, /speed_improvement_percent:.*25/);
+  assert.doesNotMatch(page, /name="speed_/);
+  assert.match(page, /withoutRetiredURLTestSettings\(existingPolicy\)/);
   assert.match(page, /candidate_service_access/);
   assert.doesNotMatch(page, /name="exception_domains"/);
   assert.doesNotMatch(page, /direct_domains:\s*\[\]/);
@@ -800,14 +809,17 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /name: "Gate\.io"/);
   assert.match(page, /name: "OKX"/);
   assert.match(page, /Сайт, приложение, REST\/WebSocket API/);
-  assert.match(page, /<th>Доступность \/ потери<\/th>/);
+  assert.match(page, /<th>Доступность \/ ошибки HTTPS<\/th>/);
   assert.match(page, /<th>Медиана<\/th>/);
-  assert.match(page, /<th>Скорость<\/th>/);
-  assert.match(page, /<th>p95 HTTPS<\/th>/);
-  assert.doesNotMatch(page, /<th>К активному<\/th>/);
+  assert.doesNotMatch(page, /<th>Скорость<\/th>/);
+  assert.doesNotMatch(page, /<th>p95 HTTPS<\/th>/);
+  assert.doesNotMatch(page, /policy\.p95|<td>\{node\.p95/);
+  assert.match(page, /<code title="Медиана">\{policy\.median\}<\/code>/);
+  assert.match(page, /Delta, %/);
   assert.match(page, /className="quality-measurement"/);
-  assert.match(page, /<time dateTime=/);
-  assert.match(page, /node\.loss\.toFixed\(1\)\}% потерь/);
+  assert.doesNotMatch(page, /node\.medianAt/);
+  assert.match(page, /median: typeof stats\.median_ms === "number" \? stats\.median_ms : null/);
+  assert.match(page, /node\.loss\.toFixed\(1\)\}% ошибок HTTPS/);
   assert.match(page, /Качество узлов/);
   assert.doesNotMatch(page, /Подробные замеры хранятся 24 часа/);
   assert.match(page, /setHistoryPeriod/);

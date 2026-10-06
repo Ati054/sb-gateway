@@ -1,6 +1,6 @@
 # SB Gateway for MikroTik RouterOS 7
 
-SB Gateway 1.6.35 is a bilingual Web-managed traffic-policy gateway packaged as
+SB Gateway is a bilingual Web-managed traffic-policy gateway packaged as
 one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.30
 only; sing-box is not shipped and there is no core switch in the UI.
 
@@ -54,7 +54,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.35-routeros-bundle.zip` from the GitHub release and
+Download `sb-gateway-1.6.44-routeros-bundle.zip` from the GitHub release and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 
@@ -134,6 +134,11 @@ contract.
   normalized candidate groups, preserves the selected route across restarts,
   and changes an Xray selector only after the configured confirmations.
   Counter polling never changes routing state.
+- URLTest selects by HTTP probe latency; priority mode follows the configured
+  node order. Neither mode performs bandwidth downloads or uses payload-byte
+  accounting for selection. Cumulative node penalties are removed; availability
+  failover remains independent of planned latency optimization. See
+  [Operations](docs/OPERATIONS.md) for the current selection contract.
 - Trusted catalog cards retain recursive upstream dependencies and narrow
   reviewed release fallbacks. Binance ships as a built-in card and keeps its
   website, official API domains, and AWS WAF token host on the card's selected
@@ -262,6 +267,8 @@ lab topology, credentials, hardware harnesses, and internal evidence are not
 part of that suite. Passing CI therefore verifies the published functional
 regressions as well as compilation, but does not replace validation on the
 target MikroTik and the administrator's external nodes.
+
+
 
 ## Documentation
 

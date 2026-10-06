@@ -50,17 +50,33 @@ func startFreshDoH(t *testing.T, handler func(*dns.Msg) *dns.Msg) *FreshResolver
 	if err != nil {
 		t.Fatal(err)
 	}
-	forwarder, err := StartFreshResolver(context.Background(), FreshResolverConfig{
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	forwarder, err := startTrustedFreshResolver(context.Background(), FreshResolverConfig{
 		Type: "https", Server: host, ServerName: "example.com", ServerPort: port, Path: "/dns-query", DoTFallback: true,
-	}, FreshResolverOptions{Workers: 2, TCPSessions: 1, Timeout: time.Second})
+	}, FreshResolverOptions{Workers: 2, TCPSessions: 1, Timeout: time.Second}, roots)
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := x509.NewCertPool()
-	roots.AddCert(server.Certificate())
-	forwarder.upstream.(*dohUpstream).transport.TLSClientConfig.RootCAs = roots
 	t.Cleanup(func() { _ = forwarder.Close() })
 	return forwarder
+}
+
+func startTrustedFreshResolver(ctx context.Context, config FreshResolverConfig, options FreshResolverOptions, roots *x509.CertPool) (*FreshResolver, error) {
+	// Configure test trust before starting any DNS or transport goroutines.
+	return startFreshResolver(ctx, config, options, func(config serverConfig, timeout time.Duration) (upstream, error) {
+		resolver, err := newUpstream(config, timeout)
+		if err != nil {
+			return nil, err
+		}
+		switch typed := resolver.(type) {
+		case *dohUpstream:
+			typed.transport.TLSClientConfig.RootCAs = roots
+		case *tcpUpstream:
+			typed.tlsConfig.RootCAs = roots
+		}
+		return resolver, nil
+	})
 }
 
 func freshQuery(t *testing.T, resolver *FreshResolver, network, name string, ednsSize uint16) *dns.Msg {
@@ -236,13 +252,12 @@ func TestFreshResolverDoTVerifiesCertificate(t *testing.T) {
 	}
 	_ = untrusted.Close()
 
-	forwarder, err := StartFreshResolver(context.Background(), config, options)
+	roots := x509.NewCertPool()
+	roots.AddCert(certificateAuthority)
+	forwarder, err := startTrustedFreshResolver(context.Background(), config, options, roots)
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := x509.NewCertPool()
-	roots.AddCert(certificateAuthority)
-	forwarder.upstream.(*tcpUpstream).tlsConfig.RootCAs = roots
 	t.Cleanup(func() { _ = forwarder.Close() })
 	if response := freshQuery(t, forwarder, "udp", "dot.example.test", 0); response.Rcode != dns.RcodeSuccess || txtValue(response) != "dot-ok" || answered.Load() != 1 {
 		t.Fatalf("DoT forwarding failed: response=%#v calls=%d", response, answered.Load())

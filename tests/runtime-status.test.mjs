@@ -20,6 +20,25 @@ test("late history cannot put a failed reserve back into the working pool", () =
   assert.deepEqual(mergeRuntimeStatus(current, stale).selector_health.route.shortlist, ["active", "new"]);
 });
 
+test("a delayed history response cannot revive withdrawn latency comparisons", () => {
+  const pair = { reserve: { active: "active", active_delay_ms: 600, candidate_delay_ms: 350 } };
+  const current = { selector_health: { route: {
+    runtime_selected: "active", runtime_confirmed: true,
+    runtime_observed_at: "2026-10-06T10:00:05Z", latency_comparisons: null,
+  } } };
+  const history = { selector_health: { route: {
+    runtime_observed_at: "2026-10-06T10:00:00Z", latency_comparisons: pair,
+    period_stats: { "24h": { active: { median_ms: 503 } } },
+  } } };
+  const merged = mergeRuntimeStatus(current, history).selector_health.route;
+  assert.equal(merged.latency_comparisons, null);
+  assert.deepEqual(merged.period_stats, history.selector_health.route.period_stats);
+  const later = { selector_health: { route: {
+    runtime_observed_at: "2026-10-06T10:00:06Z", latency_comparisons: pair,
+  } } };
+  assert.deepEqual(mergeRuntimeStatus(current, later).selector_health.route.latency_comparisons, pair);
+});
+
 test("reverse status uses recent availability, not enabled or quality", () => {
   const now = Date.parse("2026-09-07T00:00:00Z");
   const candidate = "reverse-vless-home";

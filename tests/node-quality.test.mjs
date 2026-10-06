@@ -4,21 +4,21 @@ import test from "node:test";
 import { qualitySheet } from "../app/node-quality.ts";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
 
-const node = (label, extra = {}) => ({ id: label, label, selected: false, inRuntimePool: false, available: true, quality: true, availability: 100, loss: 0, speedBps: 10e6, p95: 500, median: 400, decisionMedian: 400, ...extra });
+const node = (label, extra = {}) => ({ id: label, label, selected: false, inRuntimePool: false, available: true, quality: true, availability: 100, loss: 0, p95: 500, median: 400, decisionMedian: 400, ...extra });
 const policies = [
   { key: "europe", name: "Европа", mode: "best", nodeStats: [node("Canada", { selected: true })] },
-  { key: "best", name: "URLTest", mode: "best", nodeStats: Array.from({ length: 19 }, (_, i) => node(`B${i}`, { speedBps: i * 1e6, selected: i === 0, inRuntimePool: i === 0 || i === 4 })) },
+  { key: "best", name: "URLTest", mode: "best", nodeStats: Array.from({ length: 19 }, (_, i) => node(`B${i}`, { median: 500 - i, selected: i === 0, inRuntimePool: i === 0 || i === 4 })) },
   { key: "empty", name: "Без замеров", nodeStats: [] },
 ];
 
-test("quality table keeps live reserves in the selected sheet top ten", () => {
+test("quality table pins active then sorts visible medians without promoting live reserves", () => {
   const first = qualitySheet(policies, "");
   assert.equal(first.policy.key, "europe");
   assert.equal(first.total, 1);
   const second = qualitySheet(policies, "best");
   assert.equal(second.total, 19);
   assert.equal(second.rows.length, 10);
-  assert.deepEqual(second.rows.slice(0, 4).map(n => n.label), ["B0", "B4", "B18", "B17"]);
+  assert.deepEqual(second.rows.slice(0, 4).map(n => n.label), ["B0", "B18", "B17", "B16"]);
   assert.deepEqual(second.rows.map(n => n.rank), Array.from({ length: 10 }, (_, index) => index + 1));
   assert.equal(policies[1].nodeStats[1].label, "B1", "source order is not mutated");
 });
@@ -35,19 +35,28 @@ test("selection follows stable ID through refresh/rename/reorder and falls back 
 test("stable responsive node outranks slower perfect-history background node", () => {
   const sheet = qualitySheet([{ key: "route", name: "Route", mode: "best", nodeStats: [
     node("Active", { selected: true }),
-    node("Finland", { availability: 95.8, loss: 4.2, speedBps: 14.24e6, decisionMedian: 338 }),
-    node("Perfect but slow", { availability: 100, loss: 0, speedBps: 10.1e6, decisionMedian: 900 }),
+    node("Finland", { availability: 95.8, loss: 4.2, median: 338 }),
+    node("Perfect but slow", { availability: 100, loss: 0, median: 900 }),
   ] }], "route");
   assert.deepEqual(sheet.rows.map(item => item.label), ["Active", "Finland", "Perfect but slow"]);
 });
 
-test("recently failing reserve ranks below stable reserves even with perfect planned samples", () => {
+test("hidden recent decision samples and status cannot invert visible median order", () => {
   const sheet = qualitySheet([{ key: "route", name: "Route", mode: "best", nodeStats: [
     node("Active", { selected: true }),
-    node("Flapping", { inRuntimePool: true, unstable: true, speedBps: 20e6 }),
-    node("Stable", { inRuntimePool: true, speedBps: 10e6 }),
+    node("Slow reserve", { inRuntimePool: true, median: 800, decisionMedian: 200 }),
+    node("Fast history", { available: false, unstable: true, quality: false, median: 310, decisionMedian: 900 }),
   ] }], "route");
-  assert.deepEqual(sheet.rows.map(item => item.label), ["Active", "Stable", "Flapping"]);
+  assert.deepEqual(sheet.rows.map(item => item.label), ["Active", "Fast history", "Slow reserve"]);
+});
+
+test("missing and nonfinite medians follow measured rows with deterministic ties", () => {
+  const sheet = qualitySheet([{ key: "route", name: "Route", mode: "best", nodeStats: [
+    node("Unknown", { median: null }), node("Invalid", { median: NaN }),
+    node("Zulu", { median: 300 }), node("Alpha", { median: 300 }),
+    node("Slow", { median: 900 }),
+  ] }], "route");
+  assert.deepEqual(sheet.rows.map(item => item.label), ["Alpha", "Zulu", "Slow", "Invalid", "Unknown"]);
 });
 
 test("priority table follows configured order without promoting the active or statistically better node", () => {

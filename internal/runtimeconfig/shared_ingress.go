@@ -134,8 +134,8 @@ func SharedOriginPorts(config map[string]any) map[int]bool {
 
 func ValidateSharedIngress(config map[string]any) error {
 	policies := OriginPolicies(config)
-	lanes := xrayHealthProbeLanesForConfig(config)
-	lastHealthPort := lanes[len(lanes)-1].Port
+	// Reserve the configured range even when today's inventory needs fewer lanes.
+	lastHealthPort := 19082 + requestedHealthProbeBatch(config)
 	reserved := func(port int) bool {
 		return port == 8080 || port == 9080 || port == 9443 || port == 18081 || port == RealityCoverPort || (port >= 11001 && port <= 11004) || (port >= 19080 && port <= lastHealthPort)
 	}

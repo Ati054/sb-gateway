@@ -15,18 +15,20 @@ var errHealthYield = errors.New("background probe yielded to active path or runt
 
 // The controller remains the sole owner of health state and routing choices.
 // Quality and emergency availability use independent loopback selector lanes.
-// Throughput downloads remain sequential. Background workers
-// publish evidence through the controller callback and never own controller state.
+// Background workers publish evidence through the controller callback and never
+// own controller state.
 type responsiveSelectorRuntime struct {
 	selectorRuntime
 	background      *xraySelectorRuntime
 	backgrounds     []*xraySelectorRuntime
+	laneFactory     func(int) *xraySelectorRuntime
 	ctx             context.Context
 	check           func() error
 	generationPaths []string
 	enabled         bool
 	parallelEnabled bool
 	interrupted     error
+	pendingReset    bool
 	generation      string
 	currentPool     healthPool
 	signals         <-chan xrayFailureSignal
@@ -36,6 +38,7 @@ type responsiveSelectorRuntime struct {
 func (runtime *responsiveSelectorRuntime) Reload() (healthPool, bool, error) {
 	stamp := generationStamp(runtime.generationPaths)
 	pool, reset, err := runtime.selectorRuntime.Reload()
+	runtime.pendingReset = runtime.pendingReset || reset
 	if err == nil && pool.Version < 3 {
 		return pool, reset, errors.New("health pool contract predates the 1.6.15 release baseline")
 	}
@@ -46,7 +49,47 @@ func (runtime *responsiveSelectorRuntime) Reload() (healthPool, bool, error) {
 	}
 	runtime.generation = stamp
 	runtime.currentPool = pool
-	return pool, reset, err
+	if err != nil {
+		return pool, false, err
+	}
+	if runtime.laneFactory != nil {
+		count := healthProbeLaneCount(pool)
+		for len(runtime.backgrounds) < count {
+			runtime.backgrounds = append(runtime.backgrounds, runtime.laneFactory(len(runtime.backgrounds)+1))
+		}
+		runtime.backgrounds = runtime.backgrounds[:count]
+	}
+	reset = runtime.pendingReset
+	runtime.pendingReset = false
+	return pool, reset, nil
+}
+
+// Allocate only the rendered inventory. Eligibility edits remain hot and do not
+// resize core listeners. A worker starts only when admitted to an actual batch.
+func healthProbeLaneCount(pool healthPool) int {
+	requested := pool.ProbeBudget
+	if requested <= 0 {
+		requested = 10
+		for _, contract := range pool.HealthPolicies {
+			requested = maxInt(requested, policySettings(contract.Policy, contract.Mode).batch)
+		}
+	}
+	requested = minInt(64, maxInt(1, requested))
+	if pool.ProbeLanes > 0 {
+		return minInt(requested, minInt(64, pool.ProbeLanes))
+	}
+	inventory := len(pool.Outbounds)
+	if inventory == 0 {
+		// Legacy fixtures may omit the concrete outbound inventory.
+		eligible := make(map[string]bool)
+		for _, contract := range pool.HealthPolicies {
+			for _, node := range contract.Candidates {
+				eligible[node] = true
+			}
+		}
+		inventory = len(eligible)
+	}
+	return maxInt(1, minInt(requested, inventory))
 }
 
 func (runtime *responsiveSelectorRuntime) takeProbeInterruption() error {
@@ -64,7 +107,6 @@ func takeProbeInterruption(runtime selectorRuntime) error {
 
 type probeJobResult struct {
 	evidence probeEvidence
-	speed    int64
 	err      error
 	abort    bool
 }
@@ -132,7 +174,7 @@ func waitForHealthWake(ctx context.Context, timeout time.Duration, paths []strin
 }
 
 // Waiting is cancellable and services the active path instead of sleeping behind
-// a 15-second download or a whole multi-node batch. Always join the worker before
+// a slow HTTP probe or a whole multi-node batch. Always join the worker before
 // starting another job, including on Apply, shutdown and confirmed outage.
 func awaitProbeJob(ctx context.Context, cadence time.Duration, check func() error, operation func(context.Context) probeJobResult) probeJobResult {
 	return awaitProbeJobWithSignals(ctx, cadence, check, operation, nil, nil)
@@ -244,13 +286,30 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 	if len(lanes) == 0 && runtime.background != nil {
 		lanes = []*xraySelectorRuntime{runtime.background}
 	}
+	stamp := generationStamp(runtime.generationPaths)
+	if stamp != runtime.generation || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+		runtime.interrupted = errHealthYield
+		return measured
+	}
 	if !runtime.parallelEnabled || len(lanes) < 2 || len(candidates) < 2 {
 		for _, candidate := range candidates {
+			if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+				runtime.interrupted = errHealthYield
+				return measured
+			}
 			var evidence probeEvidence
 			if quality {
 				evidence = runtime.Probe(candidate)
+			} else if urgent, ok := runtime.selectorRuntime.(emergencyCandidateRuntime); !checkOtherPolicies && ok {
+				evidence = urgent.ProbeEmergencyAvailability(candidate)
 			} else {
 				evidence = runtime.selectorRuntime.ProbeAvailability(candidate)
+			}
+			// A single manual lane must reject a replaced runtime before its
+			// emergency callback can select a result from the old contract.
+			if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+				runtime.interrupted = errHealthYield
+				return measured
 			}
 			measured[candidate] = evidence
 			if evidence.LocalFailure {
@@ -261,11 +320,6 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 				break
 			}
 		}
-		return measured
-	}
-	stamp := generationStamp(runtime.generationPaths)
-	if stamp != runtime.generation {
-		runtime.interrupted = errHealthYield
 		return measured
 	}
 	type result struct {
@@ -301,6 +355,8 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 				var evidence probeEvidence
 				if quality {
 					evidence = lane.Probe(candidate)
+				} else if !checkOtherPolicies {
+					evidence = lane.ProbeEmergencyAvailability(candidate)
 				} else {
 					evidence = lane.ProbeAvailability(candidate)
 				}
@@ -320,6 +376,12 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var signals <-chan xrayFailureSignal
+	// A confirmed outage owns its reserve batch until a result or cancellation;
+	// routine batches still service client hints while their lanes are busy.
+	if checkOtherPolicies {
+		signals = runtime.signals
+	}
 	remaining := len(candidates)
 	for remaining > 0 {
 		select {
@@ -358,6 +420,25 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 					return measured
 				}
 			}
+		case signal, ok := <-signals:
+			if !ok {
+				signals = nil
+				continue
+			}
+			if generationStamp(runtime.generationPaths) != stamp {
+				cancel()
+				<-done
+				runtime.interrupted = errHealthYield
+				return measured
+			}
+			if runtime.acceptSignal != nil && runtime.acceptSignal(signal) && runtime.check != nil {
+				if err := runtime.check(); err != nil {
+					cancel()
+					<-done
+					runtime.interrupted = err
+					return measured
+				}
+			}
 		case <-ctx.Done():
 			cancel()
 			<-done
@@ -372,23 +453,34 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 	return measured
 }
 
-func (runtime *responsiveSelectorRuntime) Throughput(candidate string, size int) (int64, error) {
-	if !runtime.enabled {
-		return runtime.selectorRuntime.Throughput(candidate, size)
-	}
-	result := runtime.run(func() probeJobResult {
-		speed, err := runtime.background.Throughput(candidate, size)
-		return probeJobResult{speed: speed, err: err}
-	})
-	return result.speed, result.err
-}
-
-func (controller *healthController) checkDuringProbe(now time.Time, pool healthPool) error {
+func (controller *healthController) checkDuringProbe(now time.Time, pool healthPool) (checkErr error) {
+	trace := beginHealthStage("background_check", "controller", controller.priorityPolicy, "")
+	defer func() { trace.finish(checkErr == nil) }()
 	ids := make([]string, 0, len(pool.HealthPolicies))
 	for id := range pool.HealthPolicies {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	urgentRank := func(id string) int {
+		item := controller.state[id]
+		if item != nil && item.Selected != "" && item.Selected != "block" {
+			failures := item.AvailabilityFailures[item.Selected]
+			pending := failures > 0 && failures < policySettings(pool.HealthPolicies[id].Policy, pool.HealthPolicies[id].Mode).failureThreshold
+			if controller.forceLiveness[id] || pending {
+				if id == controller.priorityPolicy {
+					return 0
+				}
+				return 1
+			}
+		}
+		return 2
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		left, right := urgentRank(ids[i]), urgentRank(ids[j])
+		if left != right {
+			return left < right
+		}
+		return ids[i] < ids[j]
+	})
 	dirty := false
 	var result error
 	for _, id := range ids {

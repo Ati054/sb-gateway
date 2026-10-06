@@ -46,7 +46,7 @@ type dohUpstream struct {
 }
 
 var udpResponseBuffers = sync.Pool{
-	New: func() any { return make([]byte, maxDNSMessage) },
+	New: func() any { return new([maxDNSMessage]byte) },
 }
 
 func newUpstream(config serverConfig, timeout time.Duration) (upstream, error) {
@@ -208,8 +208,8 @@ func (upstream *udpUpstream) exchangeOnConnection(ctx context.Context, connectio
 	if _, err := connection.Write(query); err != nil {
 		return nil, err
 	}
-	buffer := udpResponseBuffers.Get().([]byte)
-	size, err := connection.Read(buffer)
+	buffer := udpResponseBuffers.Get().(*[maxDNSMessage]byte)
+	size, err := connection.Read(buffer[:])
 	if err != nil {
 		udpResponseBuffers.Put(buffer)
 		return nil, err

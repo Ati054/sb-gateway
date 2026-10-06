@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ type xraySelectorRuntime struct {
 	poolFileSignature string
 	poolMTimeUnixNano int64
 	xrayPID           int
+	pendingReset      bool
 	loadedDynamic     map[string]bool
 	verifiedDynamic   map[string]time.Time
 	activeByPolicy    map[string]string
@@ -44,6 +46,7 @@ type xraySelectorRuntime struct {
 	probeRuntimeTag   string
 	probeSelector     string
 	probeContext      context.Context
+	control           *xrayControlClient
 }
 
 type pendingOutbound struct {
@@ -128,7 +131,9 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 	}
 	pidChanged := pid != runtime.xrayPID
 	contractChanged := signature != runtime.poolSignature
-	reset := pidChanged || contractChanged
+	// Inventory can fail after the cached generation advances. Deliver its
+	// reset only with a successful pool, including on a later retry.
+	runtime.pendingReset = runtime.pendingReset || pidChanged || contractChanged
 	if changed && signature != runtime.poolSignature {
 		var pool healthPool
 		if err := json.Unmarshal(body, &pool); err != nil {
@@ -138,6 +143,10 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 			return healthPool{}, false, fmt.Errorf("health pool contract predates the 1.6.15 release baseline")
 		}
 		runtime.pool = pool
+		for id, contract := range runtime.pool.HealthPolicies {
+			contract.Policy.LatencyMeasurement = "gstatic-head-v1"
+			runtime.pool.HealthPolicies[id] = contract
+		}
 		runtime.poolSignature = signature
 	}
 	if changed {
@@ -177,6 +186,8 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 	for policyID := range runtime.retiredByPolicy {
 		runtime.pruneRetiredOutbounds(policyID)
 	}
+	reset := runtime.pendingReset
+	runtime.pendingReset = false
 	return runtime.pool, reset, nil
 }
 
@@ -222,7 +233,9 @@ func readyProcessPIDAt(root, path, name string) int {
 	return pid
 }
 
-func (runtime *xraySelectorRuntime) Select(selector, member string) error {
+func (runtime *xraySelectorRuntime) Select(selector, member string) (selectionErr error) {
+	trace := beginHealthStage("select", runtime.stageLane(), selector, member)
+	defer func() { trace.finish(selectionErr == nil) }()
 	runtimeMember := member
 	_, policySelector := runtime.pool.Policies[selector]
 	if selector == runtime.probeSelectorName() {
@@ -272,7 +285,15 @@ func (runtime *xraySelectorRuntime) Select(selector, member string) error {
 		delete(runtime.pendingDynamic, runtimeMember)
 		return nil
 	}
-	if _, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "bo", "--server="+runtime.opts.XrayAPIServer, "-b", selector, runtimeMember); err != nil {
+	var updateErr error
+	if runtime.control != nil {
+		updateErr = runtime.control.override(runtime.requestContext(), selector, runtimeMember)
+	} else {
+		_, updateErr = runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "bo", "--server="+runtime.opts.XrayAPIServer, "-b", selector, runtimeMember)
+	}
+	if err := updateErr; err != nil {
+		// An override may have applied even when its acknowledgement was lost.
+		delete(runtime.selectorMembers, selector)
 		return fmt.Errorf("Xray rejected selector update: %w", err)
 	}
 	actual, err := runtime.selectedRuntimeMember(selector)
@@ -295,7 +316,9 @@ func (runtime *xraySelectorRuntime) Select(selector, member string) error {
 	return nil
 }
 
-func (runtime *xraySelectorRuntime) Current(selector string) (string, error) {
+func (runtime *xraySelectorRuntime) Current(selector string) (selected string, selectionErr error) {
+	trace := beginHealthStage("current", runtime.stageLane(), selector, "")
+	defer func() { trace.finish(selectionErr == nil) }()
 	member, err := runtime.selectedRuntimeMember(selector)
 	if err != nil {
 		return "", err
@@ -359,6 +382,13 @@ func (runtime *xraySelectorRuntime) Current(selector string) (string, error) {
 }
 
 func (runtime *xraySelectorRuntime) selectedRuntimeMember(selector string) (string, error) {
+	if runtime.control != nil {
+		member, err := runtime.control.selected(runtime.requestContext(), selector)
+		if err != nil {
+			return "", fmt.Errorf("Xray selector state is unavailable: %w", err)
+		}
+		return member, nil
+	}
 	output, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "bi", "--server="+runtime.opts.XrayAPIServer, selector)
 	if err != nil {
 		return "", fmt.Errorf("Xray selector state is unavailable: %w", err)
@@ -710,15 +740,24 @@ func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	_, commandErr := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "ado", "--server="+runtime.opts.XrayAPIServer, path)
-	if repair || commandErr != nil {
+	for attempt := 0; attempt < 2; attempt++ {
+		_, commandErr := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "ado", "--server="+runtime.opts.XrayAPIServer, path)
+		if !repair && attempt == 0 && commandErr == nil {
+			break
+		}
 		present, err := runtime.outboundPresent(tag)
 		if err != nil {
 			return errors.New("Xray dynamic outbound presence is unconfirmed after add")
 		}
-		if !present {
-			return errors.New("Xray dynamic outbound was not confirmed after add")
+		if present {
+			break
 		}
+		// A timed-out CLI may never have reached HandlerService. Read back
+		// absence before one bounded retry; never duplicate an uncertain add.
+		if attempt == 0 && errors.Is(commandErr, context.DeadlineExceeded) && runtime.requestContext().Err() == nil {
+			continue
+		}
+		return errors.New("Xray dynamic outbound was not confirmed after add")
 	}
 	runtime.loadedDynamic[tag] = true
 	delete(runtime.unknownDynamic, tag)
@@ -735,6 +774,9 @@ func (runtime *xraySelectorRuntime) outboundPresent(tag string) (bool, error) {
 }
 
 func (runtime *xraySelectorRuntime) outboundTags() (map[string]bool, error) {
+	if runtime.control != nil {
+		return runtime.control.outbounds(runtime.requestContext())
+	}
 	output, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary,
 		"api", "lso", "--server="+runtime.opts.XrayAPIServer)
 	if err != nil {
@@ -762,7 +804,13 @@ func (runtime *xraySelectorRuntime) removeOutbound(tag string) error {
 	if !runtime.loadedDynamic[tag] {
 		return nil
 	}
-	if _, err := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "rmo", "--server="+runtime.opts.XrayAPIServer, tag); err != nil {
+	var removeErr error
+	if runtime.control != nil {
+		removeErr = runtime.control.remove(runtime.requestContext(), tag)
+	} else {
+		_, removeErr = runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "rmo", "--server="+runtime.opts.XrayAPIServer, tag)
+	}
+	if err := removeErr; err != nil {
 		// RemoveOutbound can succeed after its acknowledgement is lost. A list
 		// readback distinguishes that case from a still-live handler; if the
 		// readback also fails, retain ownership for the next cleanup tick.
@@ -800,15 +848,33 @@ func (runtime *xraySelectorRuntime) isBase(tag string) bool {
 	return false
 }
 
-func (runtime *xraySelectorRuntime) Probe(candidate string) probeEvidence {
-	return runtime.probe(candidate, false)
+type xrayProbeMode uint8
+
+const (
+	xrayQualityProbe xrayProbeMode = iota
+	xrayAvailabilityProbe
+	xrayEmergencyProbe
+)
+
+func (runtime *xraySelectorRuntime) Probe(candidate string) (evidence probeEvidence) {
+	trace := beginHealthStage("quality_probe", runtime.stageLane(), "", candidate)
+	defer func() { trace.finish(evidence.OK) }()
+	return runtime.probe(candidate, xrayQualityProbe)
 }
 
-func (runtime *xraySelectorRuntime) ProbeAvailability(candidate string) probeEvidence {
-	return runtime.probe(candidate, true)
+func (runtime *xraySelectorRuntime) ProbeAvailability(candidate string) (evidence probeEvidence) {
+	trace := beginHealthStage("availability_probe", runtime.stageLane(), "", candidate)
+	defer func() { trace.finish(evidence.OK) }()
+	return runtime.probe(candidate, xrayAvailabilityProbe)
 }
 
-func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly bool) probeEvidence {
+func (runtime *xraySelectorRuntime) ProbeEmergencyAvailability(candidate string) (evidence probeEvidence) {
+	trace := beginHealthStage("emergency_availability_probe", runtime.stageLane(), "", candidate)
+	defer func() { trace.finish(evidence.OK) }()
+	return runtime.probe(candidate, xrayEmergencyProbe)
+}
+
+func (runtime *xraySelectorRuntime) probe(candidate string, mode xrayProbeMode) probeEvidence {
 	evidence := probeEvidence{Targets: make(map[string]*int), TargetFailures: make(map[string]probeFailureClass)}
 	// Reverse bridge outbounds exist only while the matching client has an
 	// online session. Selecting an offline bridge is accepted by the balancer
@@ -819,54 +885,43 @@ func (runtime *xraySelectorRuntime) probe(candidate string, availabilityOnly boo
 		evidence.Failure = probeFailureFatal
 		return evidence
 	}
-	delays := []int{}
 	if err := runtime.Select(runtime.probeSelectorName(), candidate); err != nil {
 		evidence.Failure = classifyProbeError(err)
 		evidence.LocalFailure = true
 		return evidence
 	}
-	if availabilityOnly {
-		return runtime.probeAvailabilityTargets(evidence)
+	if mode != xrayQualityProbe {
+		evidence.QualityUnmeasured = true
+		return runtime.probeAvailabilityTargets(evidence, mode == xrayEmergencyProbe)
 	}
-	failures := []probeFailureClass{}
-	for _, target := range healthTargets {
-		started := time.Now()
-		_, err := downloadThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, 5*time.Second, 1024, target.status)
+	// Compare one origin only; alternate origins prove availability, not speed.
+	target := healthTargets[0]
+	trace := beginHealthStage("https", runtime.stageLane(), "", "")
+	trace.target(target.label)
+	started := time.Now()
+	_, err := requestThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, http.MethodHead, 5*time.Second, 0, target.status)
+	trace.finish(err == nil)
+	if err == nil {
 		delay := maxInt(1, int(time.Since(started).Milliseconds()))
-		if err != nil {
-			evidence.Targets[target.label] = nil
-			classified := classifyProbeError(err)
-			evidence.TargetFailures[target.label] = classified
-			failures = append(failures, classified)
-			// A single public HTTPS target can fail independently of the VLESS
-			// node. Confirm an availability failure against another origin before
-			// the controller is allowed to move the live selector.
-			if len(failures) >= 2 &&
-				(classifyTargetFailures(failures) == probeFailureFatal || classifyTargetFailures(failures) == probeFailureTLS) {
-				break
-			}
-		} else {
-			copy := delay
-			evidence.Targets[target.label] = &copy
-			delays = append(delays, delay)
-		}
+		evidence.OK, evidence.DelayMS = true, &delay
+		evidence.Targets[target.label] = &delay
+		return evidence
 	}
-	if len(delays) > 0 {
-		value := medianInt(delays)
-		evidence.OK = true
-		evidence.DelayMS = &value
-	} else {
-		evidence.Failure = classifyTargetFailures(failures)
+	evidence = runtime.probeAvailabilityTargets(evidence, false)
+	evidence.QualityUnmeasured = true
+	evidence.PrimaryQualityFailed = true
+	if evidence.OK {
+		evidence.DelayMS = nil
 	}
 	return evidence
 }
 
 // Keep the healthy fast path to one request. If it fails, give both remaining
 // independent origins a bounded chance in parallel. A slow public endpoint
-// must not make a working outbound look dead, and a real outage must not wait
-// for three serial HTTP timeouts. Join canceled requests before the selector
-// can be reused for another candidate.
-func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvidence) probeEvidence {
+// must not make a working outbound look dead. Confirmed emergency discovery
+// starts all three together without shortening any origin deadline. Join
+// canceled requests before the selector can be reused for another candidate.
+func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvidence, parallelPrimary bool) probeEvidence {
 	type targetResult struct {
 		label   string
 		delayMS int
@@ -874,8 +929,11 @@ func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvide
 	}
 	probe := func(ctx context.Context, index int, timeout time.Duration) targetResult {
 		target := healthTargets[index]
+		trace := beginHealthStage("https", runtime.stageLane(), "", "")
+		trace.target(target.label)
 		started := time.Now()
 		_, err := downloadThroughProxyContext(ctx, runtime.opts.ProbeURL, target.url, timeout, 1024, target.status)
+		trace.finish(err == nil)
 		return targetResult{label: target.label, delayMS: maxInt(1, int(time.Since(started).Milliseconds())), err: err}
 	}
 	failures := make([]probeFailureClass, 0, len(healthTargets))
@@ -897,17 +955,27 @@ func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvide
 		evidence.Failure = probeFailureTransient
 		return evidence
 	}
-	if record(probe(runtime.requestContext(), 0, availabilityProbeTimeout)) {
-		return evidence
+	first := 0
+	if !parallelPrimary {
+		if record(probe(runtime.requestContext(), 0, availabilityProbeTimeout)) {
+			return evidence
+		}
+		first = 1
 	}
 
-	// Production has two fallbacks. Cap fanout if more targets are added later.
-	count := minInt(len(healthTargets)-1, 2)
+	// Production has three origins; never grow emergency fanout implicitly.
+	count := minInt(len(healthTargets), 3) - first
 	ctx, cancel := context.WithCancel(runtime.requestContext())
 	defer cancel()
 	results := make(chan targetResult, count)
-	for index := 1; index <= count; index++ {
-		go func(index int) { results <- probe(ctx, index, availabilityFallbackTimeout) }(index)
+	for index := first; index < first+count; index++ {
+		go func(index int) {
+			timeout := availabilityFallbackTimeout
+			if index == 0 {
+				timeout = availabilityProbeTimeout
+			}
+			results <- probe(ctx, index, timeout)
+		}(index)
 	}
 	for received := 0; received < count; received++ {
 		result := <-results
@@ -993,30 +1061,49 @@ func classifyProbeError(err error) probeFailureClass {
 	}
 }
 
-func (runtime *xraySelectorRuntime) UnderlayStatus() underlayEvidence {
+func (runtime *xraySelectorRuntime) UnderlayStatus() (status underlayEvidence) {
+	trace := beginHealthStage("underlay", runtime.stageLane(), "", "")
+	defer func() { trace.finish(status.Known && status.WANOK && status.DNSOK) }()
 	ctx, cancel := context.WithTimeout(runtime.requestContext(), 2*time.Second)
 	defer cancel()
+	return collectUnderlayStatus(ctx, underlayWANTargets, func(ctx context.Context, address string) bool {
+		connection, err := (&net.Dialer{Timeout: 1500 * time.Millisecond}).DialContext(ctx, "tcp", address)
+		if err == nil {
+			_ = connection.Close()
+		}
+		return err == nil
+	}, func(ctx context.Context) bool {
+		addresses, err := net.DefaultResolver.LookupHost(ctx, "www.gstatic.com")
+		return err == nil && len(addresses) > 0
+	})
+}
+
+func collectUnderlayStatus(parent context.Context, targets []string, probeWAN func(context.Context, string) bool, probeDNS func(context.Context) bool) underlayEvidence {
+	ctx, cancel := context.WithCancel(parent)
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
 	type result struct {
 		kind string
 		ok   bool
 	}
-	results := make(chan result, len(underlayWANTargets)+1)
-	for _, address := range underlayWANTargets {
+	results := make(chan result, len(targets)+1)
+	workers.Add(len(targets) + 1)
+	for _, address := range targets {
 		address := address
 		go func() {
-			connection, err := (&net.Dialer{Timeout: 1500 * time.Millisecond}).DialContext(ctx, "tcp", address)
-			if err == nil {
-				_ = connection.Close()
-			}
-			results <- result{kind: "wan", ok: err == nil}
+			defer workers.Done()
+			results <- result{kind: "wan", ok: probeWAN(ctx, address)}
 		}()
 	}
 	go func() {
-		addresses, err := net.DefaultResolver.LookupHost(ctx, "www.gstatic.com")
-		results <- result{kind: "dns", ok: err == nil && len(addresses) > 0}
+		defer workers.Done()
+		results <- result{kind: "dns", ok: probeDNS(ctx)}
 	}()
 	status := underlayEvidence{Known: true}
-	for received := 0; received < len(underlayWANTargets)+1; received++ {
+	for received := 0; received < len(targets)+1; received++ {
 		select {
 		case value := <-results:
 			if value.kind == "wan" {
@@ -1024,47 +1111,15 @@ func (runtime *xraySelectorRuntime) UnderlayStatus() underlayEvidence {
 			} else {
 				status.DNSOK = value.ok
 			}
+			if status.WANOK && status.DNSOK {
+				// Other WAN outcomes cannot change these two positive facts.
+				return status
+			}
 		case <-ctx.Done():
 			return status
 		}
 	}
 	return status
-}
-
-func (runtime *xraySelectorRuntime) Throughput(candidate string, byteLimit int) (int64, error) {
-	if runtime.isReverse(candidate) && !runtime.reverseOnline(candidate) {
-		return 0, errors.New("reverse bridge is offline")
-	}
-	if err := runtime.Select(runtime.probeSelectorName(), candidate); err != nil {
-		return 0, errProbeSelectorUnavailable
-	}
-	byteLimit = maxInt(256*1024, minInt(byteLimit, 10*1024*1024))
-	return measureThroughputOverProxy(runtime.requestContext(), runtime.opts.ProbeURL,
-		"https://speed.cloudflare.com/__down?bytes="+strconv.Itoa(byteLimit), byteLimit, 15*time.Second)
-}
-
-func measureThroughputOverProxy(parent context.Context, proxyURL, target string, byteLimit int, window time.Duration) (int64, error) {
-	started := time.Now()
-	ctx, cancel := context.WithTimeoutCause(parent, window, errSpeedWindowComplete)
-	defer cancel()
-	received, err := downloadThroughProxyContext(ctx, proxyURL, target, 0, byteLimit, http.StatusOK)
-	return finishThroughputProbe(received, time.Since(started), byteLimit, err, context.Cause(ctx))
-}
-
-func finishThroughputProbe(received int, elapsed time.Duration, byteLimit int, probeErr, cause error) (int64, error) {
-	windowComplete := (errors.Is(probeErr, context.DeadlineExceeded) || errors.Is(probeErr, errSpeedWindowComplete)) &&
-		errors.Is(cause, errSpeedWindowComplete) && received >= 256*1024
-	if probeErr != nil && !windowComplete {
-		return 0, probeErr
-	}
-	if received < minInt(byteLimit, 256*1024) || elapsed <= 0 {
-		return 0, errors.New("throughput probe returned too little data")
-	}
-	speed := int64(float64(received*8) / elapsed.Seconds())
-	if windowComplete {
-		return speed, errSpeedWindowComplete
-	}
-	return speed, nil
 }
 
 func (runtime *xraySelectorRuntime) isReverse(candidate string) bool {
@@ -1108,6 +1163,10 @@ func downloadThroughProxy(proxyURL, target string, timeout time.Duration, limit 
 }
 
 func downloadThroughProxyContext(ctx context.Context, proxyURL, target string, timeout time.Duration, limit, expectedStatus int) (int, error) {
+	return requestThroughProxyContext(ctx, proxyURL, target, http.MethodGet, timeout, limit, expectedStatus)
+}
+
+func requestThroughProxyContext(ctx context.Context, proxyURL, target, method string, timeout time.Duration, limit, expectedStatus int) (int, error) {
 	parsed, err := url.Parse(proxyURL)
 	if err != nil {
 		return 0, err
@@ -1115,7 +1174,7 @@ func downloadThroughProxyContext(ctx context.Context, proxyURL, target string, t
 	transport := &http.Transport{Proxy: http.ProxyURL(parsed), DisableKeepAlives: true, ForceAttemptHTTP2: false}
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer transport.CloseIdleConnections()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	request, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
 		return 0, err
 	}

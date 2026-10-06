@@ -62,9 +62,9 @@ func TestNativeLifecycleImageUploadStreamsValidArm64Archive(t *testing.T) {
 		t.Fatalf("verification state = %#v, %v", verification, err)
 	}
 
-	second := dockerImageArchive(t, "aarch64", "1.7.3-rc1", "second-layer")
+	second := dockerImageArchive(t, "aarch64", "1.7.3-rc.1", "second-layer")
 	secondResponse := uploadImageRequest(t, server, cookie, csrf, "candidate-2.tar", second)
-	if secondResponse.Code != http.StatusOK || decodeResponse(t, secondResponse)["superseded_uploads_removed"].(float64) != 1 {
+	if secondResponse.Code != http.StatusOK || decodeResponse(t, secondResponse)["version"] != "1.7.3-rc.1" || decodeResponse(t, secondResponse)["superseded_uploads_removed"].(float64) != 1 {
 		t.Fatalf("second upload = %d %s", secondResponse.Code, secondResponse.Body.String())
 	}
 	entries, err := os.ReadDir(filepath.Join(server.opts.DataDir, "lifecycle-uploads"))

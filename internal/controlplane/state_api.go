@@ -64,6 +64,7 @@ func (server *Server) getDraft() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	runtimeconfig.NormalizeURLTestPolicies(config)
 	withRuntimeNetworkFacts(config)
 	return config, nil
 }
@@ -321,7 +322,7 @@ func (server *Server) status(response http.ResponseWriter, request *http.Request
 		for id, raw := range selector {
 			item, _ := raw.(map[string]any)
 			fields := make(map[string]any)
-			for _, key := range []string{"runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_nodes", "candidate_count", "availability_ok", "shortlist"} {
+			for _, key := range []string{"runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_nodes", "candidate_count", "availability_ok", "shortlist", "latency_comparisons"} {
 				if value, exists := item[key]; exists {
 					fields[key] = value
 				}
@@ -330,6 +331,8 @@ func (server *Server) status(response http.ResponseWriter, request *http.Request
 			if fields["runtime_error"] == nil {
 				fields["runtime_error"] = ""
 			}
+			// Clear a previous comparison in the compact-poll UI merge.
+			fields["latency_comparisons"] = item["latency_comparisons"]
 			compact[id] = fields
 		}
 		metadata, err := server.repository.metadata()
@@ -365,6 +368,7 @@ func (server *Server) statusPayload() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	selector = publicSelectorHealth(selector)
 	cdnState, err := server.repository.auxiliary("cdn-feeds")
 	if err != nil {
 		return nil, err
@@ -380,7 +384,11 @@ func (server *Server) statusPayload() (map[string]any, error) {
 	}
 	acmeStatus := map[string]any{}
 	for id, raw := range acmeState {
-		record := decodeACMERecord(raw)
+		record, decodeErr := decodeACMERecord(raw)
+		if decodeErr != nil {
+			acmeStatus[id] = map[string]any{"enabled": false, "state": "invalid"}
+			continue
+		}
 		acmeStatus[id] = map[string]any{"enabled": record.Settings.Enabled, "state": record.State, "metadata": record.Metadata}
 	}
 	container, _ := runtimeStatus["container"].(map[string]any)
@@ -597,7 +605,8 @@ func (server *Server) resetDraft(response http.ResponseWriter, request *http.Req
 		server.internalStateError(response, request, err)
 		return
 	}
-	result := validateCurrentConfigRevision(active, activeRevision)
+	runtimeconfig.NormalizeURLTestPolicies(active)
+	result := validateCurrentConfig(active)
 	if !result.Valid {
 		server.writeValidationError(response, request, result)
 		return
@@ -607,7 +616,7 @@ func (server *Server) resetDraft(response http.ResponseWriter, request *http.Req
 		return
 	}
 	server.rememberValidation(result)
-	server.audit(request, fmt.Sprint(payload["sub"]), "draft.reset", "ok", map[string]any{"revision": activeRevision})
+	server.audit(request, fmt.Sprint(payload["sub"]), "draft.reset", "ok", map[string]any{"revision": result.Revision})
 	envelope, err := server.draftEnvelope(active)
 	if err != nil {
 		server.internalStateError(response, request, err)
@@ -618,7 +627,7 @@ func (server *Server) resetDraft(response http.ResponseWriter, request *http.Req
 }
 
 func (server *Server) persistDraft(response http.ResponseWriter, request *http.Request, payload map[string]any, config map[string]any, action string) {
-	normalizeXHTTPModeCompatibility(config)
+	normalizeConfigCompatibility(config)
 	pendingSecret, err := server.prepareDraftSecrets(config)
 	if err != nil {
 		server.writeErrorResponse(response, request, http.StatusUnprocessableEntity, "invalid_subscription_origin_header", err.Error())

@@ -154,7 +154,7 @@ func TestTLSProfileTransferIsolatedAndRenewable(t *testing.T) {
 			}
 			state, _ := target.repository.auxiliary("acme")
 			if managed {
-				rec := decodeACMERecord(state[result.ID])
+				rec := mustDecodeACMERecord(t, state[result.ID])
 				if rec.Settings.Enabled || rec.State != "disabled" || acmeDue(rec, time.Now().Add(365*24*time.Hour)) {
 					t.Fatal("import started renewal")
 				}

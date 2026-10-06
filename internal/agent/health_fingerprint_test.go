@@ -49,7 +49,6 @@ func TestChangedOutboundLosesOldHealthWithoutLosingStableID(t *testing.T) {
 	item.AvailabilityOK = map[string]bool{"node": true}
 	item.QualityOK = map[string]bool{"node": true}
 	item.Recoveries["node"] = 3
-	item.OutagePenalty["node"] = outagePenalty{LastAt: 1000, Count: 2, Until: 2000}
 	item.Samples["node"] = []healthSample{{OK: true}}
 	item.PeriodStats = map[string]map[string]healthStats{
 		"7d": {"node": {Samples: 10}}, "30d": {"node": {Samples: 20}},
@@ -63,7 +62,7 @@ func TestChangedOutboundLosesOldHealthWithoutLosingStableID(t *testing.T) {
 	if got := invalidateChangedOutboundHealth(item, []string{"node"}, current); !reflect.DeepEqual(got, []string{"node"}) {
 		t.Fatalf("changed endpoint not detected: %v", got)
 	}
-	if item.Selected != "node" || item.LastProbeAt["node"] != 0 || item.LastGoodAt["node"] != 0 || item.AvailabilityOK["node"] || item.QualityOK["node"] || item.Recoveries["node"] != 0 || len(item.Samples["node"]) != 0 || len(item.OutagePenalty) != 0 || item.LastWorkingSelection != nil {
+	if item.Selected != "node" || item.LastProbeAt["node"] != 0 || item.LastGoodAt["node"] != 0 || item.AvailabilityOK["node"] || item.QualityOK["node"] || item.Recoveries["node"] != 0 || len(item.Samples["node"]) != 0 || item.LastWorkingSelection != nil {
 		t.Fatalf("stale health survived endpoint change: %+v", item)
 	}
 	if _, exists := item.PeriodStats["7d"]["node"]; exists {
@@ -96,12 +95,6 @@ func TestRemovedCandidatesDoNotAccumulateAcrossCatalogGenerations(t *testing.T) 
 		item.HistoryDays[id] = map[string]dayBucket{"2026-09-27": {Samples: 1}}
 		item.LastProbeAt[id] = 1
 		item.LastGoodAt[id] = 1
-		item.SpeedSamplesBPS[id] = []int64{1}
-		item.LastSpeedProbeAt[id] = 1
-		item.LastSpeedSuccessAt[id] = 1
-		item.LastSpeedProbeStatus[id] = "ok"
-		item.OptimizationBackoff[id] = 1
-		item.OutagePenalty[id] = outagePenalty{LastAt: 1, Count: 1, Until: 2}
 		item.FailureClass[id] = "timeout"
 		item.AvailabilityOK[id] = true
 		item.QualityOK[id] = true
@@ -110,10 +103,9 @@ func TestRemovedCandidatesDoNotAccumulateAcrossCatalogGenerations(t *testing.T) 
 		item.PeriodStats["24h"][id] = healthStats{Samples: 1}
 		item.Shortlist = append(item.Shortlist, id)
 		item.ProbedCandidates = append(item.ProbedCandidates, id)
-		item.SpeedProbeTargets = append(item.SpeedProbeTargets, id)
 		item.LastWorkingSelection = &workingSelection{Selected: id}
 		pruneRemovedCandidateHealth(item, []string{id})
-		if len(item.Samples) != 1 || len(item.DailySamples) != 1 || len(item.HistoryDays) != 1 || len(item.SpeedSamplesBPS) != 1 || len(item.CandidateNodes) != 1 || len(item.OutagePenalty) != 1 || len(item.PeriodStats["24h"]) != 1 || len(item.Shortlist) != 1 || len(item.ProbedCandidates) != 1 || len(item.SpeedProbeTargets) != 1 {
+		if len(item.Samples) != 1 || len(item.DailySamples) != 1 || len(item.HistoryDays) != 1 || len(item.CandidateNodes) != 1 || len(item.PeriodStats["24h"]) != 1 || len(item.Shortlist) != 1 || len(item.ProbedCandidates) != 1 {
 			t.Fatalf("generation %d retained removed node evidence", generation)
 		}
 		encoded, err := json.Marshal(item)
@@ -141,8 +133,6 @@ func TestPolicyTickPrunesRemovedCandidateBeforePublishingState(t *testing.T) {
 	item.Samples["de"] = []healthSample{{OK: true}}
 	item.DailySamples["de"] = []healthSample{{OK: true}}
 	item.HistoryDays["de"] = map[string]dayBucket{"2026-09-27": {Samples: 1}}
-	item.SpeedSamplesBPS["de"] = []int64{123}
-	item.LastSpeedSuccessAt["de"] = 999
 	item.AvailabilityOK = map[string]bool{"de": true}
 	root := t.TempDir()
 	runtime := &fakeSelectorRuntime{

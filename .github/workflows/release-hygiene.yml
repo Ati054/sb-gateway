@@ -10,6 +10,30 @@ permissions:
   contents: read
 
 jobs:
+  go-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Match the gateway build toolchain pinned in Dockerfile.
+          go-version: '1.27.1'
+      - name: Vet
+        run: go vet ./...
+      - name: Install pinned analysis tools
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - name: Staticcheck correctness checks
+        run: staticcheck -checks='SA*' ./...
+      - name: Race detection
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race ./... -count=1 -timeout=15m
+      - name: Reachable Go vulnerabilities
+        run: govulncheck ./...
+
   public-source:
     runs-on: ubuntu-latest
     steps:

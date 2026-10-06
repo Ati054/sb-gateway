@@ -2,74 +2,58 @@ package agent
 
 import "time"
 
-// Four bounded lanes share the existing batch: ready reserves, active quality,
-// recovery and full-pool exploration. The cursor survives ticks/restarts so a
-// continuously due class cannot monopolize the remaining slots, even at batch=1.
-// Active liveness and emergency recovery run independently of this scheduler.
+// Continue a bounded sweep without waiting another full quality interval.
+func (controller *healthController) remainingProbeInterval(now time.Time, contract healthPolicyContract, item *policyHealthState) time.Duration {
+	p := policySettings(contract.Policy, contract.Mode)
+	interval := controller.regularInterval(contract)
+	for _, candidate := range contract.Candidates {
+		remaining := time.Duration(p.active)*time.Second - now.Sub(time.Unix(int64(item.LastProbeAt[candidate]), 0))
+		if item.LastProbeAt[candidate] == 0 || remaining <= 0 {
+			return time.Duration(p.liveness) * time.Second
+		}
+		if remaining < interval {
+			interval = remaining
+		}
+	}
+	return interval
+}
+
+// An oldest-first rotation checks the entire selected inventory. The active
+// node shares a batch whenever due, but a one-slot budget cannot starve others.
 func regularProbeTargets(now time.Time, selected string, candidates, shortlist []string, item *policyHealthState, p effectivePolicySettings) []string {
-	const lanes = 4
 	result := make([]string, 0, p.batch)
-	item.ProbeLane = ((item.ProbeLane % lanes) + lanes) % lanes
-	oldest := func(values []string, interval int) string {
-		best := ""
-		for _, candidate := range values {
-			if !contains(candidates, candidate) || contains(result, candidate) || float64(now.Unix())-item.LastProbeAt[candidate] < float64(interval) {
+	due := func(candidate string) bool {
+		last := item.LastProbeAt[candidate]
+		return last == 0 || float64(now.Unix())-last >= float64(p.active)
+	}
+	activeTurn := p.batch > 1 || item.LastProbeAt[selected] == 0
+	for _, candidate := range candidates {
+		if candidate != selected && item.LastProbeAt[candidate] > item.LastProbeAt[selected] {
+			activeTurn = true
+		}
+	}
+	if activeTurn && contains(candidates, selected) && due(selected) {
+		result = append(result, selected)
+	}
+	if candidate := item.OptimizationCandidate; item.OptimizationChecks > 0 &&
+		len(result) < p.batch && candidate != selected && contains(candidates, candidate) && due(candidate) {
+		result = append(result, candidate)
+	}
+	for len(result) < p.batch {
+		oldest := ""
+		for _, candidate := range candidates {
+			if contains(result, candidate) || !due(candidate) {
 				continue
 			}
-			if best == "" || item.LastProbeAt[candidate] < item.LastProbeAt[best] {
-				best = candidate
+			if oldest == "" || item.LastProbeAt[candidate] < item.LastProbeAt[oldest] {
+				oldest = candidate
 			}
 		}
-		return best
-	}
-	reserves := without(shortlist, []string{selected})
-	recovering := []string{}
-	for _, candidate := range candidates {
-		if candidate != selected && len(item.Samples[candidate]) > 0 && !contains(shortlist, candidate) &&
-			(!item.AvailabilityOK[candidate] || !item.QualityOK[candidate] || item.AvailabilityFailures[candidate] > 0 || item.Recoveries[candidate] < p.recoveryThreshold) {
-			recovering = append(recovering, candidate)
+		if oldest == "" {
+			break
 		}
+		result = append(result, oldest)
 	}
-	// At batch>=2, an overdue ready reserve always gets a slot immediately;
-	// at least one slot remains for the fair rotation of all other work.
-	if p.batch > 1 {
-		if candidate := oldest(reserves, p.backup); candidate != "" {
-			result = append(result, candidate)
-		}
-	}
-	misses := 0
-	for len(result) < p.batch && misses < lanes {
-		lane := item.ProbeLane
-		item.ProbeLane = (lane + 1) % lanes
-		candidate := ""
-		switch lane {
-		case 0:
-			candidate = oldest(reserves, p.backup)
-		case 1:
-			interval := p.active
-			if item.AvailabilityFailures[selected] > 0 {
-				interval = minInt(interval, p.failureRetry)
-			}
-			candidate = oldest([]string{selected}, interval)
-		case 2:
-			candidate = oldest(recovering, minInt(p.backup, 60))
-		case 3:
-			for _, queued := range item.ScanQueue {
-				if contains(candidates, queued) && !contains(result, queued) {
-					candidate = queued
-					break
-				}
-			}
-		}
-		if candidate == "" {
-			misses++
-			continue
-		}
-		result = append(result, candidate)
-		misses = 0
-	}
-	// Every full probe satisfies that member's pending exploration too. Aborted
-	// batches are requeued by tickPolicy without committing probe timestamps.
 	item.ScanQueue = without(item.ScanQueue, result)
 	return result
 }

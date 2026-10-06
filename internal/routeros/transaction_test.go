@@ -17,6 +17,14 @@ type fakeTransactionREST struct {
 	pendingGuard      bool
 }
 
+func (fake *fakeTransactionREST) ensureNoPendingRollbackGuard(context.Context) error {
+	fake.events = append(fake.events, "guard-check")
+	if fake.trackPendingGuard && fake.pendingGuard {
+		return ErrRollbackGuardPending
+	}
+	return nil
+}
+
 func (fake *fakeTransactionREST) PrepareDirectDelta(_ context.Context, role, _ string) (string, error) {
 	name := "SB-GATEWAY-" + role + "-0123456789ab"
 	fake.events = append(fake.events, "prepare:"+role)
@@ -267,7 +275,7 @@ func TestFullCandidateStreamsBeforeArmingAndCleansImportsAfterCommit(t *testing.
 		t.Fatal(err)
 	}
 	want := []string{
-		"upload:rollback", "upload:apply",
+		"guard-check", "upload:rollback", "upload:apply",
 		"prepare-import:rollback:SB-GATEWAY-rollback-aaaaaaaaaaaa.rsc",
 		"prepare-import:apply:SB-GATEWAY-apply-aaaaaaaaaaaa.rsc",
 		"arm:SB-GATEWAY-rollback-0123456789ab",

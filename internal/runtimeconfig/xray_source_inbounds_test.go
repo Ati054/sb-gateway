@@ -144,13 +144,12 @@ func TestBuildXrayInboundSourceBuildsBaseAndScopedReverseUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 	byTag := inboundSourceByTag(result.Inbounds)
-	if len(result.Inbounds) != 9 || byTag["tun-routeros"] == nil || byTag["subscription-update-vpn"] == nil {
+	if len(result.Inbounds) != 7 || byTag["tun-routeros"] == nil || byTag["subscription-update-vpn"] == nil {
 		t.Fatalf("base inbounds are incomplete: %#v", result.Inbounds)
 	}
 	for tag, port := range map[string]int{
-		"outbound-health-background":   19083,
-		"outbound-health-background-2": 19084,
-		"outbound-health-background-3": 19085,
+		"outbound-health-probe":      19082,
+		"outbound-health-background": 19083,
 	} {
 		if bg := byTag[tag]; bg["listen"] != "127.0.0.1" || bg["listen_port"] != port {
 			t.Fatalf("background health %s must remain loopback-only: %#v", tag, bg)
@@ -447,12 +446,15 @@ func TestConfiguredTenProbeLanesRemainIsolatedAcrossXraySource(t *testing.T) {
 	config := inboundSourceBaseConfig()
 	config["system"].(map[string]any)["routing_monitor"] = map[string]any{"probe_batch_size": 10}
 	config["policies"] = []any{map[string]any{
-		"id": "route", "enabled": true, "mode": "priority", "selection_order": []any{"node"},
+		"id": "route", "enabled": true, "mode": "priority", "selection_order": []any{"country:DE"},
 	}}
-	nodes := []map[string]any{{
-		"id": "node", "protocol": "vless", "server": "edge.example", "server_port": 443,
-		"uuid_secret_ref": "node/uuid",
-	}}
+	nodes := make([]map[string]any, 10)
+	for index := range nodes {
+		nodes[index] = map[string]any{
+			"id": "node-" + strconv.Itoa(index), "country": "DE", "protocol": "vless", "server": "edge.example", "server_port": 443,
+			"uuid_secret_ref": "node/uuid",
+		}
+	}
 	source, err := BuildXraySourceModel(config, nodes,
 		inboundSecretReader(map[string]string{"node/uuid": "123e4567-e89b-42d3-a456-426614174000"}),
 		inboundSecretPath, "/config/rulesets")
@@ -474,7 +476,7 @@ func TestConfiguredTenProbeLanesRemainIsolatedAcrossXraySource(t *testing.T) {
 		if inbound == nil || inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != 19082+index {
 			t.Fatalf("background lane %d inbound = %#v", index, inbound)
 		}
-		if outbound := outbounds[tag]; outbound == nil || !containsText(stringSlice(outbound["outbounds"]), "node") {
+		if outbound := outbounds[tag]; outbound == nil || !containsText(stringSlice(outbound["outbounds"]), "node-0") {
 			t.Fatalf("background lane %d outbound = %#v", index, outbound)
 		}
 		if findXraySourceRule(rules, func(rule map[string]any) bool {
@@ -491,7 +493,7 @@ func TestTenProbeLanesCarryURLTestSelectorPrefix(t *testing.T) {
 		"policies": []any{map[string]any{"id": "route", "enabled": true, "mode": "best"}},
 	}
 	balancers := []map[string]any{{"tag": "route"}}
-	for _, lane := range xrayHealthProbeLanesForConfig(config) {
+	for _, lane := range xrayHealthProbeLanesForConfig(config, 10) {
 		balancers = append(balancers, map[string]any{"tag": lane.Tag})
 	}
 	addURLTestSelectors(config, balancers)

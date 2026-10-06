@@ -51,15 +51,27 @@ func OptionsFromEnvironment() Options {
 }
 
 func Run(ctx context.Context, opts Options) error {
-	errors := make(chan error, 2)
-	go func() { errors <- runTelemetry(ctx, opts) }()
-	go func() { errors <- runHealth(ctx, opts) }()
-	select {
-	case <-ctx.Done():
+	return runAgentWorkers(ctx,
+		func(child context.Context) error { return runTelemetry(child, opts) },
+		func(child context.Context) error { return runHealth(child, opts) },
+	)
+}
+
+func runAgentWorkers(ctx context.Context, telemetry, health func(context.Context) error) error {
+	child, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() { results <- telemetry(child) }()
+	go func() { results <- health(child) }()
+	first := <-results
+	cancel()
+	// The supervisor may restart the agent as soon as Run returns. Both workers
+	// must release their resources, including the failure socket, before then.
+	<-results
+	if ctx.Err() != nil {
 		return nil
-	case err := <-errors:
-		return err
 	}
+	return first
 }
 
 func runTelemetry(ctx context.Context, opts Options) error {

@@ -97,7 +97,7 @@ func storedACMERecord(t *testing.T, s *Server) acmeRecord {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return decodeACMERecord(state["cdn-default"])
+	return mustDecodeACMERecord(t, state["cdn-default"])
 }
 func TestACMEIssueAndRenewWithoutRouterOSApply(t *testing.T) {
 	s := newTestServer(t)
@@ -199,7 +199,7 @@ func TestACMEFailureKeepsCertificateAndBackoff(t *testing.T) {
 		t.Fatal("failure replaced valid certificate")
 	}
 	state, _ := s.repository.auxiliary("acme")
-	rec := decodeACMERecord(state["cdn-default"])
+	rec := mustDecodeACMERecord(t, state["cdn-default"])
 	if rec.State != "failed" || strings.Contains(rec.Message, "secret-token") {
 		t.Fatal("unsafe failure state")
 	}
@@ -496,7 +496,7 @@ func TestACMEIssueRejectsQueuedOrRunningWithoutMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			record := decodeACMERecord(state["cdn-default"])
+			record := mustDecodeACMERecord(t, state["cdn-default"])
 			record.State = stateName
 			record.LastOutcome = stateName
 			record.Revision = "in-flight-" + stateName
@@ -560,7 +560,7 @@ func TestACMELegacyInitialStatusSuppressesAutomaticRetryMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := decodeACMERecord(state["cdn-default"])
+	record := mustDecodeACMERecord(t, state["cdn-default"])
 	record.State, record.LastOutcome, record.Intent = "failed", "failed", ""
 	record.LastAttempt = now
 	record.NextAttempt = now.Add(automaticACMERetryDelay)
@@ -636,7 +636,7 @@ func TestACMEOrphanedInitialDoesNotReissueAndKeepsCAHold(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			record := decodeACMERecord(state["cdn-default"])
+			record := mustDecodeACMERecord(t, state["cdn-default"])
 			record.State, record.LastOutcome, record.Intent = "running", "running", acmeIntentInitial
 			record.LastAttempt = now.Add(-time.Minute)
 			record.CARetryNotBefore = hold.deadline
@@ -690,7 +690,7 @@ func TestACMEOrphanedRenewalKeepsLongerCAHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := decodeACMERecord(state["cdn-default"])
+	record := mustDecodeACMERecord(t, state["cdn-default"])
 	deadline := now.Add(2 * time.Hour)
 	record.State, record.LastOutcome, record.Intent = "running", "running", ""
 	record.CARetryNotBefore = deadline
@@ -733,7 +733,7 @@ func TestACMELegacyManagedRenewalMigratesOnlyAfterPairVerification(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := decodeACMERecord(state["cdn-default"])
+	legacy := mustDecodeACMERecord(t, state["cdn-default"])
 	legacy.State, legacy.LastOutcome, legacy.Intent = "failed", "failed", ""
 	legacy.NextAttempt = now
 	state["cdn-default"] = legacy
@@ -808,7 +808,7 @@ func TestACMEMissingPairBlocksButExpiredPairKeepsRenewal(t *testing.T) {
 			t.Fatal(err)
 		}
 		state, _ := s.repository.auxiliary("acme")
-		record := decodeACMERecord(state["cdn-default"])
+		record := mustDecodeACMERecord(t, state["cdn-default"])
 		record.State, record.LastOutcome, record.Intent, record.Metadata, record.NextAttempt = "failed", "failed", acmeIntentRenewal, metadata, now
 		state["cdn-default"] = record
 		if err := s.repository.saveAuxiliary("acme", state); err != nil {
@@ -1102,7 +1102,7 @@ func TestACMELegacyFailedRecordAllowsOneManualRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := decodeACMERecord(state["cdn-default"])
+	legacy := mustDecodeACMERecord(t, state["cdn-default"])
 	legacy.State = "failed"
 	legacy.LastOutcome = ""
 	legacy.LastAttempt = time.Time{}
@@ -1134,7 +1134,7 @@ func TestACMEInFlightAttemptKeepsAutomaticBackoffAfterSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed := decodeACMERecord(state["cdn-default"])
+	failed := mustDecodeACMERecord(t, state["cdn-default"])
 	failed.State = "failed"
 	failed.LastOutcome = "failed"
 	failed.LastAttempt = now.Add(-manualACMERetryCooldown)
@@ -1316,7 +1316,7 @@ func TestACMEDisableDuringIssueDiscardsResult(t *testing.T) {
 		s.configMu.Lock()
 		defer s.configMu.Unlock()
 		state, _ := s.repository.auxiliary("acme")
-		rec := decodeACMERecord(state["cdn-default"])
+		rec := mustDecodeACMERecord(t, state["cdn-default"])
 		rec.Settings.Enabled = false
 		rec.Revision = "changed"
 		state["cdn-default"] = rec

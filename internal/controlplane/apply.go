@@ -162,7 +162,7 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 func (server *Server) applyConfiguration(ctx context.Context, config map[string]any, actor string) (map[string]any, int, error) {
 	defer server.plannedRuntimeApply.Store(false)
 	defer server.plannedHotPolicyApply.Store(false)
-	normalizeXHTTPModeCompatibility(config)
+	normalizeConfigCompatibility(config)
 	check := validateCurrentConfig(config)
 	if !check.Valid {
 		return nil, http.StatusUnprocessableEntity, applyValidationError{result: check}

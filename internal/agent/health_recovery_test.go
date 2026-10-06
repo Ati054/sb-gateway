@@ -17,13 +17,11 @@ func TestConfirmedFailureProbesReserveWithoutBackupWait(t *testing.T) {
 				contract := pool.HealthPolicies["europe"]
 				contract.Mode = mode
 				contract.Policy.ActiveCheckSeconds = 60
-				contract.Policy.BackupCheckSeconds = 300
 				contract.Policy.ProbeBatchSize = batch
 				pool.HealthPolicies["europe"] = contract
 				item := newPolicyHealthState()
 				item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
 				item.CandidateSignature = "de\nnl"
-				item.NextFullScanAt, item.CooldownUntil = 2800, 9000
 				item.LastProbeAt["de"], item.LastProbeAt["nl"] = 940, 1000
 				// A reserve that recently failed is retried immediately. With no
 				// maintained alternative, a current usable response restores service.
@@ -48,10 +46,10 @@ func TestConfirmedFailureProbesReserveWithoutBackupWait(t *testing.T) {
 				if item.Selected != "nl" || item.LastSwitchReason != "active-unavailable" || !item.RuntimeConfirmed {
 					t.Fatalf("reserve not restored promptly: selected=%s reason=%s probes=%v", item.Selected, item.LastSwitchReason, runtime.probeCalls)
 				}
-				if item.CooldownUntil <= 1000 {
-					t.Fatalf("recovered reserve has no anti-flap cooldown: %.0f", item.CooldownUntil)
+				if item.Recoveries["de"] != 0 {
+					t.Fatal("failed previous active retained recovery qualification")
 				}
-				if runtime.speedCalls != 0 || controller.nextInterval() != activeLivenessInterval {
+				if controller.nextInterval() != activeLivenessInterval {
 					t.Fatal("outage download or continued fast polling")
 				}
 				if strings.Join(runtime.probeCalls, ",") != "de" || strings.Join(runtime.availabilityCalls, ",") != "de,de,nl" {
@@ -105,10 +103,11 @@ func TestFailedBackgroundProbeIsNotRepeatedDuringEmergency(t *testing.T) {
 	contract.Groups = append(contract.Groups, healthGroup{Selector: "country:FR", Members: []string{"fr"}})
 	contract.Nodes["fr"] = healthNode{Label: "France", Country: "FR"}
 	contract.Policy.ProbeBatchSize = 2
+	// Exercise the quality-batch handler after the first independent timeout.
+	// The second timeout confirms the outage with fixed safety thresholds.
 	runtime.pool.HealthPolicies["europe"] = contract
 	item.CandidateSignature = "de\nnl\nfr"
-	item.LastProbeAt["de"], item.LastProbeAt["nl"] = 1000, 500
-	item.AvailabilityFailures["de"] = 1
+	item.LastProbeAt["de"], item.LastProbeAt["nl"], item.LastProbeAt["fr"] = 940, 500, 1000
 	controller.regularNext["europe"] = time.Time{}
 	item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
 	item.Recoveries["nl"] = 3
@@ -117,11 +116,14 @@ func TestFailedBackgroundProbeIsNotRepeatedDuringEmergency(t *testing.T) {
 	runtime.probes["de"] = probeEvidence{Failure: probeFailureTimeout}
 	runtime.probes["nl"] = probeEvidence{Failure: probeFailureTimeout}
 	runtime.probes["fr"] = successfulEvidence(120)
-	if err := controller.Tick(time.Unix(1012, 0)); err != nil {
+	item.AvailabilityFailures["de"] = 1
+	controller.runtime = &observedQualityRuntime{runtime}
+	controller.beginProbeBudget(runtime.pool, []string{"europe"})
+	if err := controller.tickPolicy(time.Unix(1012, 0), "europe", contract, item); err != nil {
 		t.Fatal(err)
 	}
-	if item.Selected != "fr" || len(runtime.probeCalls) < 2 || strings.Join(runtime.probeCalls[len(runtime.probeCalls)-2:], ",") != "nl,de" ||
-		len(runtime.availabilityCalls) != 1 || runtime.availabilityCalls[0] != "fr" {
+	if item.Selected != "fr" || len(runtime.probeCalls) < 2 || strings.Join(runtime.probeCalls[len(runtime.probeCalls)-2:], ",") != "de,nl" ||
+		strings.Join(runtime.availabilityCalls, ",") != "fr" {
 		t.Fatalf("already failed reserve was retried: selected=%s full=%v availability=%v", item.Selected, runtime.probeCalls, runtime.availabilityCalls)
 	}
 }
@@ -236,10 +238,10 @@ func TestEmergencyParallelChoosesFirstFreshSuccess(t *testing.T) {
 func TestSingleFailureDoesNotSwitchAndRestoresNormalCadence(t *testing.T) {
 	pool := healthFixture(false)
 	contract := pool.HealthPolicies["europe"]
-	contract.Policy.ActiveCheckSeconds, contract.Policy.BackupCheckSeconds = 60, 300
+	contract.Policy.ActiveCheckSeconds = 60
 	pool.HealthPolicies["europe"] = contract
 	item := newPolicyHealthState()
-	item.Selected, item.CandidateSignature, item.NextFullScanAt = "de", "de\nnl", 2800
+	item.Selected, item.CandidateSignature = "de", "de\nnl"
 	item.LastProbeAt["nl"] = 1000
 	runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"}, probes: map[string]probeEvidence{"de": failedEvidence()}}
 	c := &healthController{opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime,
@@ -258,13 +260,10 @@ func TestSingleFailureDoesNotSwitchAndRestoresNormalCadence(t *testing.T) {
 
 func TestConfirmedFailureIsSuppressedWhenUnderlayDropsBeforeSwitch(t *testing.T) {
 	pool := healthFixture(false)
-	contract := pool.HealthPolicies["europe"]
-	contract.Policy.SwitchCooldownSeconds = 600
-	pool.HealthPolicies["europe"] = contract
 	item := newPolicyHealthState()
 	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
 	item.CandidateSignature = "de\nnl"
-	item.AvailabilityFailures["de"] = contract.Policy.FailureThreshold
+	item.AvailabilityFailures["de"] = healthFailureConfirmations
 	runtime := &fakeSelectorRuntime{
 		pool: pool, current: map[string]string{"europe": "de"},
 		probes:   map[string]probeEvidence{"de": failedEvidence(), "nl": successfulEvidence(90)},
@@ -283,9 +282,6 @@ func TestConfirmedFailureIsSuppressedWhenUnderlayDropsBeforeSwitch(t *testing.T)
 	if hasSelection(runtime.selections, "europe", "nl") {
 		t.Fatalf("underlay race selected reserve: %#v", runtime.selections)
 	}
-	if len(item.OutagePenalty) != 0 {
-		t.Fatalf("shared underlay outage penalized a node: %+v", item.OutagePenalty)
-	}
 }
 
 func TestRecoveredUnderlayRechecksActiveBeforeSwitching(t *testing.T) {
@@ -295,12 +291,12 @@ func TestRecoveredUnderlayRechecksActiveBeforeSwitching(t *testing.T) {
 	item := newPolicyHealthState()
 	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
 	item.CandidateSignature = "de\nnl"
-	item.AvailabilityFailures["de"] = contract.Policy.FailureThreshold
+	item.AvailabilityFailures["de"] = healthFailureConfirmations
 	item.UnderlayFailure = "wan"
 	item.UnderlayCheckedAt = time.Unix(995, 0).UTC().Format(time.RFC3339Nano)
 	item.AvailabilityOK = map[string]bool{"nl": true}
 	item.QualityOK = map[string]bool{"nl": true}
-	item.Recoveries["nl"] = contract.Policy.RecoveryThreshold
+	item.Recoveries["nl"] = healthRecoveryConfirmations
 	item.LastProbeAt["nl"] = 999
 	reserveDelay := 90
 	item.MedianDelayMS = map[string]*int{"nl": &reserveDelay}
@@ -341,7 +337,7 @@ func TestRecoveredUnderlayRequiresFreshFastLaneFailureBeforeSwitching(t *testing
 	item.QualityOK = map[string]bool{}
 	item.MedianDelayMS = map[string]*int{}
 	item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
-	item.Recoveries["nl"] = contract.Policy.RecoveryThreshold
+	item.Recoveries["nl"] = healthRecoveryConfirmations
 	item.LastProbeAt["nl"] = 999
 	reserveDelay := 90
 	item.MedianDelayMS["nl"] = &reserveDelay
@@ -365,17 +361,11 @@ func TestRecoveredUnderlayRequiresFreshFastLaneFailureBeforeSwitching(t *testing
 	if hasSelection(runtime.selections, "europe", "nl") {
 		t.Fatalf("first post-recovery failure selected reserve: %#v", runtime.selections)
 	}
-	if len(item.OutagePenalty) != 0 {
-		t.Fatalf("first post-recovery failure penalized a node: %+v", item.OutagePenalty)
-	}
 	if _, err := controller.checkActiveAvailability(time.Unix(1005, 0), "europe", contract, item, true); err != nil {
 		t.Fatal(err)
 	}
 	if item.Selected != "nl" || item.LastSwitchReason != "active-unavailable" {
 		t.Fatalf("confirmed endpoint failure did not switch: selected=%s reason=%s", item.Selected, item.LastSwitchReason)
-	}
-	if item.OutagePenalty["de"].Count != 1 {
-		t.Fatalf("confirmed endpoint outage not recorded: %+v", item.OutagePenalty["de"])
 	}
 }
 
@@ -394,13 +384,13 @@ func TestRecoveredUnderlayRequiresFreshQualityLoopFailureBeforeSwitching(t *test
 			item.UnderlayFailure = "wan"
 			item.UnderlayCheckedAt = time.Unix(995, 0).UTC().Format(time.RFC3339Nano)
 			item.AvailabilityOK["nl"], item.QualityOK["nl"] = true, true
-			item.Recoveries["nl"] = contract.Policy.RecoveryThreshold
+			item.Recoveries["nl"] = healthRecoveryConfirmations
 			item.LastProbeAt["nl"] = 999
 			reserveDelay := 90
 			item.MedianDelayMS["nl"] = &reserveDelay
 			runtime := &fakeSelectorRuntime{
 				pool: pool, current: map[string]string{"europe": "de"},
-				probes: map[string]probeEvidence{"de": {Failure: failure}, "nl": successfulEvidence(reserveDelay)},
+				probes:   map[string]probeEvidence{"de": {Failure: failure}, "nl": successfulEvidence(reserveDelay)},
 				underlay: underlayEvidence{Known: true, WANOK: true, DNSOK: true},
 			}
 			controller := &healthController{
@@ -445,7 +435,7 @@ func TestMassOutageRequiresCurrentReserveSuccessAndRecoversWithoutCooldown(t *te
 			desired, reason := selectDesired(
 				now, mode, "active", candidates,
 				map[string]int{"active": 0, "dead-a": 0, "flapping": 0, "dead-b": 1, "stable": 2}, nil,
-				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay}, nil,
+				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay},
 				map[string]probeEvidence{"dead-a": failedEvidence(), "flapping": successfulEvidence(flappingDelay), "dead-b": failedEvidence()},
 				quality, available, item, settings,
 			)
@@ -456,7 +446,7 @@ func TestMassOutageRequiresCurrentReserveSuccessAndRecoversWithoutCooldown(t *te
 			desired, reason = selectDesired(
 				now, mode, "active", candidates,
 				map[string]int{"active": 0, "dead-a": 0, "flapping": 0, "dead-b": 1, "stable": 2}, nil,
-				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay}, nil,
+				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay},
 				map[string]probeEvidence{"flapping": successfulEvidence(flappingDelay), "stable": successfulEvidence(stableDelay)},
 				quality, available, item, settings,
 			)
@@ -469,7 +459,7 @@ func TestMassOutageRequiresCurrentReserveSuccessAndRecoversWithoutCooldown(t *te
 			desired, reason = selectDesired(
 				now, mode, "active", candidates,
 				map[string]int{"active": 0, "dead-a": 0, "flapping": 0, "dead-b": 1, "stable": 2}, nil,
-				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay}, nil,
+				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay},
 				map[string]probeEvidence{"dead-a": failedEvidence(), "flapping": successfulEvidence(flappingDelay), "dead-b": failedEvidence(), "stable": failedEvidence()},
 				quality, available, item, settings,
 			)
@@ -481,7 +471,7 @@ func TestMassOutageRequiresCurrentReserveSuccessAndRecoversWithoutCooldown(t *te
 			desired, reason = selectDesired(
 				now, mode, "active", candidates,
 				map[string]int{"active": 0, "dead-a": 0, "flapping": 0, "dead-b": 1, "stable": 2}, nil,
-				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay}, nil,
+				map[string]*int{"active": &activeDelay, "flapping": &flappingDelay, "stable": &stableDelay},
 				map[string]probeEvidence{"dead-a": failedEvidence(), "flapping": failedEvidence(), "dead-b": failedEvidence(), "stable": failedEvidence()},
 				map[string]bool{}, available, item, settings,
 			)

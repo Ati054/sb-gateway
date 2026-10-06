@@ -28,7 +28,8 @@ func mustSubscriptionSourceRevision(subscription map[string]any) string {
 }
 
 // Called only under subscriptionMu -> configMu, the same order as refresh.
-// This never applies a draft; RouterOS changes are limited to owned loop-bypass hosts.
+// This never applies a draft. RouterOS changes cover owned loop-bypass hosts
+// and the existing planned-restart gate when probe listener geometry changes.
 func (server *Server) activatePendingSubscription(ctx context.Context) (bool, error) {
 	if server.runtime == nil {
 		return false, nil
@@ -97,7 +98,7 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 				return true, err
 			}
 		}
-		if _, err := server.runtime.activateSubscription(recovery, candidate); err != nil {
+		if _, _, err := server.activateSubscriptionCandidate(recovery, active, candidate); err != nil {
 			return true, err
 		}
 		if journal["endpoints_changed"] == true {
@@ -223,10 +224,23 @@ func (server *Server) installSubscriptionRuntime(ctx context.Context, active, me
 		return err
 	}
 	var receipt runtimeconfig.ActivationReceipt
+	coldRuntime := false
 	rollback := func(cause error) error {
-		recovery, cancel := context.WithTimeout(context.Background(), subscriptionRuntimeRollbackTimeout)
+		timeout := subscriptionRuntimeRollbackTimeout
+		native, isNative := server.runtime.(*nativeRuntime)
+		if isNative && (coldRuntime || native.subscriptionRestartPending.Load()) {
+			// Core readiness alone may take 210s for large GeoIP sets. Keep the
+			// previous shorter deadline for ordinary hot endpoint rollbacks.
+			timeout = subscriptionRuntimeActivationTimeout
+		}
+		recovery, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		rollbackErr := server.runtime.rollbackSubscription(recovery, receipt)
+		var rollbackErr error
+		if isNative {
+			rollbackErr = native.rollbackSubscriptionWithXrayRestartHook(recovery, receipt, server.subscriptionXrayRestartHook(active))
+		} else {
+			rollbackErr = server.runtime.rollbackSubscription(recovery, receipt)
+		}
 		if endpointsChanged {
 			rollbackErr = errors.Join(rollbackErr, server.syncSubscriptionEndpoints(recovery, active, previousEndpoints, true))
 		}
@@ -243,7 +257,7 @@ func (server *Server) installSubscriptionRuntime(ctx context.Context, active, me
 		}
 	}
 	stage = "runtime_activate"
-	receipt, err = server.runtime.activateSubscription(ctx, candidate)
+	receipt, coldRuntime, err = server.activateSubscriptionCandidate(ctx, active, candidate)
 	if err != nil {
 		return rollback(err)
 	}
@@ -275,6 +289,31 @@ func (server *Server) installSubscriptionRuntime(ctx context.Context, active, me
 		return err
 	}
 	return server.repository.saveAuxiliary("subscription-runtime-operation", map[string]any{})
+}
+
+func (server *Server) activateSubscriptionCandidate(ctx context.Context, active map[string]any, candidate runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, bool, error) {
+	if native, ok := server.runtime.(*nativeRuntime); ok {
+		cold := false
+		hook := server.subscriptionXrayRestartHook(active)
+		receipt, err := native.activateSubscriptionWithXrayRestartHook(ctx, candidate, func(ctx context.Context) error {
+			cold = true
+			return hook(ctx)
+		})
+		return receipt, cold, err
+	}
+	receipt, err := server.runtime.activateSubscription(ctx, candidate)
+	return receipt, false, err
+}
+
+func (server *Server) subscriptionXrayRestartHook(active map[string]any) func(context.Context) error {
+	return func(ctx context.Context) error {
+		client, _, err := server.newRouterOSRESTClient(active)
+		if err != nil {
+			return err
+		}
+		defer client.CloseIdleConnections()
+		return client.EnterPlannedApplyFailOpen(ctx)
+	}
 }
 
 func (server *Server) runSubscriptionEndpointSync(ctx context.Context, config map[string]any, values []string, prune bool) error {

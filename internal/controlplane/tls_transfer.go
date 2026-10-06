@@ -168,7 +168,10 @@ func (s *Server) collectTLSProfile(id string) (tlsTransferPayload, error) {
 	if err != nil {
 		return out, err
 	}
-	record := decodeACMERecord(state[id])
+	record, err := decodeACMERecord(state[id])
+	if err != nil {
+		return out, err
+	}
 	// A manual replacement must not inherit an old, unrelated ACME account.
 	if p["certificate_secret_ref"] == "tls-profiles/"+id+"/acme-bundle.pem" && record.CredentialsRef != "" {
 		if record.State == "queued" || record.State == "running" {

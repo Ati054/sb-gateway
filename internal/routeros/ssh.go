@@ -315,9 +315,6 @@ func readSCPAck(reader *bufio.Reader) error {
 	if code != 1 && code != 2 {
 		return errors.New("RouterOS SCP returned an invalid acknowledgement")
 	}
-	message, _ := reader.ReadString('\n')
-	if len(message) > 512 {
-		message = message[:512]
-	}
+	_, _ = reader.ReadString('\n')
 	return errors.New("RouterOS SCP rejected the managed import")
 }

@@ -1,55 +1,36 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestSingleProbeLaneRetriesMissingCandidateSpeed(t *testing.T) {
+func TestSingleProbeLaneRequiresTwoCompleteLatencyPairs(t *testing.T) {
 	controller, item, runtime := stagedOptimizationController(t)
 	contract := runtime.pool.HealthPolicies["europe"]
 	contract.Policy.ProbeBatchSize = 1
 	runtime.pool.HealthPolicies["europe"] = contract
-	delete(runtime.speeds, "reserve")
-
-	tick := func(at int64) {
-		t.Helper()
-		probes, downloads := len(runtime.probeCalls), len(runtime.throughputCalls)
+	for _, at := range []int64{1_060, 1_120, 1_180, 1_240} {
+		before := len(runtime.probeCalls)
 		if err := controller.Tick(time.Unix(at, 0)); err != nil {
 			t.Fatal(err)
 		}
-		if len(runtime.probeCalls)-probes > 1 || len(runtime.throughputCalls)-downloads > 1 {
+		if len(runtime.probeCalls)-before > 1 {
 			t.Fatalf("single-lane tick at %d exceeded its batch", at)
 		}
-	}
-	tick(1_060)
-	tick(1_120)
-	if item.Selected != "active" || item.OptimizationCandidate != "reserve" || item.OptimizationIncomplete != 1 ||
-		item.OptimizationNextAt != 1_240 || item.OptimizationRetryAfter != 0 ||
-		item.OptimizationLastResult == nil || item.OptimizationLastResult.Reason != "candidate-speed-missing" ||
-		item.OptimizationLastResult.CandidateSpeedBPS != nil {
-		t.Fatalf("missing candidate speed was treated as a measured loss: %+v", item.OptimizationLastResult)
-	}
-	if len(item.SpeedSamplesBPS["reserve"]) != 1 || item.SpeedSamplesBPS["reserve"][0] != 16_000 {
-		t.Fatal("failed download changed historical speed")
-	}
-
-	runtime.speeds["reserve"] = 16_000
-	for _, at := range []int64{1_240, 1_300, 1_360} {
-		tick(at)
-		if item.Selected != "active" {
-			t.Fatalf("incomplete confirmation switched at %d", at)
+		if at < 1_240 && item.Selected != "active" {
+			t.Fatalf("incomplete latency confirmation switched at %d", at)
 		}
 	}
-	tick(1_420)
 	if item.Selected != "reserve" || item.LastSwitchReason != "meaningfully-faster" {
 		t.Fatalf("two complete pairs did not select reserve: selected=%q reason=%q", item.Selected, item.LastSwitchReason)
 	}
 }
 
-func TestPlannedComparisonPreservesUnprobedScanCandidates(t *testing.T) {
+func TestOrdinaryRotationDoesNotStopForOptimization(t *testing.T) {
 	for _, batch := range []int{1, 2} {
 		t.Run(fmt.Sprint(batch), func(t *testing.T) {
 			controller, item, runtime := stagedOptimizationController(t)
@@ -62,103 +43,160 @@ func TestPlannedComparisonPreservesUnprobedScanCandidates(t *testing.T) {
 			}
 			runtime.pool.HealthPolicies["europe"] = contract
 			item.CandidateSignature = strings.Join(contract.Candidates, "\n")
-			item.ScanQueue = []string{"background1", "background2"}
-			item.ProbeLane = 3
-
-			if err := controller.Tick(time.Unix(1_060, 0)); err != nil {
-				t.Fatal(err)
-			}
-			if strings.Join(item.ScanQueue, ",") != "background1,background2" {
-				t.Fatalf("optimization discarded unprobed scan candidates: %v", item.ScanQueue)
-			}
-			if item.ProbeLane != 3 {
-				t.Fatalf("optimization advanced unused regular lanes: %d", item.ProbeLane)
-			}
-			if len(runtime.probeCalls) != batch || contains(runtime.probeCalls, "background1") || contains(runtime.probeCalls, "background2") {
-				t.Fatalf("optimization escaped its bounded pair: %v", runtime.probeCalls)
-			}
-
-			clearOptimizationCandidate(item)
-			item.CooldownUntil = 2_000
-			for _, at := range []int64{1_120, 1_180, 1_240, 1_300} {
+			for at := int64(1060); at < 1300; at += 3 {
+				before := len(runtime.probeCalls)
 				if err := controller.Tick(time.Unix(at, 0)); err != nil {
 					t.Fatal(err)
 				}
-			}
-			for _, candidate := range []string{"background1", "background2"} {
-				if item.LastProbeAt[candidate] == 0 {
-					t.Fatalf("%s waited for the next full scan", candidate)
+				if len(runtime.probeCalls)-before > batch {
+					t.Fatal("budget exceeded")
 				}
+			}
+			for _, candidate := range contract.Candidates {
+				if !contains(runtime.probeCalls, candidate) {
+					t.Fatalf("starved %s", candidate)
+				}
+			}
+			if item.Selected != "reserve" {
+				t.Fatal("ordinary rotation did not complete the confirmed improvement")
 			}
 		})
 	}
 }
 
-func TestPlannedComparisonReconsidersBetterFreshNomineeBeforeSwitch(t *testing.T) {
-	controller, item, runtime := stagedOptimizationController(t)
-	clearOptimizationCandidate(item)
-	contract := runtime.pool.HealthPolicies["europe"]
-	contract.Candidates = append(contract.Candidates, "better")
-	contract.Nodes["better"] = healthNode{Label: "Better"}
-	runtime.pool.HealthPolicies["europe"] = contract
-	item.CandidateSignature = strings.Join(contract.Candidates, "\n")
-	betterDelay := 400
-	item.Samples["better"] = []healthSample{{OK: true, DelayMS: &betterDelay}, {OK: true, DelayMS: &betterDelay}, {OK: true, DelayMS: &betterDelay}}
-	item.AvailabilityOK["better"], item.QualityOK["better"] = true, true
-	item.Recoveries["better"] = 3
-	item.LastProbeAt["better"], item.LastSpeedProbeAt["better"] = 1_000, 1_000
-	item.LastSpeedSuccessAt["better"] = 1_000
-	item.SpeedSamplesBPS["reserve"] = []int64{20_000_000}
-	item.SpeedSamplesBPS["active"] = []int64{12_000_000}
-	item.SpeedSamplesBPS["better"] = []int64{18_000_000}
-	runtime.speeds["active"], runtime.speeds["reserve"], runtime.speeds["better"] = 12_000_000, 15_000_000, 18_000_000
-	runtime.probes["reserve"], runtime.probes["better"] = successfulEvidence(520), successfulEvidence(betterDelay)
-
-	if err := controller.Tick(time.Unix(1_000, 0)); err != nil {
-		t.Fatal(err)
-	}
-	if item.OptimizationCandidate != "reserve" {
-		t.Fatalf("historical speed leader was not nominated: %q", item.OptimizationCandidate)
-	}
-	for _, at := range []int64{1_060, 1_120, 1_180, 1_240} {
-		probes, downloads := len(runtime.probeCalls), len(runtime.throughputCalls)
-		if err := controller.Tick(time.Unix(at, 0)); err != nil {
-			t.Fatal(err)
+func TestNewNomineeCannotInheritOrdinaryWins(t *testing.T) {
+	item := newPolicyHealthState()
+	item.OptimizationBaseline, item.OptimizationCandidate = "active", "reserve"
+	item.OptimizationChecks = 1
+	item.OptimizationLastResult = &optimizationComparison{At: time.Unix(1060, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	p := effectivePolicySettings{active: 60, improvement: 50}
+	for index, at := range []int64{1120, 1180} {
+		now := time.Unix(at, 0)
+		comparison := compareOptimization(now, "active", "better", map[string]probeEvidence{
+			"active": successfulEvidence(600), "better": successfulEvidence(400),
+		}, true, true, p)
+		desired, _ := gatePlannedOptimization(now, "active", "better", "meaningfully-faster", comparison, item, p)
+		if index == 0 && (desired != "active" || item.OptimizationChecks != 1) {
+			t.Fatal("inherited another nominee's win")
 		}
-		if len(runtime.probeCalls)-probes > 2 || len(runtime.throughputCalls)-downloads > 2 {
-			t.Fatalf("reconsideration exceeded the original paired batch at %d", at)
+		if index == 1 && desired != "better" {
+			t.Fatal("new nominee was not confirmed")
 		}
-		if hasSelection(runtime.selections, "europe", "reserve") {
-			t.Fatalf("selected intermediate reserve despite a better fresh nominee at %d: %v", at, runtime.selections)
-		}
-		if at == 1_120 && (item.Selected != "active" || item.OptimizationCandidate != "better" || item.OptimizationChecks != 0) {
-			t.Fatal("new nominee inherited confirmations or switched before its own comparison")
-		}
-		if at == 1_180 && (item.Selected != "active" || item.OptimizationChecks != 1) {
-			t.Fatal("new nominee did not wait for its second successful pair")
-		}
-	}
-	if item.Selected != "better" || len(runtime.selections) != 1 {
-		t.Fatalf("better reserve was not confirmed without an intermediate hop: %v", runtime.selections)
 	}
 }
 
-func TestMinorNomineeLeadDoesNotRestartConfirmedComparison(t *testing.T) {
+func TestRepeatedOrdinaryEvidenceIsNotAnotherWin(t *testing.T) {
 	item := newPolicyHealthState()
-	item.OptimizationCandidate, item.OptimizationBaseline = "reserve", "active"
-	item.OptimizationChecks = 1
-	activeDelay, reserveDelay, otherDelay := 600, 520, 500
-	activeSpeed, reserveSpeed, otherSpeed := int64(12_000_000), int64(15_000_000), int64(16_000_000)
-	comparison := &optimizationComparison{
-		Candidate: "reserve", Result: optimizationWin, Reason: "better",
-		ActiveDelayMS: &activeDelay, CandidateDelayMS: &reserveDelay,
-		ActiveSpeedBPS: &activeSpeed, CandidateSpeedBPS: &reserveSpeed,
+	p := effectivePolicySettings{active: 60}
+	now := time.Unix(1000, 0)
+	comparison := &optimizationComparison{At: now.UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	for repeat := 0; repeat < 3; repeat++ {
+		desired, _ := gatePlannedOptimization(now, "active", "reserve", "meaningfully-faster", comparison, item, p)
+		if desired != "active" || item.OptimizationChecks != 1 {
+			t.Fatal("cached evidence counted again")
+		}
 	}
-	settings := effectivePolicySettings{active: 60, cooldown: 600, improvement: 50, speedEnabled: true, speedImprovement: 25}
-	reconsiderPlannedOptimization("active", "other", "meaningfully-faster", comparison, item,
-		map[string]*int{"other": &otherDelay}, map[string]*int64{"other": &otherSpeed}, settings)
-	desired, reason := gatePlannedOptimization(time.Unix(1_120, 0), "active", "other", "meaningfully-faster", comparison, item, settings)
-	if desired != "reserve" || reason != "meaningfully-faster" {
-		t.Fatalf("minor lead restarted a confirmed comparison: %q %q", desired, reason)
+}
+
+func TestLatencyOnlyComparisonRequiresFreshPairAndHysteresis(t *testing.T) {
+	p := effectivePolicySettings{improvement: 50}
+	for _, sample := range []struct {
+		name                 string
+		active, candidate    int
+		missing, unavailable bool
+		want                 string
+	}{
+		{name: "below-hysteresis", active: 500, candidate: 451, want: optimizationLoss},
+		{name: "at-hysteresis", active: 500, candidate: 450, want: optimizationLoss},
+		{name: "above-hysteresis", active: 500, candidate: 449, want: optimizationWin},
+		{name: "slow-successful-candidate-still-improves", active: 2300, candidate: 2100, want: optimizationWin},
+		{name: "missing-current-pair", active: 500, candidate: 100, missing: true, want: optimizationInconclusive},
+		{name: "unavailable-reserve", active: 500, candidate: 100, unavailable: true, want: optimizationLoss},
+		{name: "invalid-latency", active: 500, candidate: 0, want: optimizationLoss},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			measured := map[string]probeEvidence{"active": successfulEvidence(sample.active), "reserve": successfulEvidence(sample.candidate)}
+			if sample.missing {
+				delete(measured, "active")
+			}
+			comparison := compareOptimization(time.Unix(1000, 0), "active", "reserve", measured, true, !sample.unavailable, p)
+			if comparison.Result != sample.want {
+				t.Fatalf("comparison = %+v, want %s", comparison, sample.want)
+			}
+		})
+	}
+	p.improvement = 0
+	if freshOptimizationWin("active", "reserve", map[string]probeEvidence{
+		"active": successfulEvidence(500), "reserve": successfulEvidence(500),
+	}, p) {
+		t.Fatal("zero hysteresis must not turn equal latency into a switch")
+	}
+}
+
+func TestLosingOrdinaryComparisonHasNoPenalty(t *testing.T) {
+	item := newPolicyHealthState()
+	p := effectivePolicySettings{active: 60, improvement: 50}
+	for _, at := range []int64{1000, 1120, 1240} {
+		item.OptimizationBaseline, item.OptimizationCandidate, item.OptimizationChecks = "active", "reserve", 1
+		comparison := &optimizationComparison{Candidate: "reserve", Result: optimizationLoss, Reason: "not-better"}
+		desired, _ := gatePlannedOptimization(time.Unix(at, 0), "active", "reserve", "meaningfully-faster", comparison, item, p)
+		if desired != "active" || item.OptimizationCandidate != "" {
+			t.Fatal("loss retained confirmation or created penalty")
+		}
+	}
+}
+
+func TestLatencyPendingPairSurvivesDeferralButNotBaselineChange(t *testing.T) {
+	p := effectivePolicySettings{active: 60, improvement: 50}
+	for _, condition := range []string{"deferred", "legacy-cooldown", "baseline-changed"} {
+		t.Run(condition, func(t *testing.T) {
+			item := newPolicyHealthState()
+			if condition == "legacy-cooldown" {
+				if err := json.Unmarshal([]byte(`{"cooldown_until":1600}`), item); err != nil {
+					t.Fatal(err)
+				}
+			}
+			item.OptimizationBaseline, item.OptimizationCandidate, item.OptimizationChecks = "active", "reserve", 1
+			item.OptimizationLastResult = &optimizationComparison{At: time.Unix(940, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+			if condition == "baseline-changed" {
+				item.OptimizationBaseline = "old-active"
+			}
+			desired, reason := gatePlannedOptimization(time.Unix(1000, 0), "active", "active", "", nil, item, p)
+			if desired != "active" || reason != "" {
+				t.Fatal("deferred or invalidated pair moved traffic")
+			}
+			if condition != "baseline-changed" && (item.OptimizationCandidate != "reserve" || item.OptimizationChecks != 1) {
+				t.Fatal("budget deferral erased a completed confirmation")
+			}
+			if condition == "baseline-changed" && item.OptimizationCandidate != "" {
+				t.Fatal("invalidated pending comparison survived")
+			}
+		})
+	}
+}
+
+func TestLegacyPenaltyStateDoesNotHoldRecoveredPriorityCandidate(t *testing.T) {
+	item := newPolicyHealthState()
+	if err := json.Unmarshal([]byte(`{"cooldown_until":999999,"outage_penalty":{"primary":{"last_at":999,"count":3,"until":999999,"open":true}},"speed_probation":{"primary":{"until":999999,"count":2}}}`), item); err != nil {
+		t.Fatal(err)
+	}
+	ensureHealthMaps(item)
+	now := time.Unix(1000, 0)
+	primaryDelay, backupDelay := 600, 100
+	item.LastProbeAt["primary"], item.LastGoodAt["primary"], item.Recoveries["primary"] = 1000, 1000, 3
+	item.Samples["primary"] = []healthSample{{At: 1000, OK: true, DelayMS: &primaryDelay}}
+	desired, reason := selectDesired(now, "priority", "backup", []string{"primary", "backup"},
+		map[string]int{"primary": 0, "backup": 1}, nil, map[string]*int{"primary": &primaryDelay, "backup": &backupDelay},
+		nil, map[string]bool{"primary": true}, map[string]bool{"primary": true, "backup": true}, item,
+		effectivePolicySettings{active: 60, backup: 300, failureThreshold: 3, recoveryThreshold: 3})
+	if desired != "primary" || reason != "higher-priority-recovered" {
+		t.Fatalf("legacy penalty or faster backup blocked recovered priority: %q %q", desired, reason)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "outage_penalty") || strings.Contains(string(encoded), "speed_probation") || strings.Contains(string(encoded), "cooldown_until") {
+		t.Fatal("obsolete penalties survived state serialization")
 	}
 }
