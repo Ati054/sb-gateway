@@ -328,14 +328,13 @@ func TestXrayStartupUsesBlockWhenPolicyHasOnlyReverseClients(t *testing.T) {
 	}
 }
 
-func TestHealthRestartKeepsRestoredLeafAndCooldown(t *testing.T) {
+func TestHealthRestartKeepsRestoredLeafUntilFreshQualification(t *testing.T) {
 	for _, mode := range []string{"best", "priority"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			now := time.Unix(1000, 0)
 			item := newPolicyHealthState()
 			item.Selected, item.RuntimeSelected, item.Mode, item.RuntimeConfirmed = "nl", "nl", mode, true
-			item.CooldownUntil = 1500
 			item.CandidateSignature = "de\nnl"
 			if err := writeJSONAtomic(statePath(root, "selector-health"), healthState{"europe": item}); err != nil {
 				t.Fatal(err)
@@ -351,9 +350,12 @@ func TestHealthRestartKeepsRestoredLeafAndCooldown(t *testing.T) {
 				if err := controller.Tick(now.Add(time.Duration(tick) * time.Second)); err != nil {
 					t.Fatal(err)
 				}
+				if tick < 2 && hasSelection(runtime.selections, "europe", "de") {
+					t.Fatalf("warm restart replaced the saved leaf before fresh recovery: %+v", runtime.selections)
+				}
 			}
-			if hasSelection(runtime.selections, "europe", "de") || controller.state["europe"].CooldownUntil != 1500 {
-				t.Fatalf("warm restart lost selection/cooldown: %+v", runtime.selections)
+			if !hasSelection(runtime.selections, "europe", "de") || controller.state["europe"].Selected != "de" {
+				t.Fatalf("warm restart blocked fresh qualified improvement: %+v", runtime.selections)
 			}
 		})
 	}
@@ -366,7 +368,6 @@ func TestHealthRestartConfirmsTransientFatalNetworkBeforeFailover(t *testing.T) 
 	contract := pool.HealthPolicies["europe"]
 	contract.Mode = "best"
 	contract.Policy.ActiveCheckSeconds = 60
-	contract.Policy.BackupCheckSeconds = 300
 	pool.HealthPolicies["europe"] = contract
 
 	item := newPolicyHealthState()

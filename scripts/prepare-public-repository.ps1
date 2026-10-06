@@ -10,8 +10,8 @@ Set-StrictMode -Version Latest
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $package = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "package.json") | ConvertFrom-Json
 $version = [string]$package.version
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw "package.json does not contain a stable release version."
+if ($version -notmatch '^\d+\.\d+\.\d+(?:-rc\.[1-9][0-9]*)?$') {
+    throw "package.json must contain a stable or numbered RC version."
 }
 
 Push-Location -LiteralPath $projectRoot

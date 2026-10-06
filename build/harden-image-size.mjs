@@ -19,7 +19,7 @@ export const targets = [
     ],
   },
   {
-    package: "next", version: "16.3.4",
+    package: "next", version: "16.3.8",
     file: "node_modules/next/dist/compiled/image-size/index.js",
     original: "1d4f421eb59637a19ffe1acda0b34c670b9ceece24777b09433f48110795052d",
     patched: "fd6ead7c2137438caa4faf2a6a9ba1ffbcd928980ea863370473a498095580f0",

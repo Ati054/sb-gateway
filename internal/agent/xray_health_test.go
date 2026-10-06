@@ -1,12 +1,10 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,54 +31,6 @@ func TestClassifyProbeErrorSeparatesFailoverDecisions(t *testing.T) {
 		if got := classifyProbeError(errors.New(test.message)); got != test.want {
 			t.Fatalf("classify %q = %q, want %q", test.message, got, test.want)
 		}
-	}
-}
-
-func TestThroughputWindowAcceptsOnlyOwnTimedPartialDownload(t *testing.T) {
-	const limit = 2 * 1024 * 1024
-	for _, test := range []struct {
-		name     string
-		bytes    int
-		probeErr error
-		cause    error
-		wantBPS  int64
-		wantErr  error
-	}{
-		{"complete", limit, nil, nil, 2 * limit * 8, nil},
-		{"own deadline after minimum", 256 * 1024, context.DeadlineExceeded, errSpeedWindowComplete, 2 * 256 * 1024 * 8, errSpeedWindowComplete},
-		{"too little at own deadline", 256*1024 - 1, context.DeadlineExceeded, errSpeedWindowComplete, 0, context.DeadlineExceeded},
-		{"parent deadline", 256 * 1024, context.DeadlineExceeded, context.DeadlineExceeded, 0, context.DeadlineExceeded},
-		{"reset at own deadline", 256 * 1024, errors.New("connection reset"), errSpeedWindowComplete, 0, nil},
-		{"unexpected EOF", 256 * 1024, io.ErrUnexpectedEOF, nil, 0, io.ErrUnexpectedEOF},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := finishThroughputProbe(test.bytes, 500*time.Millisecond, limit, test.probeErr, test.cause)
-			if got != test.wantBPS {
-				t.Fatalf("speed = %d, want %d", got, test.wantBPS)
-			}
-			if test.name == "reset at own deadline" {
-				if err == nil || err.Error() != "connection reset" {
-					t.Fatalf("reset error = %v", err)
-				}
-			} else if !errors.Is(err, test.wantErr) || (test.wantErr == nil && err != nil) {
-				t.Fatalf("error = %v, want %v", err, test.wantErr)
-			}
-		})
-	}
-}
-
-func TestThroughputWindowMeasuresValidPartialHTTPDownload(t *testing.T) {
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(bytes.Repeat([]byte{'x'}, 256*1024))
-		w.(http.Flusher).Flush()
-		time.Sleep(200 * time.Millisecond)
-	}))
-	defer proxy.Close()
-	speed, err := measureThroughputOverProxy(context.Background(), proxy.URL,
-		"http://speed.invalid/__down?bytes=2097152", 2*1024*1024, 80*time.Millisecond)
-	if !errors.Is(err, errSpeedWindowComplete) || speed <= 0 {
-		t.Fatalf("partial HTTP 200 probe = (%d, %v), want a time-limited speed", speed, err)
 	}
 }
 

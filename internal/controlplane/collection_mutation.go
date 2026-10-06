@@ -241,7 +241,7 @@ func (server *Server) mutableCollection(response http.ResponseWriter, request *h
 }
 
 func (server *Server) commitEntityMutation(response http.ResponseWriter, request *http.Request, payload, config map[string]any, collection, entityID, action string, item map[string]any, secrets []pendingEntitySecret) {
-	normalizeXHTTPModeCompatibility(config)
+	normalizeConfigCompatibility(config)
 	objectAt(config, "system")["deployment_ready"] = false
 	validation := validateCurrentConfig(config)
 	if !validation.Valid {

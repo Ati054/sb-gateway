@@ -176,7 +176,7 @@ func TestACMEDNSRenewalFailureAndEncryptedTransfer(t *testing.T) {
 	}
 	_ = json.Unmarshal(r.Body.Bytes(), &result)
 	state, _ := target.repository.auxiliary("acme")
-	record := decodeACMERecord(state[result.ID])
+	record := mustDecodeACMERecord(t, state[result.ID])
 	if record.Settings.Enabled || record.State != "disabled" || record.Settings.ACMEDNSServer != settings.ACMEDNSServer || record.Settings.Provider != "acmedns" || record.Settings.PropagationTimeoutMinutes != settings.PropagationTimeoutMinutes {
 		t.Fatal("transfer configuration changed or activated")
 	}
@@ -219,7 +219,7 @@ func TestACMEDNSRenewalFailureAndEncryptedTransfer(t *testing.T) {
 	_ = s.processOneACME(context.Background())
 	retained, _ := s.secrets.read(ref, true)
 	state, _ = s.repository.auxiliary("acme")
-	record = decodeACMERecord(state["cdn-default"])
+	record = mustDecodeACMERecord(t, state["cdn-default"])
 	if failures != 1 || retained != second || !strings.HasPrefix(record.Message, acmejob.ErrDelegation.Error()) || !record.NextAttempt.After(now) {
 		t.Fatal("CNAME failure did not preserve certificate/backoff")
 	}

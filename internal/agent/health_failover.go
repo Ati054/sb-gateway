@@ -31,6 +31,10 @@ type emergencyAvailabilityRuntime interface {
 	ProbeEmergencyAvailabilityParallel([]string, func(string, probeEvidence) bool) map[string]probeEvidence
 }
 
+type emergencyCandidateRuntime interface {
+	ProbeEmergencyAvailability(string) probeEvidence
+}
+
 func failureConfirmationThreshold(evidence probeEvidence, configured int) int {
 	switch evidence.Failure {
 	case probeFailureFatal, probeFailureTLS:
@@ -106,11 +110,7 @@ func knownFreshReserve(now time.Time, selected string, candidates []string, mode
 	if len(fresh) == 0 {
 		return ""
 	}
-	speeds := item.SpeedMedianBPS
-	if !p.speedEnabled {
-		speeds = nil
-	}
-	return rankCandidates(fresh, mode, groups, item.DailyStats, item.MedianDelayMS, speeds)[0]
+	return rankCandidates(fresh, mode, groups, item.DailyStats, item.MedianDelayMS)[0]
 }
 
 // A cached reserve gets the first emergency slot, but must pass a current
@@ -132,13 +132,14 @@ func prioritizeEmergencyReserve(targets []string, reserve string, closed map[str
 	return result
 }
 
-func (controller *healthController) probeEmergencyCandidates(policyID string, candidates []string, p effectivePolicySettings) (map[string]probeEvidence, string, error) {
+func (controller *healthController) probeEmergencyCandidates(policyID string, candidates []string, p effectivePolicySettings) (observations map[string]probeEvidence, chosen string, probeErr error) {
+	trace := beginHealthStage("emergency_batch", "controller", policyID, "")
+	defer func() { trace.finish(probeErr == nil && chosen != "") }()
 	measured := make(map[string]probeEvidence, len(candidates))
 	selected := ""
 	var selectErr error
 	accept := func(candidate string, evidence probeEvidence) bool {
-		if selected != "" || selectErr != nil || !evidence.OK ||
-			(p.maxLatency > 0 && (evidence.DelayMS == nil || *evidence.DelayMS > p.maxLatency)) {
+		if selected != "" || selectErr != nil || !evidence.OK {
 			return false
 		}
 		if err := controller.runtime.Select(policyID, candidate); err != nil {
@@ -148,7 +149,7 @@ func (controller *healthController) probeEmergencyCandidates(policyID string, ca
 		selected = candidate
 		return true
 	}
-	if urgent, ok := controller.runtime.(emergencyAvailabilityRuntime); ok && len(candidates) > 1 {
+	if urgent, ok := controller.runtime.(emergencyAvailabilityRuntime); ok && len(candidates) > 0 {
 		measured = urgent.ProbeEmergencyAvailabilityParallel(candidates, accept)
 	} else if parallel, ok := controller.runtime.(parallelAvailabilityRuntime); ok && len(candidates) > 1 {
 		measured = parallel.ProbeAvailabilityParallel(candidates, accept)

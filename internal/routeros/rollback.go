@@ -18,6 +18,8 @@ var rollbackSchedulerNamePattern = regexp.MustCompile(`^SB-GATEWAY-safe-rollback
 
 var ErrRollbackGuardPending = errors.New("previous RouterOS rollback guard remains armed")
 
+var ErrRollbackGuardUnconfirmed = errors.New("RouterOS rollback guard creation was not confirmed")
+
 type RollbackOptions struct {
 	Delay          time.Duration
 	ResumeWatchdog bool
@@ -88,6 +90,9 @@ func (client *Client) ArmRollback(ctx context.Context, scriptName string, option
 		"disabled":   "false",
 	})
 	if err != nil {
+		if !DefinitiveRequestRejection(err) {
+			return "", errors.Join(ErrRollbackGuardUnconfirmed, err)
+		}
 		return "", err
 	}
 	return name, nil

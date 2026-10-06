@@ -7,11 +7,20 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Remove-ExportPath([string]$Path, [string]$AllowedRoot) {
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetFullPath($AllowedRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+    if (-not $resolved.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove a path outside the source export directory."
+    }
+    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+}
+
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $package = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "package.json") | ConvertFrom-Json
 $version = [string]$package.version
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw "package.json does not contain a stable release version."
+if ($version -notmatch '^\d+\.\d+\.\d+(?:-rc\.[1-9][0-9]*)?$') {
+    throw "package.json must contain a stable or numbered RC version."
 }
 
 $releaseDocument = Join-Path $projectRoot "docs/releases/$version.md"
@@ -36,8 +45,8 @@ try {
     New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
     if ((Test-Path -LiteralPath $sourceRoot) -or (Test-Path -LiteralPath $archivePath)) {
         if (-not $Force) { throw "Public source output already exists; use -Force to replace it." }
-        if (Test-Path -LiteralPath $sourceRoot) { Remove-Item -LiteralPath $sourceRoot -Recurse -Force }
-        if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
+        Remove-ExportPath $sourceRoot $outputRoot
+        Remove-ExportPath $archivePath $outputRoot
     }
 
     $temporaryArchive = Join-Path $outputRoot ".sb-gateway-$version-source.tmp.zip"
@@ -60,7 +69,7 @@ try {
     if ($start -lt 0) { throw "CHANGELOG.md is missing release $version." }
     $end = $changelogLines.Count
     for ($index = $start + 1; $index -lt $changelogLines.Count; $index++) {
-        if ($changelogLines[$index] -match '^## \d+\.\d+\.\d+$') {
+        if ($changelogLines[$index] -match '^## \d+\.\d+\.\d+(?:-rc\.[1-9][0-9]*)?$') {
             $end = $index
             break
         }
@@ -79,12 +88,13 @@ try {
     $forbiddenRoots = @(
         '.agents', '.codex', '.lab', '.openai', 'AGENTS.md', 'CODEX_HANDOFF.md',
         'IMPLEMENTATION_REPORT.md', 'QUATTRO_SERVERS_AUDIT.md',
-        'docs/ACCEPTANCE-TESTS.md', 'docs/research', 'templates/xray.smoke.json'
+        'docs/ACCEPTANCE-TESTS.md', 'docs/RC3-CHR-VERIFICATION.md',
+        'docs/RC4-CHR-VERIFICATION.md', 'docs/research', 'templates/xray.smoke.json'
     )
     foreach ($relative in $forbiddenRoots) {
         $target = Join-Path $sourceRoot $relative
         if (Test-Path -LiteralPath $target) {
-            Remove-Item -LiteralPath $target -Recurse -Force
+            Remove-ExportPath $target $sourceRoot
         }
     }
     foreach ($relative in @(

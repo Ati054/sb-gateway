@@ -32,7 +32,8 @@ func TestBuildXrayRouteSourceBuildsOrderedManagedRoutes(t *testing.T) {
 		{"tag": "outbound-health-background-2"}, {"tag": "outbound-health-background-3"},
 	}
 	route, err := BuildXrayRouteSource(config, []map[string]any{
-		{"server": "edge.example"}, {"server": "203.0.113.7"},
+		{"id": "domain-node", "server": "edge.example"}, {"id": "ip-node", "server": "203.0.113.7"},
+		{"id": "third-node", "server": "reserve.example"},
 	}, outbounds)
 	if err != nil {
 		t.Fatal(err)

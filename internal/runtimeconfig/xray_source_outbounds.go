@@ -151,7 +151,7 @@ func BuildXrayOutboundSource(config map[string]any, nodes []map[string]any, read
 		selected := stablePolicySelectorMembers(allowed, "block", tag)
 		result = append(result, map[string]any{
 			"type": "selector", "tag": tag, "outbounds": selected,
-			"interrupt_exist_connections": boolDefault(policy["interrupt_exist_connections"], false),
+			"interrupt_exist_connections": false,
 		})
 		if textValue(policy["mode"]) != "priority" {
 			continue
@@ -175,7 +175,7 @@ func BuildXrayOutboundSource(config map[string]any, nodes []map[string]any, read
 	}
 	health := sortedNodeTags(nodeTags, refreshOnly, map[string]struct{}{"block": {}, "direct-wan": {}})
 	if len(health) != 0 {
-		for _, lane := range xrayHealthProbeLanesForConfig(config) {
+		for _, lane := range xrayHealthProbeLanesForConfig(config, healthProbeInventoryCount(nodes)) {
 			result = append(result, map[string]any{
 				"type": "selector", "tag": lane.Tag, "outbounds": health, "interrupt_exist_connections": false,
 			})

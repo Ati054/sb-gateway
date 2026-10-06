@@ -13,9 +13,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
@@ -99,12 +101,13 @@ func RuntimeOptionsFromEnvironment() RuntimeOptions {
 }
 
 type nativeRuntime struct {
-	options      RuntimeOptions
-	store        *runtimeconfig.CandidateStore
-	secrets      *secretStore
-	controller   RuntimeController
-	validate     func(context.Context, runtimeconfig.RuntimeCandidate, []string) error
-	nginxCommand func(context.Context, ...string) error
+	options                    RuntimeOptions
+	store                      *runtimeconfig.CandidateStore
+	secrets                    *secretStore
+	controller                 RuntimeController
+	validate                   func(context.Context, runtimeconfig.RuntimeCandidate, []string) error
+	nginxCommand               func(context.Context, ...string) error
+	subscriptionRestartPending atomic.Bool
 }
 
 func newNativeRuntime(options RuntimeOptions, secrets *secretStore, controller RuntimeController) (*nativeRuntime, error) {
@@ -271,14 +274,47 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 	return receipt, nil
 }
 
-// activateSubscription publishes a fully validated provider generation without
-// restarting the shared Xray process. The health worker adds versioned outbound
-// handlers first and confirms every selector against the new pool generation.
+// Endpoint-only updates remain hot. Changed probe listeners require a guarded
+// core restart before the new health pool can use them.
 func (runtime *nativeRuntime) activateSubscription(ctx context.Context, candidate runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, error) {
+	return runtime.activateSubscriptionWithXrayRestartHook(ctx, candidate, nil)
+}
+
+func (runtime *nativeRuntime) activateSubscriptionWithXrayRestartHook(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart func(context.Context) error) (runtimeconfig.ActivationReceipt, error) {
 	var policyScope hotRuntimeScope
+	restartCore := runtime.subscriptionRestartPending.Load()
+	releaseGuard := func() {}
+	defer func() { releaseGuard() }()
+	armRestart := func() error {
+		var err error
+		releaseGuard, err = runtime.beginApplyGuard()
+		if err != nil {
+			releaseGuard = func() {}
+			return err
+		}
+		runtime.subscriptionRestartPending.Store(true)
+		return nil
+	}
+	if restartCore {
+		if err := armRestart(); err != nil {
+			return runtimeconfig.ActivationReceipt{}, err
+		}
+	}
 	receipt, err := runtime.store.ActivateAfter(candidate, func(changed []string) error {
 		if err := runtime.validate(ctx, candidate, changed); err != nil {
 			return err
+		}
+		if !restartCore && containsRuntimeArtifact(changed, "xray.json") {
+			var err error
+			restartCore, err = subscriptionProbeGeometryChanged(runtime.options.XrayConfig, candidate.Files["xray.json"])
+			if err != nil {
+				return err
+			}
+			if restartCore {
+				if err := armRestart(); err != nil {
+					return err
+				}
+			}
 		}
 		if containsRuntimeArtifact(changed, "urltest-pool.json") {
 			var err error
@@ -291,6 +327,9 @@ func (runtime *nativeRuntime) activateSubscription(ctx context.Context, candidat
 		return runtimeconfig.ActivationReceipt{}, err
 	}
 	changed := receipt.Changed()
+	if restartCore {
+		return receipt, runtime.restartSubscriptionCore(ctx, changed, beforeXrayRestart)
+	}
 	if !containsRuntimeArtifact(changed, "xray.json") && !containsRuntimeArtifact(changed, "urltest-pool.json") {
 		return receipt, runtime.restartChangedWithoutXray(ctx, changed)
 	}
@@ -331,9 +370,57 @@ func (runtime *nativeRuntime) restartChangedWithoutXray(ctx context.Context, cha
 }
 
 func (runtime *nativeRuntime) rollbackSubscription(ctx context.Context, receipt runtimeconfig.ActivationReceipt) error {
-	policyScope, err := runtime.restoreHotPolicyScope(receipt)
+	return runtime.rollbackSubscriptionWithXrayRestartHook(ctx, receipt, nil)
+}
+
+func (runtime *nativeRuntime) rollbackSubscriptionWithXrayRestartHook(ctx context.Context, receipt runtimeconfig.ActivationReceipt, beforeXrayRestart func(context.Context) error) error {
+	var policyScope hotRuntimeScope
+	restartCore := runtime.subscriptionRestartPending.Load()
+	releaseGuard := func() {}
+	defer func() { releaseGuard() }()
+	armRestart := func() error {
+		var err error
+		releaseGuard, err = runtime.beginApplyGuard()
+		if err != nil {
+			releaseGuard = func() {}
+			return err
+		}
+		runtime.subscriptionRestartPending.Store(true)
+		return nil
+	}
+	if restartCore {
+		if err := armRestart(); err != nil {
+			return err
+		}
+	}
+	var err error
+	if len(receipt.Changed()) > 0 {
+		err = runtime.store.RollbackAfter(receipt, func(restoring map[string]string) error {
+			if path, changed := restoring["xray.json"]; changed && !restartCore {
+				var err error
+				restartCore, err = subscriptionProbeGeometryChanged(runtime.options.XrayConfig, path)
+				if err != nil {
+					return err
+				}
+				if restartCore {
+					if err := armRestart(); err != nil {
+						return err
+					}
+				}
+			}
+			if path := restoring["urltest-pool.json"]; path != "" {
+				var err error
+				policyScope, err = hotPolicyScope(runtime.options.XrayHealthPool, path)
+				return err
+			}
+			return nil
+		})
+	}
 	if err != nil {
 		return err
+	}
+	if restartCore {
+		return runtime.restartSubscriptionCore(ctx, receipt.Changed(), beforeXrayRestart)
 	}
 	if err := runtime.restartChangedWithoutXray(ctx, receipt.Changed()); err != nil {
 		return err
@@ -342,6 +429,87 @@ func (runtime *nativeRuntime) rollbackSubscription(ctx context.Context, receipt 
 		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
 	}
 	return nil
+}
+
+// Keep the restart obligation across failed activation or rollback, including
+// retries whose files already match. A fresh appliance starts from disk.
+func (runtime *nativeRuntime) restartSubscriptionCore(ctx context.Context, changed []string, beforeXrayRestart func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	programs := runtime.restartOrder(changed)
+	if !containsRuntimeArtifact(programs, "xray") {
+		programs = append([]string{"xray"}, programs...)
+	}
+	if err := runtime.markXrayPrevalidated(runtime.options.XrayConfig); err != nil {
+		log.Printf("runtime subscription Xray prevalidation marker: %v", err)
+	}
+	if beforeXrayRestart != nil {
+		if err := beforeXrayRestart(ctx); err != nil {
+			return fmt.Errorf("prepare subscription Xray restart on RouterOS: %w", err)
+		}
+	}
+	if err := runtime.controller.Restart(ctx, programs); err != nil {
+		return fmt.Errorf("restart subscription runtime: %w", err)
+	}
+	probeContext, cancel := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
+	defer cancel()
+	if err := runtime.controller.Probe(probeContext, programs); err != nil {
+		return fmt.Errorf("probe subscription runtime: %w", err)
+	}
+	runtime.subscriptionRestartPending.Store(false)
+	return nil
+}
+
+func subscriptionProbeGeometryChanged(previous, target string) (bool, error) {
+	read := func(path string) (map[string]any, error) {
+		body, err := readRuntimeMigrationArtifact(path)
+		if err != nil || len(body) == 0 {
+			return nil, err
+		}
+		var config map[string]any
+		if err := json.Unmarshal(body, &config); err != nil {
+			return nil, fmt.Errorf("decode subscription probe geometry: %w", err)
+		}
+		managed := func(tag string) bool {
+			return tag == "outbound-health-probe" || strings.HasPrefix(tag, "outbound-health-background")
+		}
+		inbounds, balancers := map[string]any{}, map[string]any{}
+		for _, inbound := range objects(config["inbounds"]) {
+			if tag := text(inbound["tag"]); managed(tag) {
+				if _, duplicate := inbounds[tag]; duplicate {
+					return nil, errors.New("duplicate subscription probe inbound")
+				}
+				inbounds[tag] = inbound
+			}
+		}
+		routing := objectAt(config, "routing")
+		for _, balancer := range objects(routing["balancers"]) {
+			if tag := text(balancer["tag"]); managed(tag) {
+				balancers[tag] = balancer
+			}
+		}
+		rules := []any{}
+		for _, rule := range objects(routing["rules"]) {
+			tags := []any{}
+			for _, raw := range collectionArray(rule["inboundTag"]) {
+				if tag := text(raw); managed(tag) {
+					tags = append(tags, tag)
+				}
+			}
+			if len(tags) > 0 {
+				rule["inboundTag"] = tags
+				rules = append(rules, rule)
+			}
+		}
+		return map[string]any{"inbounds": inbounds, "balancers": balancers, "rules": rules}, nil
+	}
+	before, err := read(previous)
+	if err != nil {
+		return false, err
+	}
+	after, err := read(target)
+	return !reflect.DeepEqual(before, after), err
 }
 
 func (runtime *nativeRuntime) restoreHotPolicyScope(receipt runtimeconfig.ActivationReceipt) (hotRuntimeScope, error) {

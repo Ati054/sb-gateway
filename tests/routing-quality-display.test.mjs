@@ -7,7 +7,7 @@ import { normalizeLocalizedSource } from "./source-localization.mjs";
 const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
 const routing = page.slice(page.indexOf("function Routing("), page.indexOf("function Connections("));
 
-test("quality table follows configured priority or URLTest quality ranking", async () => {
+test("quality table follows configured priority or visible URLTest median ranking", async () => {
   const helper = await readFile(new URL("../app/node-quality.ts", import.meta.url), "utf8");
   assert.match(routing, /const quality = qualitySheet\(policyRows, qualityPolicyId\)/);
   assert.match(routing, /quality\.rows\.map\(\(node\) =>/);
@@ -15,11 +15,12 @@ test("quality table follows configured priority or URLTest quality ranking", asy
   assert.match(helper, /rows: rows\.slice\(0, 10\)/);
   assert.match(helper, /policy\?\.mode === "priority"/);
   assert.match(helper, /priorityPositions\.get\(left\.id\)/);
-  assert.match(helper, /if \(left\.inRuntimePool !== right\.inRuntimePool\) return left\.inRuntimePool \? -1 : 1/);
+  assert.doesNotMatch(helper, /if \(left\.inRuntimePool !== right\.inRuntimePool\)/);
   assert.match(helper, /if \(left\.quality !== right\.quality\) return left\.quality \? -1 : 1/);
-  assert.match(helper, /responsiveScoreOrder\(left, right\)/);
-  assert.ok(helper.indexOf('if (left.selected !== right.selected)') < helper.indexOf('if (left.inRuntimePool !== right.inRuntimePool)'));
-  assert.ok(helper.indexOf('if (left.inRuntimePool !== right.inRuntimePool)') < helper.indexOf('if (left.available !== right.available)'));
+  assert.match(helper, /latencyOrder\(left, right\)/);
+  assert.doesNotMatch(helper, /speedBps|responsiveScoreOrder|decisionMedian/);
+  assert.ok(helper.indexOf('if (left.selected !== right.selected)') < helper.indexOf('const latency = latencyOrder'));
+  assert.ok(helper.indexOf('if (latency) return latency') < helper.indexOf('if (left.available !== right.available)'));
   assert.match(routing, /mode: normalizePolicySelectionMode\(policy\.mode\)/);
   assert.match(routing, /priorityOrder: chosenCandidateIds/);
   assert.match(routing, /quality\.policy\?\.mode === "priority" \? "Приоритет" : "Рейтинг"/);
@@ -28,9 +29,9 @@ test("quality table follows configured priority or URLTest quality ranking", asy
 });
 
 test("only a current confirmed route outage replaces the historical percentage", () => {
-  assert.match(routing, /asObject\(asObject\(health\.outage_penalty\)\[candidate\]\)/);
-  assert.match(routing, /confirmedUnstableRoute\(\s*outage\.open === true,/);
-  assert.match(routing, /max_packet_loss_percent \?\? 40/);
+  assert.doesNotMatch(routing, /outage_penalty/);
+  assert.match(routing, /confirmedUnstableRoute\(\s*asObject\(health\.availability_ok\)\[candidate\]/);
+  assert.doesNotMatch(routing, /max_packet_loss_percent \?\? 40/);
   assert.doesNotMatch(routing, /lastOutageAt > 0 && Date\.now\(\) \/ 1000/);
   assert.match(routing, /node\.unstable \? "Нестабилен" : node\.availability == null/);
   assert.match(routing, /node\.unstable \? <small>Срыв маршрута<\/small>/);
@@ -44,11 +45,11 @@ test("a short outage is not labeled unstable without sustained measured loss", a
   const exports = {};
   new Function("exports", compiled)(exports);
   const unstable = exports.confirmedUnstableRoute;
-  assert.equal(unstable(true, false, 145, 1.4, 40), false);
-  assert.equal(unstable(true, false, 145, 41, 40), true);
-  assert.equal(unstable(true, false, 2, 100, 40), false);
-  assert.equal(unstable(true, true, 145, 41, 40), false);
-  assert.equal(unstable(false, false, 145, 41, 40), false);
+  assert.equal(unstable(false, 145, 1.4, 40), false);
+  assert.equal(unstable(false, 145, 41, 40), true);
+  assert.equal(unstable(false, 2, 100, 40), false);
+  assert.equal(unstable(true, 145, 41, 40), false);
+  assert.equal(unstable(undefined, 145, 41, 40), false);
 });
 
 test("expanded policy uses the full selected inventory, not the capped runtime pool", async () => {
@@ -133,33 +134,29 @@ test("route editor keeps view controls horizontal and scopes protocol filters to
   assert.match(page, /<label className="field custom-route-value">/);
 });
 
-test("active pool size is visible and editable in advanced switching parameters", () => {
-  assert.match(page, /\[candidateLimit, setCandidateLimit\] = useState/);
-  assert.match(page, /Дополнительные параметры переключения[\s\S]*?Узлов в активном пуле[\s\S]*?name="max_active_candidates" value=\{candidateLimit\} onChange=\{\(event\) => setCandidateLimit\(Number\(event.target.value\)\)\}/);
-  assert.match(page, /max_active_candidates: candidateLimit,\s+max_probe_candidates: candidateLimit/);
-  assert.match(page, /const activeNodeCount = mode === "priority" \? eligibleNodeCount : Math.min\(candidateLimit, eligibleNodeCount\)/);
+test("switching editor no longer exposes independent pool limits", () => {
+  assert.doesNotMatch(page, /name="max_active_candidates"|setCandidateLimit/);
+  assert.doesNotMatch(page, /max_active_candidates:|max_probe_candidates:/);
+  assert.match(page, /const candidateLimit = routingMonitorValues\(config\).probe_batch_size/);
 });
 
 test("priority editor retains the whole ordered queue and decouples probe batch from URLTest limit", () => {
   assert.match(page, /const activePriorityItems = selectionOrder;/);
   assert.doesNotMatch(page, /selectionOrder.slice\(0, candidateLimit\)|coldPriorityItems/);
   assert.doesNotMatch(page, /probe_batch_size: mode === "best" \? 2 : 3/);
-  assert.match(page, /Авто · общий бюджет: 5/);
+  assert.match(page, /probe_batch_size: 10/);
+  assert.doesNotMatch(page, /Авто · общий бюджет: 5/);
 });
 
-test("new URLTest pool defaults to five without overwriting explicit or legacy limits", () => {
-  assert.match(page, /Number\(existingPolicy\.max_active_candidates \?\? existingPolicy\.max_probe_candidates\)/);
-  assert.match(page, /const \[candidateLimit, setCandidateLimit\][\s\S]*?return 5;/);
-});
+
 
 test("route monitoring is one global form with concise scheduling controls", () => {
   assert.match(page, /function RoutingMonitorSettings/);
   assert.match(page, /Мониторинг маршрутов/);
   assert.match(page, /Доступность активного узла, сек\./);
   assert.match(page, /Максимум проверок за цикл/);
-  assert.match(page, /<option value=\{10\}>10<\/option>/);
-  assert.match(page, /\["probe_batch_size", 0, 10\]/);
-  assert.match(page, /Общий бюджет всех листов\./);
+  assert.match(page, /\["probe_batch_size", 1, 64\]/);
+  assert.match(page, /Общий лимит одновременно проверяемых узлов/);
   assert.match(page, /routing_monitor: routingMonitor/);
   assert.match(page, /const monitorRanges/);
   assert.doesNotMatch(page, /Сохранить мониторинг/);
@@ -167,48 +164,49 @@ test("route monitoring is one global form with concise scheduling controls", () 
   assert.doesNotMatch(page, /backup_check_interval_seconds: 300/);
 });
 
-test("speed degradation threshold is shared by both modes, accepts zero and preserves hidden probe settings", async () => {
+test("global probe count is numeric and independent from the working pool", async () => {
   const React = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
   const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let field;
   function visit(node) {
     if (ts.isJsxElement(node) && node.openingElement.tagName.getText(parsed) === "label"
-      && node.getText(parsed).includes('name="speed_degradation_percent"')) field = node;
+      && node.getText(parsed).includes('update("probe_batch_size"')) field = node;
     ts.forEachChild(node, visit);
   }
   visit(parsed);
   assert.ok(field);
-  const compiled = ts.transpileModule(`function renderField(mode) { return (${field.getText(parsed)}); }`, {
+  const compiled = ts.transpileModule(`function renderField() { return (${field.getText(parsed)}); }`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
   }).outputText;
-  for (const [mode, threshold, expected] of [["best", null, 50], ["priority", null, 0], ["priority", 30, 30], ["best", 0, 0], ["best", 99, 99]]) {
-    const render = new Function("React", "tr", "speedDegradationPercent", "setSpeedDegradationPercent", `${compiled}; return renderField;`)(React, value => value, threshold, () => {});
-    const html = renderToStaticMarkup(render(mode));
-    assert.match(html, /min="0" max="99" step="1"/);
-    assert.match(html, new RegExp(`value="${expected}"`));
+  for (const count of [1, 5, 10, 24, 64]) {
+    const render = new Function("React", "tr", "values", "disabled", "update", `${compiled}; return renderField;`)(React, value => value, { probe_batch_size: count }, false, () => {});
+    const html = renderToStaticMarkup(render());
+    assert.match(html, /type="number" min="1" max="64" step="1"/);
+    assert.match(html, new RegExp(`value="${count}"`));
+    assert.doesNotMatch(html, /<select/);
   }
-  assert.match(page, /speed_degradation_percent: Number\(data\.get\("speed_degradation_percent"\) \?\? existingPolicy\.speed_degradation_percent/);
-  assert.match(page, /speed_check_interval_seconds: Number\(existingPolicy\.speed_check_interval_seconds \?\? 10800\)/);
-  assert.match(page, /speed_probe_bytes: Number\(existingPolicy\.speed_probe_bytes \?\? 2097152\)/);
+  assert.match(page, /probe_batch_size: 10/);
+  assert.match(page, /key === "probe_batch_size" && value === 0/);
+  assert.doesNotMatch(page, /name="quality_window"|name="failure_threshold"|name="recovery_threshold"|name="max_packet_loss_percent"/);
+  assert.doesNotMatch(page, /update\("failure_retry_interval_seconds"|update\("reserve_check_interval_seconds"|update\("full_scan_interval_seconds"/);
+  assert.match(page, /Интервал оценки задержки, сек\./);
 });
 
-test("URLTest speed gain is next to degradation and absent in priority", async () => {
+test("URLTest latency threshold is absent in priority and no speed setting remains", async () => {
   const React = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
   const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let field, drop;
+  let field;
   function visit(node) {
     if (ts.isConditionalExpression(node) && node.condition.getText(parsed) === 'mode === "best"'
-      && node.whenTrue.getText(parsed).includes('name="speed_improvement_percent"')) field = node;
-    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(parsed) === "label"
-      && node.getText(parsed).includes('name="speed_degradation_percent"')) drop = node;
+      && node.whenTrue.getText(parsed).includes('name="switch_improvement_ms"')) field = node;
     ts.forEachChild(node, visit);
   }
   visit(parsed);
-  assert.ok(field && drop);
-  const siblings = drop.parent.children.filter(node => ts.isJsxElement(node) || ts.isJsxExpression(node));
-  assert.equal(siblings[siblings.indexOf(drop) + 1], field.parent);
+  assert.ok(field);
+  assert.doesNotMatch(page, /name="speed_/);
+  assert.doesNotMatch(page, /speedDegradationPercent|speedBps|speedAt/);
   const compiled = ts.transpileModule(`function renderField(mode) { return (${field.getText(parsed)}); }`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
   }).outputText;
@@ -216,27 +214,10 @@ test("URLTest speed gain is next to degradation and absent in priority", async (
     React, value => value, (value, fallback) => value ?? fallback, {},
   );
   assert.equal(renderToStaticMarkup(render("priority")), "");
-  assert.match(renderToStaticMarkup(render("best")), /name="speed_improvement_percent"/);
+  assert.match(renderToStaticMarkup(render("best")), /name="switch_improvement_ms"/);
 });
 
-test("actual pool field JSX is absent in priority and present in URLTest", async () => {
-  const React = await import("react");
-  const { renderToStaticMarkup } = await import("react-dom/server");
-  const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let field;
-  function visit(node) {
-    if (ts.isConditionalExpression(node) && node.condition.getText(parsed) === 'mode === "best"'
-      && node.whenTrue.getText(parsed).includes('name="max_active_candidates"')) field = node;
-    ts.forEachChild(node, visit);
-  }
-  visit(parsed);
-  assert.ok(field, "pool field must be guarded by the mode");
-  const source = `function renderField(mode) { return (${field.getText(parsed)}); }`;
-  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
-  const renderField = new Function("React", "candidateLimit", "setCandidateLimit", `${compiled}; return renderField;`)(React, 3, () => {});
-  assert.equal(renderToStaticMarkup(renderField("priority")), "");
-  assert.match(renderToStaticMarkup(renderField("best")), /name="max_active_candidates"/);
-});
+
 
 test("runtime candidates are not falsely advertised as healthy reserves", () => {
   assert.match(routing, /readyReserves: queueNodes\.filter\(\(node\) => !node.selected && node.available && node.inRuntimePool\).length/);

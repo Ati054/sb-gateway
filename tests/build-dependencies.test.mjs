@@ -103,9 +103,10 @@ for (const target of targets) {
 test("normal npm entry points enforce hardening even after npm ci --ignore-scripts", () => {
   const { scripts } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   for (const name of ["postinstall", "predev", "prebuild", "prebuild:static", "prestart"]) {
-    assert.equal(scripts[name], "node build/harden-image-size.mjs");
+    assert.equal(scripts[name], "node build/harden-dependencies.mjs");
   }
-  assert.equal(scripts["audit:dependencies"], "npm audit --audit-level=low && npm run test:dependencies");
+  assert.equal(scripts["audit:dependencies"], "npm run test:dependencies && npm audit --audit-level=low");
+  assert.match(scripts["test:dependencies"], /braces-hardening\.test\.mjs/);
   assert.match(scripts.test, /--test tests\/\*\.test\.mjs$/);
   const docker = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
   assert.ok(docker.includes("COPY build ./build"));

@@ -10,8 +10,6 @@ import (
 func TestPriorityPoolFollowsFullRuntimeSelectionNotSavedURLTestLimit(t *testing.T) {
 	pool := healthFixture(true)
 	contract := pool.HealthPolicies["europe"]
-	contract.Policy.MaxActiveCandidates = 1
-	contract.Policy.MaxProbeCandidates = 1
 	contract.Policy.ProbeBatchSize = 3
 	contract.Groups = nil
 	runtime := &fakeSelectorRuntime{pool: pool, probes: map[string]probeEvidence{}}
@@ -41,8 +39,8 @@ func TestPriorityPoolFollowsFullRuntimeSelectionNotSavedURLTestLimit(t *testing.
 		if item.ProbeLimits.Shortlist != count || !reflect.DeepEqual(item.Shortlist, contract.Candidates) {
 			t.Fatalf("count=%d: effective limit=%d pool=%v", count, item.ProbeLimits.Shortlist, item.Shortlist)
 		}
-		if item.Selected != "node-00" || runtime.speedCalls != 0 {
-			t.Fatal("priority order or disabled speed checks changed")
+		if item.Selected != "node-00" {
+			t.Fatal("priority order changed")
 		}
 	}
 	contract.Mode = "best"
@@ -50,7 +48,7 @@ func TestPriorityPoolFollowsFullRuntimeSelectionNotSavedURLTestLimit(t *testing.
 	if err := controller.Tick(time.Unix(second, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got := controller.state["europe"]; got.ProbeLimits.Shortlist != 1 || len(got.Shortlist) != 1 {
-		t.Fatalf("return to URLTest must restore its saved limit: %+v", got.ProbeLimits)
+	if got := controller.state["europe"]; got.ProbeLimits.Shortlist != 3 || len(got.Shortlist) > 3 {
+		t.Fatalf("URLTest must use the common budget, not a legacy pool limit: %+v", got.ProbeLimits)
 	}
 }

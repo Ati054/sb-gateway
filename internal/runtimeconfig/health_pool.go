@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sort"
 	"strings"
+
+	"github.com/sb-gateway/sb-gateway/internal/healthcontract"
 )
 
 // BuildXrayHealthPool renders the selector controller contract from the same
@@ -72,11 +75,11 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 	policyMembers := make(map[string][]string)
 	policyPrefixes := make(map[string]string)
 	healthPolicies := make(map[string]any)
-	routingMonitor := objectValue(objectValue(config["system"])["routing_monitor"])
-	probeBudget := 5
-	if configured, ok := numericInt(routingMonitor["probe_batch_size"]); ok && configured > 0 && configured <= 10 {
-		probeBudget = configured
+	routingMonitor, err := healthRoutingMonitor(config)
+	if err != nil {
+		return nil, err
 	}
+	probeBudget := routingMonitor.ProbeBudget()
 	for _, policy := range enabledObjects(config["policies"]) {
 		policyID := textValue(policy["id"])
 		if policyID == "" {
@@ -134,25 +137,9 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 			}
 			inventory[member] = metadata
 		}
-		resolvedPolicy := cloneJSONMap(policy)
-		if len(routingMonitor) != 0 {
-			for source, target := range map[string]string{
-				"active_liveness_interval_seconds": "active_liveness_interval_seconds",
-				"failure_retry_interval_seconds":   "failure_retry_interval_seconds",
-				"block_recovery_interval_seconds":  "block_recovery_interval_seconds",
-				"active_quality_interval_seconds":  "active_check_interval_seconds",
-				"reserve_check_interval_seconds":   "backup_check_interval_seconds",
-				"full_scan_interval_seconds":       "full_scan_interval_seconds",
-			} {
-				if value, exists := routingMonitor[source]; exists {
-					resolvedPolicy[target] = value
-				}
-			}
-			if batch, ok := numericInt(routingMonitor["probe_batch_size"]); ok && batch > 0 {
-				resolvedPolicy["probe_batch_size"] = batch
-			} else {
-				resolvedPolicy["probe_batch_size"] = probeBudget
-			}
+		resolvedPolicy, err := resolveHealthPolicy(policy, routingMonitor)
+		if err != nil {
+			return nil, fmt.Errorf("health policy %q: %w", policyID, err)
 		}
 		healthPolicies[policyID] = map[string]any{
 			"policy": resolvedPolicy, "mode": mode, "groups": serializedGroups,
@@ -214,6 +201,7 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 
 	pool := map[string]any{
 		"probe_budget": probeBudget,
+		"probe_lanes":  len(xrayHealthProbeLanesForConfig(config, healthProbeInventoryCount(nodes))) - 1,
 		"version":      4, "policies": policyMembers, "health_policies": healthPolicies,
 		"local_policy_ids": localPolicyIDs,
 		"policy_prefixes":  policyPrefixes, "base_outbound_tags": baseTags,
@@ -224,6 +212,70 @@ func BuildXrayHealthPool(config map[string]any, providerNodes []map[string]any, 
 		return nil, err
 	}
 	return body, nil
+}
+
+func healthRoutingMonitor(config map[string]any) (healthcontract.RoutingMonitor, error) {
+	raw := objectValue(config["system"])["routing_monitor"]
+	if raw == nil {
+		return healthcontract.RoutingMonitor{}, nil
+	}
+	if _, ok := raw.(map[string]any); !ok {
+		return healthcontract.RoutingMonitor{}, errors.New("system.routing_monitor must be an object")
+	}
+	settings := cloneJSONMap(raw.(map[string]any))
+	// Validation treats blank optional numeric inputs as omitted.
+	for _, key := range []string{"active_liveness_interval_seconds", "active_quality_interval_seconds", "probe_batch_size"} {
+		if settings[key] == "" {
+			delete(settings, key)
+		}
+	}
+	body, err := json.Marshal(settings)
+	if err != nil {
+		return healthcontract.RoutingMonitor{}, fmt.Errorf("system.routing_monitor: %w", err)
+	}
+	var monitor healthcontract.RoutingMonitor
+	if err := json.Unmarshal(body, &monitor); err != nil {
+		return monitor, fmt.Errorf("system.routing_monitor: %w", err)
+	}
+	return monitor, nil
+}
+
+func resolveHealthPolicy(raw map[string]any, monitor healthcontract.RoutingMonitor) (healthcontract.Policy, error) {
+	settings := cloneJSONMap(raw)
+	removeRetiredURLTestSettings(settings)
+	if settings["switch_improvement_ms"] == "" {
+		delete(settings, "switch_improvement_ms")
+	}
+	body, err := json.Marshal(settings)
+	if err != nil {
+		return healthcontract.Policy{}, err
+	}
+	var policy healthcontract.Policy
+	if err := json.Unmarshal(body, &policy); err != nil {
+		return policy, err
+	}
+	if monitor.ActiveLivenessSeconds != nil {
+		policy.ActiveLivenessSeconds = *monitor.ActiveLivenessSeconds
+	}
+	if monitor.ActiveQualitySeconds != nil {
+		policy.ActiveCheckSeconds = *monitor.ActiveQualitySeconds
+	}
+	policy.ProbeBatchSize = monitor.ProbeBudget()
+	return policy, nil
+}
+
+func healthProbeInventoryCount(nodes []map[string]any) int {
+	// Policy membership is hot-updated. Listener allocation follows the stable
+	// core inventory so changing eligibility alone cannot force a core restart.
+	seen := make(map[string]struct{})
+	for _, node := range nodes {
+		if node["enabled"] != false && textValue(node["subscription_reserve_id"]) == "" {
+			if id := textValue(node["id"]); id != "" && id != "block" && id != "direct-wan" {
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	return len(seen)
 }
 
 func numericInt(value any) (int, bool) {

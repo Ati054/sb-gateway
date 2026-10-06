@@ -169,6 +169,66 @@ func TestArmRollbackAllowsCompletedOwnedGuard(t *testing.T) {
 	}
 }
 
+func TestArmRollbackClassifiesUncertainCreation(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		failurePath     string
+		failureMethod   string
+		responseKind    string
+		wantUnconfirmed bool
+	}{
+		{name: "server failure after creation request", failurePath: "/rest/system/scheduler", failureMethod: http.MethodPut, responseKind: "server error", wantUnconfirmed: true},
+		{name: "unreadable success receipt", failurePath: "/rest/system/scheduler", failureMethod: http.MethodPut, responseKind: "invalid JSON", wantUnconfirmed: true},
+		{name: "creation response lost", failurePath: "/rest/system/scheduler", failureMethod: http.MethodPut, responseKind: "disconnect", wantUnconfirmed: true},
+		{name: "explicit rejection", failurePath: "/rest/system/scheduler", failureMethod: http.MethodPut, responseKind: "forbidden"},
+		{name: "inventory failed before creation", failurePath: "/rest/system/scheduler", failureMethod: http.MethodGet, responseKind: "server error"},
+		{name: "clock failed before creation", failurePath: "/rest/system/clock", failureMethod: http.MethodGet, responseKind: "server error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				if request.URL.Path == test.failurePath && request.Method == test.failureMethod {
+					switch test.responseKind {
+					case "server error":
+						http.Error(response, "unavailable", http.StatusServiceUnavailable)
+					case "invalid JSON":
+						_, _ = response.Write([]byte(`{"incomplete":`))
+					case "forbidden":
+						http.Error(response, "forbidden", http.StatusForbidden)
+					case "disconnect":
+						connection, _, err := response.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						_ = connection.Close()
+					}
+					return
+				}
+				switch request.URL.Path {
+				case "/rest/system/scheduler":
+					_, _ = response.Write([]byte(`[]`))
+				case "/rest/system/clock":
+					_, _ = response.Write([]byte(`{"date":"2026-10-04","time":"19:15:49"}`))
+				default:
+					http.Error(response, "unexpected", http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			client := newTestClient(t, server)
+			defer client.CloseIdleConnections()
+			_, err := client.ArmRollback(context.Background(), "SB-GATEWAY-rollback-0123456789ab", RollbackOptions{})
+			if err == nil || errors.Is(err, ErrRollbackGuardUnconfirmed) != test.wantUnconfirmed {
+				t.Fatalf("unconfirmed=%t err=%v", test.wantUnconfirmed, err)
+			}
+			state, classified := TransactionFailureStateOf(classifyRollbackArmFailure(err))
+			if classified != test.wantUnconfirmed || (classified && state != TransactionRecoveryPending) {
+				t.Fatalf("state=%q classified=%t err=%v", state, classified, err)
+			}
+		})
+	}
+}
+
 func TestDisarmRollbackDeletesOnlyExactOwnedSchedulerOnce(t *testing.T) {
 	var mu sync.Mutex
 	deletes := make([]string, 0, 1)

@@ -53,7 +53,7 @@ export function mergeRuntimeStatus(
       const nextTime = Date.parse(String(next.runtime_observed_at ?? ""));
       // A slow history response must not roll back a newer runtime readback.
       if (Number.isFinite(oldTime) && (!Number.isFinite(nextTime) || nextTime < oldTime)) {
-        for (const field of ["runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_count", "availability_ok", "shortlist"]) {
+        for (const field of ["runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_count", "availability_ok", "shortlist", "latency_comparisons"]) {
           if (field in old) merged[field] = old[field];
         }
       }

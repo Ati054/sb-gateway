@@ -27,14 +27,15 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 			available[tag] = struct{}{}
 		}
 	}
+	candidateCount := healthProbeInventoryCount(nodes)
 	rules := []map[string]any{
 		{"action": "sniff"},
 		{"protocol": "dns", "action": "hijack-dns"},
-		{"inbound": append([]string{"subscription-update-direct", "subscription-update-vpn"}, healthProbeLaneTags(config)...), "ip_cidr": append([]string(nil), xrayPrivateDestinations...), "action": "reject"},
+		{"inbound": append([]string{"subscription-update-direct", "subscription-update-vpn"}, healthProbeLaneTags(config, candidateCount)...), "ip_cidr": append([]string(nil), xrayPrivateDestinations...), "action": "reject"},
 		{"inbound": []string{"subscription-update-direct"}, "action": "route", "outbound": "direct-wan"},
 		{"inbound": []string{"subscription-update-vpn"}, "action": "route", "outbound": "subscription-update-egress"},
 	}
-	for _, lane := range xrayHealthProbeLanesForConfig(config) {
+	for _, lane := range xrayHealthProbeLanesForConfig(config, candidateCount) {
 		if _, exists := available[lane.Tag]; exists {
 			rules = append(rules, map[string]any{"inbound": []string{lane.Tag}, "action": "route", "outbound": lane.Tag})
 		}
@@ -342,8 +343,8 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 	return map[string]any{"rules": rules, "rule_set": ruleSets}, nil
 }
 
-func healthProbeLaneTags(config map[string]any) []string {
-	lanes := xrayHealthProbeLanesForConfig(config)
+func healthProbeLaneTags(config map[string]any, candidateCount int) []string {
+	lanes := xrayHealthProbeLanesForConfig(config, candidateCount)
 	tags := make([]string, 0, len(lanes))
 	for _, lane := range lanes {
 		tags = append(tags, lane.Tag)

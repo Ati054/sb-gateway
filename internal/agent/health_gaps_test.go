@@ -15,15 +15,13 @@ import (
 	"time"
 )
 
-func TestBestModeSpeedGainDoesNotRequireLatencyThreshold(t *testing.T) {
-	current, tooClose, good := 500, 480, 400
-	currentSpeed, topSpeed, goodSpeed := int64(100), int64(200), int64(150)
-	got := meaningfullyBetter("active", []string{"fast-but-close", "eligible"},
-		map[string]*int{"active": &current, "fast-but-close": &tooClose, "eligible": &good},
-		map[string]*int64{"active": &currentSpeed, "fast-but-close": &topSpeed, "eligible": &goodSpeed},
-		effectivePolicySettings{speedEnabled: true, speedImprovement: 25, improvement: 50})
-	if got != "fast-but-close" {
-		t.Fatalf("speed winner was ignored despite safe latency: %q", got)
+func TestBestModeNominatesOnlyMaterialLatencyImprovement(t *testing.T) {
+	active, closeDelay, better := 500, 451, 300
+	got := meaningfullyBetter("active", []string{"close", "better"},
+		map[string]*int{"active": &active, "close": &closeDelay, "better": &better},
+		effectivePolicySettings{improvement: 50})
+	if got != "better" {
+		t.Fatalf("latency-qualified candidate was not nominated: %q", got)
 	}
 }
 
@@ -42,12 +40,12 @@ func TestFailedPrimaryRecoversWithoutWaitingForFullScan(t *testing.T) {
 			pool := healthFixture(false)
 			contract := pool.HealthPolicies["europe"]
 			contract.Mode = mode
-			contract.Policy.MaxActiveCandidates, contract.Policy.ProbeBatchSize = 1, batch
-			contract.Policy.ActiveCheckSeconds, contract.Policy.BackupCheckSeconds, contract.Policy.FullScanSeconds = 60, 300, 1800
+			contract.Policy.ProbeBatchSize = batch
+			contract.Policy.ActiveCheckSeconds = 60
 			pool.HealthPolicies["europe"] = contract
 			item := newPolicyHealthState()
 			item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "nl", "nl", true
-			item.CandidateSignature, item.NextFullScanAt = "de\nnl", 2800
+			item.CandidateSignature = "de\nnl"
 			item.Samples["de"] = []healthSample{{OK: false}, {OK: false}, {OK: false}}
 			item.AvailabilityFailures["de"] = 3
 			item.LastProbeAt["de"] = 1000
@@ -62,7 +60,7 @@ func TestFailedPrimaryRecoversWithoutWaitingForFullScan(t *testing.T) {
 					t.Fatal("recovery exceeded batch budget")
 				}
 			}
-			if item.Selected != "de" || item.NextFullScanAt != 2800 {
+			if item.Selected != "de" {
 				t.Fatalf("%s recovery waited for full scan: selected=%s queue=%v", mode, item.Selected, item.ScanQueue)
 			}
 		}
@@ -78,9 +76,6 @@ func TestBlockedSevenNodeSweepUsesEmergencyRetryUntilExhausted(t *testing.T) {
 			contract.Candidates = []string{"n1", "n2", "n3", "n4", "n5", "n6", "n7"}
 			contract.Groups = nil
 			contract.Policy.ProbeBatchSize = 3
-			contract.Policy.FailureRetrySeconds = 2
-			contract.Policy.BlockRecoverySeconds = 15
-			contract.Policy.BackupCheckSeconds = 300
 			pool.HealthPolicies["europe"] = contract
 			item := newPolicyHealthState()
 			item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "block", "block", true
@@ -107,7 +102,7 @@ func TestBlockedSevenNodeSweepUsesEmergencyRetryUntilExhausted(t *testing.T) {
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("batch %d probed %v, want %v", batch, got, want)
 				}
-				if batch < 2 && (item.Selected != "block" || controller.nextInterval() != 2*time.Second) {
+				if batch < 2 && (item.Selected != "block" || item.OutageBatchStartedAt.IsZero() || controller.nextIntervalAt(item.OutageBatchStartedAt) != 2*time.Second) {
 					t.Fatalf("batch %d delayed an untested candidate: selected=%s interval=%s", batch, item.Selected, controller.nextInterval())
 				}
 			}
@@ -122,6 +117,109 @@ func TestBlockedSevenNodeSweepUsesEmergencyRetryUntilExhausted(t *testing.T) {
 	}
 }
 
+func TestEmergencyContinuationChargesCompletedBatchTime(t *testing.T) {
+	now := time.Unix(1000, 0)
+	for _, mode := range []string{"best", "priority"} {
+		for _, test := range []struct {
+			name    string
+			pending bool
+			start   time.Time
+			want    time.Duration
+		}{
+			{"slow", true, now.Add(-5 * time.Second), 0},
+			{"fast", true, now.Add(-250 * time.Millisecond), 1750 * time.Millisecond},
+			{"no_completed_batch", true, time.Time{}, 2 * time.Second},
+			{"future_clock", true, now.Add(time.Second), 2 * time.Second},
+			{"exhausted", false, now.Add(-5 * time.Second), 15 * time.Second},
+		} {
+			t.Run(mode+"/"+test.name, func(t *testing.T) {
+				item := newPolicyHealthState()
+				item.Mode, item.Selected = mode, "block"
+				item.OutageProbePending, item.OutageBatchStartedAt = test.pending, test.start
+				controller := &healthController{
+					opts: Options{HealthInterval: time.Minute}, state: healthState{"policy": item},
+				}
+				if got := controller.nextIntervalAt(now); got != test.want {
+					t.Fatalf("continuation interval = %s, want %s", got, test.want)
+				}
+				item.Selected = "active"
+				item.AvailabilityFailures["active"] = 1
+				if got := controller.nextIntervalAt(now); got != 2*time.Second {
+					t.Fatalf("active failure confirmation was accelerated: %s", got)
+				}
+			})
+		}
+	}
+}
+
+type currentErrorTestRuntime struct{ *fakeSelectorRuntime }
+
+func (runtime *currentErrorTestRuntime) Current(string) (string, error) {
+	return "", errors.New("current selector unavailable")
+}
+
+type reloadErrorTestRuntime struct{ *fakeSelectorRuntime }
+
+func (runtime *reloadErrorTestRuntime) Reload() (healthPool, bool, error) {
+	return healthPool{}, false, errors.New("health pool unavailable")
+}
+
+func TestEmergencyContinuationDoesNotSpinOnReloadFailure(t *testing.T) {
+	for _, mode := range []string{"best", "priority"} {
+		t.Run(mode, func(t *testing.T) {
+			item := newPolicyHealthState()
+			item.Mode, item.Selected = mode, "block"
+			item.OutageProbePending = true
+			item.OutageBatchStartedAt = time.Now().Add(-5 * time.Second)
+			controller := &healthController{
+				opts: Options{HealthInterval: time.Minute}, state: healthState{"policy": item, "empty": nil},
+				runtime: &reloadErrorTestRuntime{&fakeSelectorRuntime{}},
+			}
+			if controller.nextInterval() != 0 {
+				t.Fatal("completed slow batch should permit initial continuation")
+			}
+			for attempt := 0; attempt < 3; attempt++ {
+				if controller.Tick(time.Now()) == nil {
+					t.Fatal("expected reload failure")
+				}
+				if !item.OutageBatchStartedAt.IsZero() || controller.nextInterval() != 2*time.Second {
+					t.Fatal("reload failure retained zero-wait continuation")
+				}
+			}
+		})
+	}
+}
+
+func TestEmergencyContinuationDoesNotReuseIncompleteBatch(t *testing.T) {
+	for _, mode := range []string{"best", "priority"} {
+		for _, empty := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/empty=%t", mode, empty), func(t *testing.T) {
+				contract := healthFixture(false).HealthPolicies["europe"]
+				contract.Mode = mode
+				if empty {
+					contract.Candidates = nil
+				}
+				item := newPolicyHealthState()
+				item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "block", "block", true
+				item.OutageProbePending = true
+				item.OutageBatchStartedAt = time.Now().Add(-time.Minute)
+				controller := &healthController{
+					opts:    Options{HealthInterval: time.Minute},
+					runtime: &currentErrorTestRuntime{&fakeSelectorRuntime{}},
+					state:   healthState{"europe": item}, warmStarted: map[string]bool{"europe": true},
+				}
+				err := controller.tickPolicy(time.Now(), "europe", contract, item)
+				if !empty && err == nil {
+					t.Fatal("expected selector error")
+				}
+				if !item.OutageBatchStartedAt.IsZero() || controller.nextInterval() != 2*time.Second {
+					t.Fatal("empty or failed tick retained immediate continuation")
+				}
+			})
+		}
+	}
+}
+
 func TestBlockedRecoveryRechecksPreviouslyWorkingNodesBeforeOldFailures(t *testing.T) {
 	for _, mode := range []string{"priority", "best"} {
 		for _, size := range []int{3, 7, 30, 100} {
@@ -132,8 +230,6 @@ func TestBlockedRecoveryRechecksPreviouslyWorkingNodesBeforeOldFailures(t *testi
 				contract.Candidates = nil
 				contract.Groups = nil
 				contract.Policy.ProbeBatchSize = 3
-				contract.Policy.FailureRetrySeconds = 2
-				contract.Policy.BlockRecoverySeconds = 15
 				probes := make(map[string]probeEvidence)
 				for index := 1; index <= size; index++ {
 					candidate := fmt.Sprintf("n%d", index)
@@ -196,7 +292,7 @@ func TestBlockedRecoveryChecksRecentReserveWhenOldActiveStaysDown(t *testing.T) 
 	for _, candidate := range strings.Split(item.CandidateSignature, "\n") {
 		item.LastProbeAt[candidate] = 1004
 	}
-	p := policySettings(healthPolicy{ProbeBatchSize: 3, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	p := policySettings(healthPolicy{ProbeBatchSize: 3}, "priority")
 	got := outageProbeTargets(time.Unix(1006, 0), strings.Split(item.CandidateSignature, "\n"), item, p)
 	if !reflect.DeepEqual(got, []string{"f", "g"}) {
 		t.Fatalf("a recent reserve was delayed behind failed candidates: %v", got)
@@ -218,7 +314,7 @@ func TestBlockedRecoverySingleSlotAlternatesHotAndFairLanes(t *testing.T) {
 	item.Selected, item.Mode, item.CandidateSignature = "block", "priority", "old\nreserve"
 	item.LastWorkingSelection = &workingSelection{Selected: "reserve", Mode: "priority", CandidateSignature: item.CandidateSignature}
 	item.LastProbeAt["old"], item.LastProbeAt["reserve"] = 1000, 1000
-	p := policySettings(healthPolicy{ProbeBatchSize: 1, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	p := policySettings(healthPolicy{ProbeBatchSize: 1}, "priority")
 	if got := outageProbeTargets(time.Unix(1018, 0), []string{"old", "reserve"}, item, p); !reflect.DeepEqual(got, []string{"old"}) {
 		t.Fatalf("fair single-slot turn: %v", got)
 	}
@@ -243,7 +339,7 @@ func TestBlockedRecoveryRotatesAcrossManyPreviouslyWorkingNodes(t *testing.T) {
 	}
 	item.CandidateSignature = strings.Join(candidates, "\n")
 	item.LastWorkingSelection = &workingSelection{Selected: "n1", Mode: "priority", CandidateSignature: item.CandidateSignature}
-	p := policySettings(healthPolicy{ProbeBatchSize: 3, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	p := policySettings(healthPolicy{ProbeBatchSize: 3}, "priority")
 	for _, step := range []struct {
 		second int64
 		want   []string
@@ -269,7 +365,7 @@ func TestBlockedRecoveryUsesConfiguredTenProbeBatch(t *testing.T) {
 	for index := range candidates {
 		candidates[index] = fmt.Sprintf("n%d", index+1)
 	}
-	p := policySettings(healthPolicy{ProbeBatchSize: 10, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	p := policySettings(healthPolicy{ProbeBatchSize: 10}, "priority")
 	if got := outageProbeTargets(time.Unix(1000, 0), candidates, item, p); !reflect.DeepEqual(got, candidates[:10]) {
 		t.Fatalf("configured emergency batch was silently capped: %v", got)
 	}
@@ -295,7 +391,7 @@ func TestBlockedRecoveryFindsLastOf128WithHistoricalFailures(t *testing.T) {
 	}
 	item.CandidateSignature = strings.Join(candidates, "\n")
 	item.LastWorkingSelection = &workingSelection{Selected: "n1", Mode: "priority", CandidateSignature: item.CandidateSignature}
-	p := policySettings(healthPolicy{ProbeBatchSize: 10, FailureRetrySeconds: 2, BlockRecoverySeconds: 15}, "priority")
+	p := policySettings(healthPolicy{ProbeBatchSize: 10}, "priority")
 	foundAt := -1
 	for cycle := 0; cycle < 18; cycle++ {
 		now := time.Unix(1002+int64(cycle)*2, 0)
@@ -323,8 +419,7 @@ func TestBlockedRetryDoesNotInheritFasterReserveCheckInterval(t *testing.T) {
 	item.Selected = "block"
 	item.LastProbeAt["n1"] = 1000
 	p := policySettings(healthPolicy{
-		ProbeBatchSize: 3, ActiveCheckSeconds: 10, BackupCheckSeconds: 10,
-		BlockRecoverySeconds: 15,
+		ProbeBatchSize: 3, ActiveCheckSeconds: 10,
 	}, "priority")
 	if got := outageProbeTargets(time.Unix(1010, 0), []string{"n1"}, item, p); len(got) != 0 {
 		t.Fatalf("blocked retry ran at reserve-check interval: %v", got)
@@ -680,21 +775,12 @@ func testConfiguredTenProbeLanes(t *testing.T, quality bool) {
 
 type interruptedTestRuntime struct {
 	*fakeSelectorRuntime
-	duringSpeed bool
 	interrupted bool
 }
 
 func (runtime *interruptedTestRuntime) Probe(candidate string) probeEvidence {
-	if !runtime.duringSpeed {
-		runtime.interrupted = true
-		return failedEvidence()
-	}
-	return runtime.fakeSelectorRuntime.Probe(candidate)
-}
-
-func (runtime *interruptedTestRuntime) Throughput(string, int) (int64, error) {
 	runtime.interrupted = true
-	return 0, context.Canceled
+	return failedEvidence()
 }
 
 func (runtime *interruptedTestRuntime) takeProbeInterruption() error {
@@ -706,25 +792,23 @@ func (runtime *interruptedTestRuntime) takeProbeInterruption() error {
 }
 
 func TestInterruptedBatchDoesNotCommitFailuresOrProbeTimestamps(t *testing.T) {
-	for _, speed := range []bool{false, true} {
-		pool := healthFixture(true)
-		contract := pool.HealthPolicies["europe"]
-		contract.Mode = "best"
-		pool.HealthPolicies["europe"] = contract
-		item := newPolicyHealthState()
-		item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
-		primary := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"}, probes: map[string]probeEvidence{"de": successfulEvidence(100), "nl": successfulEvidence(90)}}
-		runtime := &interruptedTestRuntime{fakeSelectorRuntime: primary, duringSpeed: speed}
-		controller := &healthController{opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime, warmStarted: map[string]bool{}, stateLoaded: true, state: healthState{"europe": item}}
-		if err := controller.Tick(time.Unix(1000, 0)); err != nil {
-			t.Fatal(err)
-		}
-		if !controller.yielded || controller.nextInterval() != 0 || item.Selected != "de" || !item.RuntimeConfirmed {
-			t.Fatalf("interrupted batch did not yield cleanly (speed=%v)", speed)
-		}
-		if len(item.Samples["de"]) != 0 || item.AvailabilityFailures["de"] != 0 || item.LastProbeAt["de"] != 0 || item.LastSpeedProbeAt["de"] != 0 || !contains(item.ScanQueue, "de") {
-			t.Fatalf("cancelled batch changed evidence or lost queue (speed=%v)", speed)
-		}
+	pool := healthFixture(true)
+	contract := pool.HealthPolicies["europe"]
+	contract.Mode = "best"
+	pool.HealthPolicies["europe"] = contract
+	item := newPolicyHealthState()
+	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "de", "de", true
+	primary := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"}, probes: map[string]probeEvidence{"de": successfulEvidence(100), "nl": successfulEvidence(90)}}
+	runtime := &interruptedTestRuntime{fakeSelectorRuntime: primary}
+	controller := &healthController{opts: Options{StateRoot: t.TempDir(), HealthInterval: time.Minute}, runtime: runtime, warmStarted: map[string]bool{}, stateLoaded: true, state: healthState{"europe": item}}
+	if err := controller.Tick(time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if !controller.yielded || controller.nextInterval() != 0 || item.Selected != "de" || !item.RuntimeConfirmed {
+		t.Fatal("interrupted batch did not yield cleanly")
+	}
+	if len(item.Samples["de"]) != 0 || item.AvailabilityFailures["de"] != 0 || item.LastProbeAt["de"] != 0 || !contains(item.ScanQueue, "de") {
+		t.Fatal("cancelled batch changed evidence or lost queue")
 	}
 }
 

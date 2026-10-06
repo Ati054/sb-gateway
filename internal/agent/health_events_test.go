@@ -91,13 +91,11 @@ func TestOptimizationSwitchJournalIncludesFreshComparison(t *testing.T) {
 	if comparison == nil || comparison.Result != optimizationWin || comparison.Reason != "better" ||
 		comparison.Candidate != events[0].To || comparison.At != events[0].At ||
 		comparison.ActiveDelayMS == nil || *comparison.ActiveDelayMS != 600 ||
-		comparison.CandidateDelayMS == nil || *comparison.CandidateDelayMS != 500 ||
-		comparison.ActiveSpeedBPS == nil || *comparison.ActiveSpeedBPS != 12_000 ||
-		comparison.CandidateSpeedBPS == nil || *comparison.CandidateSpeedBPS != 16_000 {
+		comparison.CandidateDelayMS == nil || *comparison.CandidateDelayMS != 500 {
 		t.Fatalf("switch lost its paired decision evidence: %+v", comparison)
 	}
 	body, err := json.Marshal(events[0])
-	if err != nil || !strings.Contains(string(body), `"candidate_speed_bps":16000`) ||
+	if err != nil || !strings.Contains(string(body), `"candidate_delay_ms":500`) || strings.Contains(string(body), "speed_bps") ||
 		strings.Contains(string(body), "candidate_nodes") || strings.Contains(string(body), "https://") {
 		t.Fatalf("unsafe or incomplete optimization event: %s (%v)", body, err)
 	}

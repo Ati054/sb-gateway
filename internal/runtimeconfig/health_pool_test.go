@@ -85,15 +85,17 @@ func TestBuildXrayHealthPoolUsesCurrentPriorityOrder(t *testing.T) {
 	}
 }
 
-func TestBuildXrayHealthPoolPreservesLegacyBatchesUntilGlobalAuto(t *testing.T) {
+func TestBuildXrayHealthPoolUsesGlobalDefaultForLegacyBatches(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		monitor map[string]any
 		batches map[string]int
 	}{
-		{"absent", nil, map[string]int{"best": 2, "priority": 3}},
-		{"empty", map[string]any{}, map[string]int{"best": 2, "priority": 3}},
-		{"auto", map[string]any{"probe_batch_size": 0}, map[string]int{"best": 5, "priority": 5}},
+		{"absent", nil, map[string]int{"best": 10, "priority": 10}},
+		{"empty", map[string]any{}, map[string]int{"best": 10, "priority": 10}},
+		{"auto", map[string]any{"probe_batch_size": 0}, map[string]int{"best": 10, "priority": 10}},
+		{"explicit-five", map[string]any{"probe_batch_size": 5}, map[string]int{"best": 5, "priority": 5}},
+		{"explicit-sixty-four", map[string]any{"probe_batch_size": 64}, map[string]int{"best": 64, "priority": 64}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := map[string]any{
@@ -106,6 +108,7 @@ func TestBuildXrayHealthPoolPreservesLegacyBatchesUntilGlobalAuto(t *testing.T) 
 			if tc.monitor != nil {
 				config["system"] = map[string]any{"routing_monitor": tc.monitor}
 			}
+			before := cloneJSONMap(config)
 			body, err := BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
 			if err != nil {
 				t.Fatal(err)
@@ -114,8 +117,11 @@ func TestBuildXrayHealthPoolPreservesLegacyBatchesUntilGlobalAuto(t *testing.T) 
 			if err := json.Unmarshal(body, &pool); err != nil {
 				t.Fatal(err)
 			}
-			if got, ok := numericInt(pool["probe_budget"]); !ok || got != 5 {
-				t.Fatalf("global budget = %v, want 5", pool["probe_budget"])
+			if got, ok := numericInt(pool["probe_budget"]); !ok || got != tc.batches["best"] {
+				t.Fatalf("global budget = %v, want %d", pool["probe_budget"], tc.batches["best"])
+			}
+			if !reflect.DeepEqual(config, before) {
+				t.Fatal("rendering global batches mutated the source config")
 			}
 			for id, want := range tc.batches {
 				policy := objectValue(objectValue(objectValue(pool["health_policies"])[id])["policy"])
@@ -156,18 +162,14 @@ func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	policies := objectValue(pool["health_policies"])
-	if budget, ok := numericInt(pool["probe_budget"]); !ok || budget != 5 {
+	if budget, ok := numericInt(pool["probe_budget"]); !ok || budget != 10 {
 		t.Fatalf("global budget = %v", pool["probe_budget"])
 	}
-	for id, wantBatch := range map[string]int{"best": 5, "priority": 5} {
+	for id, wantBatch := range map[string]int{"best": 10, "priority": 10} {
 		policy := objectValue(objectValue(policies[id])["policy"])
 		for field, want := range map[string]int{
 			"active_liveness_interval_seconds": 4,
-			"failure_retry_interval_seconds":   2,
-			"block_recovery_interval_seconds":  12,
 			"active_check_interval_seconds":    45,
-			"backup_check_interval_seconds":    180,
-			"full_scan_interval_seconds":       900,
 			"probe_batch_size":                 wantBatch,
 		} {
 			got, ok := numericInt(policy[field])
@@ -175,9 +177,14 @@ func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
 				t.Fatalf("%s %s = %v, want %d", id, field, policy[field], want)
 			}
 		}
+		for _, field := range []string{"failure_retry_interval_seconds", "block_recovery_interval_seconds", "backup_check_interval_seconds", "full_scan_interval_seconds"} {
+			if _, exists := policy[field]; exists {
+				t.Fatalf("%s retained retired monitor field %s", id, field)
+			}
+		}
 	}
 
-	for _, batch := range []int{1, 2, 5, 6, 7, 8, 9, 10} {
+	for _, batch := range []int{1, 2, 5, 6, 7, 8, 9, 10, 24, 64} {
 		objectValue(objectValue(config["system"])["routing_monitor"])["probe_batch_size"] = batch
 		configured := objectSlice(config["policies"])
 		configured[0]["speed_degradation_percent"] = 0
@@ -193,13 +200,13 @@ func TestBuildXrayHealthPoolResolvesGlobalMonitorSettings(t *testing.T) {
 			t.Fatalf("global manual budget = %v, want %d", pool["probe_budget"], batch)
 		}
 		policies = objectValue(pool["health_policies"])
-		for id, drop := range map[string]int{"best": 0, "priority": 30} {
+		for _, id := range []string{"best", "priority"} {
 			policy := objectValue(objectValue(policies[id])["policy"])
 			if got, ok := numericInt(policy["probe_batch_size"]); !ok || got != batch {
 				t.Fatalf("%s explicit batch = %v, want %d", id, policy["probe_batch_size"], batch)
 			}
-			if got, ok := numericInt(policy["speed_degradation_percent"]); !ok || got != drop {
-				t.Fatalf("%s speed drop = %v, want %d", id, policy["speed_degradation_percent"], drop)
+			if _, exists := policy["speed_degradation_percent"]; exists {
+				t.Fatalf("%s retained retired speed setting: %#v", id, policy)
 			}
 		}
 	}

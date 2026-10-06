@@ -3,12 +3,14 @@ package agent
 import "time"
 
 // The fast lane only checks the active path. It neither scores candidates nor
-// drains scan queues, downloads speed samples or rewrites healthy history.
+// drains scan queues or rewrites healthy history.
 func (controller *healthController) tickActiveAvailability(now time.Time, policyID string, contract healthPolicyContract, item *policyHealthState) (bool, error) {
 	return controller.checkActiveAvailability(now, policyID, contract, item, true)
 }
 
-func (controller *healthController) checkActiveAvailability(now time.Time, policyID string, contract healthPolicyContract, item *policyHealthState, recoverNow bool) (bool, error) {
+func (controller *healthController) checkActiveAvailability(now time.Time, policyID string, contract healthPolicyContract, item *policyHealthState, recoverNow bool) (changed bool, checkErr error) {
+	trace := beginHealthStage("active_check", "controller", policyID, item.Selected)
+	defer func() { trace.finish(checkErr == nil) }()
 	ensureHealthMaps(item)
 	selected := item.Selected
 	if !contains(contract.Candidates, selected) {
@@ -34,11 +36,13 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	savedChanged := rememberWorkingSelection(contract, item)
 	actual, err := controller.runtime.Current(policyID)
 	if err != nil {
+		item.LatencyComparisons = nil
 		item.RuntimeConfirmed = false
 		item.RuntimeObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		return true, err
 	}
 	if actual != selected {
+		item.LatencyComparisons = nil
 		controller.livenessAt[policyID] = time.Time{}
 		if !recoverNow {
 			return true, errHealthYield
@@ -55,11 +59,11 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	evidence := controller.runtime.ProbeAvailability(selected)
 	controller.livenessAt[policyID] = now
 	if evidence.LocalFailure {
+		item.LatencyComparisons = nil
 		return true, errProbeSelectorUnavailable
 	}
 	wasFailed := item.AvailabilityFailures[selected] > 0
 	if evidence.OK {
-		finishOutageEpisode(item, selected)
 		if wasFailed {
 			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-recovered", Policy: policyID, Node: selected, Targets: probeTargetResults(evidence)})
 		}
@@ -71,6 +75,9 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 		return wasFailed || statusChanged || savedChanged, nil
 	}
 	item.FailureClass[selected] = string(evidence.Failure)
+	item.LatencyComparisons = nil
+	// Date the withdrawal so a delayed history response cannot restore it.
+	item.RuntimeObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	recoveringFromUnderlay := item.UnderlayFailure != ""
 	if controller.suppressForUnderlayFailure(now, evidence, item) {
 		controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID, Node: selected, Failure: evidence.Failure, Underlay: item.UnderlayFailure, Targets: probeTargetResults(evidence)})

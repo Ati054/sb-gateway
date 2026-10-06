@@ -18,7 +18,8 @@ import {
 import { mergeRuntimeStatus, reverseAvailability } from "./runtime-status";
 import { nodePresentation, selectorCandidateIds, routeCandidateIds, compareRouteCandidates, nodeDisplayLabel, nodeLocationDetail } from "./node-presentation";
 import { confirmedUnstableRoute, qualitySheet } from "./node-quality";
-import { activeQualityMetrics, latestSpeedSince, qualityStatsSince } from "./quality-window";
+import { activeQualityMetrics, freshLatencyComparison, qualityStatsSince } from "./quality-window";
+import { withoutRetiredURLTestSettings } from "./urltest-settings";
 import { automaticCidrHint, supportsAutomaticCidr } from "./cdn-capabilities";
 import { AcmeFields, useAcmeProfile } from "./acme-fields";
 import { TlsTransferDialog } from "./tls-transfer";
@@ -4834,18 +4835,16 @@ function Routing({
           : retainedStats;
         const currentDailyStats = asObject(dailyStats[selected]);
         const currentLoss = currentDailyStats.loss_percent;
-        const currentP95 = currentDailyStats.p95_ms;
+        const currentMedian = activeQualityMetrics(health, selected, visibleBaseline ?? 0).median;
         const nodeStats = candidateIds
           .map((candidate) => {
             const stats = asObject(dailyStats[candidate]);
-            const current = activeQualityMetrics(health, candidate, visibleBaseline ?? 0);
-            const outage = asObject(asObject(health.outage_penalty)[candidate]);
+            const comparison = freshLatencyComparison(health, candidate, Date.now() / 1000, visibleBaseline ?? 0);
             const unstable = confirmedUnstableRoute(
-              outage.open === true,
               asObject(health.availability_ok)[candidate] as boolean | undefined,
               Number(stats.samples ?? 0),
               typeof stats.loss_percent === "number" ? stats.loss_percent : null,
-              Number(asObject(health.quality_thresholds).max_packet_loss_percent ?? 40),
+              40,
             );
             return {
               id: candidate,
@@ -4867,23 +4866,8 @@ function Routing({
                 typeof stats.availability_percent === "number"
                   ? stats.availability_percent
                   : null,
-              median: candidate === selected ? current.median : typeof stats.median_ms === "number" ? stats.median_ms : null,
-              medianAt: candidate === selected ? current.medianAt : null,
-              speedAt: candidate === selected ? current.speedAt : null,
-              decisionMedian: typeof asObject(health.median_delay_ms)[candidate] === "number"
-                ? Number(asObject(health.median_delay_ms)[candidate])
-                : null,
-              p95: typeof stats.p95_ms === "number" ? stats.p95_ms : null,
-              speedBps: candidate === selected ? current.speedBps : visibleBaseline
-                ? latestSpeedSince(
-                    health.speed_samples_bps,
-                    health.last_speed_success_at,
-                    candidate,
-                    visibleBaseline,
-                  )
-                : typeof asObject(health.speed_median_bps)[candidate] === "number"
-                    ? Number(asObject(health.speed_median_bps)[candidate])
-                    : null,
+              median: typeof stats.median_ms === "number" ? stats.median_ms : null,
+              comparison,
             };
           })
           .sort((left, right) => {
@@ -4893,10 +4877,6 @@ function Routing({
             if (availability) return availability;
             const loss = (left.loss ?? 101) - (right.loss ?? 101);
             if (loss) return loss;
-            const speed = (right.speedBps ?? -1) - (left.speedBps ?? -1);
-            if (speed) return speed;
-            const p95 = (left.p95 ?? Number.MAX_SAFE_INTEGER) - (right.p95 ?? Number.MAX_SAFE_INTEGER);
-            if (p95) return p95;
             const latency = (left.median ?? Number.MAX_SAFE_INTEGER) - (right.median ?? Number.MAX_SAFE_INTEGER);
             if (latency) return latency;
             return left.label.localeCompare(right.label, "ru");
@@ -4970,7 +4950,7 @@ function Routing({
               : tr("Лучший + резерв"),
           runtimeConfirmed,
           reserves: health.checked_at ? asText(health.healthy_reserves, "0") : "—",
-          p95: typeof currentP95 === "number" ? tr("{value1} мс", { value1: currentP95 }) : "—",
+          median: typeof currentMedian === "number" ? tr("{value1} мс", { value1: currentMedian }) : "—",
           loss: typeof currentLoss === "number" ? `${currentLoss.toFixed(1)}%` : "—",
           nodeStats,
           queueNodes,
@@ -5102,7 +5082,7 @@ function Routing({
                     </div>
                     <div className="policy-card-active">
                       <strong><NodeName label={policy.active} country={policy.activeCountry} provider={policy.activeProvider} /></strong>
-                      {policy.p95 !== "—" ? <code>{policy.p95}</code> : null}
+                      {policy.median !== "—" ? <code title={tr("Медиана")}>{policy.median}</code> : null}
                       {policy.readyReserves > 0 ? (
                         <span>+{policy.readyReserves}  {tr("в резерве")}</span>
                       ) : null}
@@ -5229,10 +5209,9 @@ function Routing({
                   <tr>
                     <th>{quality.policy?.mode === "priority" ? tr("Приоритет") : tr("Рейтинг")}</th>
                     <th>{tr("Маршрут и узел")}</th>
-                    <th>{tr("Доступность / потери")}</th>
+                    <th>{tr("Доступность / ошибки HTTPS")}</th>
                     <th>{tr("Медиана")}</th>
-                    <th>{tr("Скорость")}</th>
-                    <th>p95 HTTPS</th>
+                    <th title={tr("Свежий HTTPS-отклик относительно активного: минус — быстрее, плюс — медленнее.")}>{tr("Delta, %")}</th>
                     <th>{tr("Замеры")}</th>
                   </tr>
                 </thead>
@@ -5256,16 +5235,17 @@ function Routing({
                       <td className="quality-inline-value">
                         <span className="quality-availability-value">
                           <strong>{node.unstable ? tr("Нестабилен") : node.availability == null ? tr("Нет замера") : `${node.availability.toFixed(1)}%`}</strong>
-                          {node.unstable ? <small>{tr("Срыв маршрута")}</small> : node.loss == null ? null : <small>({node.loss.toFixed(1)}{tr("% потерь)")}</small>}
+                          {node.unstable ? <small>{tr("Срыв маршрута")}</small> : node.loss == null ? null : <small>({node.loss.toFixed(1)}{tr("% ошибок HTTPS)")}</small>}
                         </span>
                       </td>
-                      <td className="quality-measurement"><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong>
-                        {node.medianAt ? <time dateTime={new Date(node.medianAt * 1000).toISOString()} title={tr("Короткое окно · {value1}", { value1: formatTimestamp(new Date(node.medianAt * 1000).toISOString(), locale) })}>{new Date(node.medianAt * 1000).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time> : null}
+                      <td className="quality-measurement"><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong></td>
+                      <td className={node.comparison ? `quality-comparison ${node.comparison.percent < 0 ? "is-faster" : node.comparison.percent > 0 ? "is-slower" : ""}` : "quality-comparison"}
+                        title={node.comparison ? tr("Активный: {value1}; кандидат: {value2}", {
+                          value1: formatTimestamp(new Date(node.comparison.activeAt * 1000).toISOString(), locale),
+                          value2: formatTimestamp(new Date(node.comparison.candidateAt * 1000).toISOString(), locale),
+                        }) : tr("Нет свежего подтверждённого сравнения")}>
+                        {node.comparison ? `${node.comparison.percent > 0 ? "+" : ""}${node.comparison.percent.toLocaleString(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` : "—"}
                       </td>
-                      <td className="quality-measurement"><strong>{node.speedBps == null ? "—" : tr("{value1} Мбит/с", { value1: (node.speedBps / 1_000_000).toFixed(1) })}</strong>
-                        {node.speedAt ? <time dateTime={new Date(node.speedAt * 1000).toISOString()} title={tr("Последний успешный замер · {value1}", { value1: formatTimestamp(new Date(node.speedAt * 1000).toISOString(), locale) })}>{new Date(node.speedAt * 1000).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time> : null}
-                      </td>
-                      <td>{node.p95 == null ? "—" : tr("{value1} мс", { value1: node.p95 })}</td>
                       <td>{node.samples || "—"}</td>
                     </tr>
                   ))}
@@ -5291,12 +5271,8 @@ function Routing({
 
 const ROUTING_MONITOR_DEFAULTS = {
   active_liveness_interval_seconds: 3,
-  failure_retry_interval_seconds: 2,
-  block_recovery_interval_seconds: 15,
   active_quality_interval_seconds: 60,
-  reserve_check_interval_seconds: 300,
-  full_scan_interval_seconds: 1800,
-  probe_batch_size: 0,
+  probe_batch_size: 10,
 } as const;
 
 type RoutingMonitorValues = {
@@ -5308,7 +5284,7 @@ function routingMonitorValues(config: JsonObject): RoutingMonitorValues {
   return Object.fromEntries(
     Object.entries(ROUTING_MONITOR_DEFAULTS).map(([key, fallback]) => {
       const value = Number(monitor[key]);
-      return [key, Number.isInteger(value) ? value : fallback];
+      return [key, Number.isInteger(value) && !(key === "probe_batch_size" && value === 0) ? value : fallback];
     }),
   ) as RoutingMonitorValues;
 }
@@ -5357,37 +5333,26 @@ function RoutingMonitorSettings({
             <small>{tr("Общие настройки всех маршрутных листов")}</small>
           </span>
           <span className="routing-monitor-summary" aria-label={tr("Быстрые интервалы")}>
-            {values.active_liveness_interval_seconds} / {values.failure_retry_interval_seconds} / {values.block_recovery_interval_seconds} {tr("сек.")}
+            {values.active_liveness_interval_seconds} / {values.active_quality_interval_seconds} {tr("сек.")}
           </span>
         </summary>
         <div className="routing-monitor-form">
           <div className="routing-monitor-grid">
             {numberField("active_liveness_interval_seconds", "Доступность активного узла, сек.", 2, 30)}
-            {numberField("failure_retry_interval_seconds", "Повтор после ошибки, сек.", 1, 10)}
-            {numberField("block_recovery_interval_seconds", "Повтор других узлов, сек.", 5, 60)}
-            {numberField("active_quality_interval_seconds", "Качество активного узла, сек.", 10, 3600)}
-            {numberField("reserve_check_interval_seconds", "Проверка резервов, сек.", 10, 86400)}
-            {numberField("full_scan_interval_seconds", "Полный обход, сек.", 10, 86400)}
+            {numberField("active_quality_interval_seconds", "Интервал оценки задержки, сек.", 10, 3600)}
             <label className="field">
               <span>{tr("Максимум проверок за цикл")}</span>
-              <select
+              <input
+                type="number"
+                min={1}
+                max={64}
+                step={1}
+                required
                 disabled={disabled}
                 value={values.probe_batch_size}
                 onChange={(event) => update("probe_batch_size", event.target.value)}
-              >
-                <option value={0}>{tr("Авто · общий бюджет: 5")}</option>
-                <option value={1}>1</option>
-                <option value={2}>2</option>
-                <option value={3}>3</option>
-                <option value={4}>4</option>
-                <option value={5}>5</option>
-                <option value={6}>6</option>
-                <option value={7}>7</option>
-                <option value={8}>8</option>
-                <option value={9}>9</option>
-                <option value={10}>10</option>
-              </select>
-              <small>{tr("Общий бюджет всех листов. Совпадающие узлы используют свежий общий замер; скоростные скачивания идут по очереди.")}</small>
+              />
+              <small>{tr("Общий лимит одновременно проверяемых узлов: от 1 до 64. По умолчанию 10.")}</small>
             </label>
           </div>
           <div className="routing-monitor-actions">
@@ -5604,12 +5569,8 @@ function RoutingInfrastructureSettings({
   async function saveRoutingInfrastructure() {
     const monitorRanges: Array<[keyof RoutingMonitorValues, number, number]> = [
       ["active_liveness_interval_seconds", 2, 30],
-      ["failure_retry_interval_seconds", 1, 10],
-      ["block_recovery_interval_seconds", 5, 60],
       ["active_quality_interval_seconds", 10, 3600],
-      ["reserve_check_interval_seconds", 10, 86400],
-      ["full_scan_interval_seconds", 10, 86400],
-      ["probe_batch_size", 0, 10],
+      ["probe_batch_size", 1, 64],
     ];
     if (monitorRanges.some(([key, minimum, maximum]) =>
       !Number.isInteger(routingMonitor[key]) || routingMonitor[key] < minimum || routingMonitor[key] > maximum
@@ -5617,18 +5578,7 @@ function RoutingInfrastructureSettings({
       setSaveMessage(prefixedErrorMessage(new Error(tr("Проверьте значения мониторинга маршрутов."))));
       return;
     }
-    if (routingMonitor.failure_retry_interval_seconds > routingMonitor.active_liveness_interval_seconds) {
-      setSaveMessage(prefixedErrorMessage(new Error(tr("Интервал повтора после ошибки не может быть больше интервала проверки активного узла."))));
-      return;
-    }
-    if (routingMonitor.reserve_check_interval_seconds < routingMonitor.active_quality_interval_seconds) {
-      setSaveMessage(prefixedErrorMessage(new Error(tr("Резервы нельзя проверять чаще активного узла."))));
-      return;
-    }
-    if (routingMonitor.full_scan_interval_seconds < routingMonitor.reserve_check_interval_seconds) {
-      setSaveMessage(prefixedErrorMessage(new Error(tr("Полный обход не может выполняться чаще проверки резервов."))));
-      return;
-    }
+
     if (!wireguardValid) {
       setSaveMessage(
         tr("Ошибка: выберите хотя бы один доступный WireGuard-интерфейс."),
@@ -12144,18 +12094,7 @@ function PolicyDialog({
   const [customRoutes, setCustomRoutes] = useState<JsonObject[]>(
     () => asObjectList(existingPolicy.custom_routes),
   );
-  const [candidateLimit, setCandidateLimit] = useState(() => {
-    const saved = Number(existingPolicy.max_active_candidates ?? existingPolicy.max_probe_candidates);
-    if (Number.isFinite(saved) && saved >= 1) {
-      return Math.max(1, Math.min(10, Math.trunc(saved)));
-    }
-    return 5;
-  });
-  const [speedDegradationPercent, setSpeedDegradationPercent] = useState<number | null>(
-    () => existingPolicy.speed_degradation_percent == null
-      ? null
-      : Number(existingPolicy.speed_degradation_percent),
-  );
+  const candidateLimit = routingMonitorValues(config).probe_batch_size;
   const [candidateServiceIds, setCandidateServiceIds] = useState<string[]>(() => {
     const saved = asStringList(existingPolicy.candidate_service_ids);
     return saved.length ? saved : ["claude", "antigravity"];
@@ -12357,7 +12296,7 @@ function PolicyDialog({
           .filter((id) => id && !retainedCustomIds.has(id)),
       );
       const item: JsonObject = {
-        ...existingPolicy,
+        ...withoutRetiredURLTestSettings(existingPolicy),
         id,
         display_name: displayName,
         enabled: policyEnabled,
@@ -12407,24 +12346,7 @@ function PolicyDialog({
             : {},
         container_outage: undefined,
         on_all_unavailable: "block",
-        failure_threshold: Number(data.get("failure_threshold") ?? existingPolicy.failure_threshold ?? 3),
-        recovery_threshold: Number(data.get("recovery_threshold") ?? existingPolicy.recovery_threshold ?? 3),
-        quality_window: Number(data.get("quality_window") ?? existingPolicy.quality_window ?? 5),
-        max_packet_loss_percent: Number(data.get("max_packet_loss_percent") ?? existingPolicy.max_packet_loss_percent ?? 40),
-        max_latency_ms: Number(data.get("max_latency_ms") ?? existingPolicy.max_latency_ms ?? 2000),
-        switch_cooldown_seconds: Number(data.get("switch_cooldown_seconds") ?? existingPolicy.switch_cooldown_seconds ?? 600),
-        switch_improvement_percent: undefined,
         switch_improvement_ms: Number(data.get("switch_improvement_ms") ?? existingPolicy.switch_improvement_ms ?? 50),
-        speed_check_enabled: mode === "best" || Number(data.get("speed_degradation_percent") ?? 0) > 0,
-        speed_improvement_percent: Number(data.get("speed_improvement_percent") ?? existingPolicy.speed_improvement_percent ?? 25),
-        speed_degradation_percent: Number(data.get("speed_degradation_percent") ?? existingPolicy.speed_degradation_percent ?? (mode === "best" ? 50 : 0)),
-        speed_check_interval_seconds: Number(existingPolicy.speed_check_interval_seconds ?? 10800),
-        speed_probe_bytes: Number(existingPolicy.speed_probe_bytes ?? 2097152),
-        speed_candidate_count: Number(existingPolicy.speed_candidate_count ?? 2),
-        max_active_candidates: candidateLimit,
-        max_probe_candidates: candidateLimit,
-        return_to_primary: true,
-        interrupt_exist_connections: false,
       };
       await saveCurrentDraft({
         config: withDeploymentReadiness(
@@ -12523,7 +12445,7 @@ function PolicyDialog({
                     />
                     <span>
                       <strong>{tr("URLTest с резервированием")}</strong>
-                      <small>{tr("Распределяет HTTPS- и ограниченные тесты скорости по всему выбранному набору. Планово переключается только на заметно лучший канал.")}</small>
+                      <small>{tr("Выбирает узел по свежему HTTPS-отклику. Плановая смена требует подтверждённого преимущества.")}</small>
                     </span>
                   </label>
                   <label>
@@ -12670,73 +12592,13 @@ function PolicyDialog({
                   </details>
                 ) : null}
               </div>
-              <aside className="adaptive-checks-note form-span">
-                <strong>{tr("Проверки распределены по времени")}</strong>
-                <p>{mode === "priority" && (speedDegradationPercent ?? 0) === 0
-                  ? tr("Вся выбранная очередь проверяется малыми партиями. Доступность активного пути контролируется отдельно.")
-                  : tr("Активный узел получает приоритет в замерах скорости. Просадка запускает дополнительные подтверждающие замеры.")}</p>
-              </aside>
-              <details className="policy-check-advanced form-span">
-                <summary>{tr("Дополнительные параметры переключения")}</summary>
-                <div className="policy-check-grid">
-                  {mode === "best" ? <label className="field">
-                    <span className="policy-check-label">{tr("Узлов в активном пуле")}</span>
-                    <select name="max_active_candidates" value={candidateLimit} onChange={(event) => setCandidateLimit(Number(event.target.value))}>
-                      {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}
-                    </select>
-                    <small>{tr("Активный узел и лучшие резервы. Все выбранные серверы проверяются в фоне.")}</small>
-                  </label> : null}
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Окно оценки качества")}</span>
-                    <input name="quality_window" type="number" min="3" max="60" defaultValue={asText(existingPolicy.quality_window, "5")} />
-                    <small>{tr("Количество последних HTTPS-проверок.")}</small>
-                  </label>
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Допустимая доля потерь, %")}</span>
-                    <input name="max_packet_loss_percent" type="number" min="0" max="100" defaultValue={asText(existingPolicy.max_packet_loss_percent, "40")} />
-                  </label>
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Порог HTTPS-медианы, мс")}</span>
-                    <input name="max_latency_ms" type="number" min="0" max="30000" defaultValue={asText(existingPolicy.max_latency_ms, "2000")} />
-                    <small>{tr("0 — без порога.")}</small>
-                  </label>
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Подтверждений обычной ошибки")}</span>
-                    <input name="failure_threshold" type="number" min="1" max="20" defaultValue={asText(existingPolicy.failure_threshold, "3")} />
-                    <small>{tr("Сетевой отказ или TLS-ошибка — сразу; тайм-аут — после двух запросов.")}</small>
-                  </label>
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Подтверждений восстановления")}</span>
-                    <input name="recovery_threshold" type="number" min="1" max="20" defaultValue={asText(existingPolicy.recovery_threshold, "3")} />
-                  </label>
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Порог просадки скорости, %")}</span>
-                    <input name="speed_degradation_percent" type="number" min="0" max="99" step="1"
-                      value={speedDegradationPercent ?? (mode === "best" ? 50 : 0)}
-                      onChange={(event) => setSpeedDegradationPercent(Number(event.target.value))} />
-                    <small>{tr("Относительно недавней устойчивой скорости этого узла. 0 — не переключаться из-за просадки скорости.")}</small>
-                  </label>
-                  {mode === "best" ? (
-                    <>
-                      <label className="field">
-                        <span className="policy-check-label">{tr("Порог приоритета скорости, %")}</span>
-                        <input name="speed_improvement_percent" type="number" min="0" max="100" defaultValue={asText(existingPolicy.speed_improvement_percent, "25")} />
-                        <small>{tr("Минимальный выигрыш относительно активного узла при парной проверке скорости.")}</small>
-                      </label>
-                      <label className="field">
-                        <span className="policy-check-label">{tr("Порог переключения URLTest, мс")}</span>
-                        <input name="switch_improvement_ms" type="number" min="0" max="30000" defaultValue={asText(existingPolicy.switch_improvement_ms, "50")} />
-                        <small>{tr("Только для выбора по отклику.")}</small>
-                      </label>
-                    </>
-                  ) : null}
-                  <label className="field">
-                    <span className="policy-check-label">{tr("Защита от обратного переключения, сек.")}</span>
-                    <input name="switch_cooldown_seconds" type="number" min="0" max="86400" defaultValue={asText(existingPolicy.switch_cooldown_seconds, "600")} />
-                    <small>{tr("Пауза для плановой смены и ухудшения HTTPS-качества. Подтверждённый отказ и просадка скорости обрабатываются отдельно.")}</small>
-                  </label>
-                </div>
-              </details>
+              {mode === "best" ? (
+                <label className="field form-span policy-latency-tolerance">
+                  <span>{tr("Порог переключения URLTest, мс")}</span>
+                  <input name="switch_improvement_ms" type="number" min="0" max="30000" defaultValue={asText(existingPolicy.switch_improvement_ms, "50")} />
+                  <small>{tr("Минимальное преимущество свежего HTTPS-отклика над активным узлом.")}</small>
+                </label>
+              ) : null}
               <div className="form-span policy-enabled-toggle">
                 <Toggle
                   checked={policyEnabled}

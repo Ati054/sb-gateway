@@ -2,7 +2,6 @@ package agent
 
 import (
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -21,12 +20,6 @@ func (controller *healthController) deferSharedProbe(policyID string) {
 type sharedProbeResult struct {
 	At       time.Time
 	Evidence probeEvidence
-}
-
-type sharedSpeedResult struct {
-	At  time.Time
-	BPS int64
-	Err error
 }
 
 type parallelQualityRuntime interface {
@@ -76,7 +69,6 @@ func (controller *healthController) takeSharedProbeInterruption() error {
 	if err != nil && controller.probeBudget != nil {
 		// Partial results cannot cross a generation change or policy transition.
 		controller.probeBudget.Quality = map[string]sharedProbeResult{}
-		controller.probeBudget.Speed = map[string]sharedSpeedResult{}
 	}
 	return err
 }
@@ -87,22 +79,20 @@ type healthProbeBudget struct {
 	Limit            int
 	Used             map[string]bool
 	Quality          map[string]sharedProbeResult
-	Speed            map[string]sharedSpeedResult
 	Cursor           int
 	QualityAttempted map[string]bool
-	SpeedAttempted   map[string]bool
 	DeferredPolicies map[string]time.Time
 }
 
 func (controller *healthController) beginProbeBudget(pool healthPool, policyIDs []string) {
 	if controller.probeBudget == nil {
-		controller.probeBudget = &healthProbeBudget{Quality: map[string]sharedProbeResult{}, Speed: map[string]sharedSpeedResult{}}
+		controller.probeBudget = &healthProbeBudget{Quality: map[string]sharedProbeResult{}}
 	}
 	budget := controller.probeBudget
 	budget.Limit, budget.Used = pool.ProbeBudget, map[string]bool{}
 	// A sample can serve different policies once, never another Tick's recovery.
-	budget.Quality, budget.Speed = map[string]sharedProbeResult{}, map[string]sharedSpeedResult{}
-	budget.QualityAttempted, budget.SpeedAttempted = map[string]bool{}, map[string]bool{}
+	budget.Quality = map[string]sharedProbeResult{}
+	budget.QualityAttempted = map[string]bool{}
 	if budget.DeferredPolicies == nil {
 		budget.DeferredPolicies = map[string]time.Time{}
 	}
@@ -126,18 +116,13 @@ func (controller *healthController) probeKey(policyID, node string, contract hea
 	return policyID + ":" + node
 }
 
-func (controller *healthController) claimProbeTargets(policyID string, contract healthPolicyContract, targets []string, speedBytes int, atomicPair bool) (accepted, deferred []string) {
+func (controller *healthController) claimProbeTargets(policyID string, contract healthPolicyContract, targets []string, atomicPair bool) (accepted, deferred []string) {
 	budget := controller.probeBudget
 	if budget == nil || budget.Limit <= 0 {
 		return targets, nil
 	}
 	now := time.Now()
 	usable := func(key string) (cached, attempted bool) {
-		if speedBytes > 0 {
-			key = fmt.Sprintf("%s:%d", key, speedBytes)
-			result, ok := budget.Speed[key]
-			return ok && now.Sub(result.At) <= sharedProbeLifetime, budget.SpeedAttempted[key]
-		}
 		result, ok := budget.Quality[key]
 		return ok && now.Sub(result.At) <= sharedProbeLifetime, budget.QualityAttempted[key]
 	}
@@ -201,24 +186,4 @@ func (controller *healthController) sharedQualityProbe(policyID, node string, co
 		budget.Quality[key] = sharedProbeResult{At: probeObservedAt(evidence), Evidence: evidence}
 	}
 	return evidence
-}
-
-func (controller *healthController) sharedSpeedProbe(policyID, node string, contract healthPolicyContract, bytes int) (int64, error) {
-	budget := controller.probeBudget
-	if budget == nil {
-		return controller.runtime.Throughput(node, bytes)
-	}
-	key := fmt.Sprintf("%s:%d", controller.probeKey(policyID, node, contract), bytes)
-	if result, ok := budget.Speed[key]; ok && time.Since(result.At) <= sharedProbeLifetime {
-		return result.BPS, result.Err
-	}
-	if budget.SpeedAttempted[key] {
-		return 0, errSharedProbeDeferred
-	}
-	budget.SpeedAttempted[key] = true
-	speed, err := controller.runtime.Throughput(node, bytes)
-	if contract.Nodes[node].Fingerprint != "" && speed > 0 && (err == nil || err == errSpeedWindowComplete) {
-		budget.Speed[key] = sharedSpeedResult{At: time.Now(), BPS: speed, Err: err}
-	}
-	return speed, err
 }

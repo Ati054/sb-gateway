@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
@@ -27,6 +28,33 @@ type startupHealthStateItem struct {
 	Recoveries           map[string]int    `json:"recoveries"`
 	Shortlist            []string          `json:"shortlist"`
 	LastWorkingSelection *workingSelection `json:"last_working_selection"`
+}
+
+// Membership edits do not reorder the surviving priority queue.
+func priorityOrderChanged(signature string, candidates []string) bool {
+	if signature == "" {
+		return true
+	}
+	previous := uniqueCandidates(strings.Split(signature, "\n"))
+	oldSet, newSet := make(map[string]bool, len(previous)), make(map[string]bool, len(candidates))
+	for _, node := range previous {
+		oldSet[node] = true
+	}
+	for _, node := range candidates {
+		newSet[node] = true
+	}
+	oldCommon, newCommon := []string{}, []string{}
+	for _, node := range previous {
+		if newSet[node] {
+			oldCommon = append(oldCommon, node)
+		}
+	}
+	for _, node := range uniqueCandidates(candidates) {
+		if oldSet[node] {
+			newCommon = append(newCommon, node)
+		}
+	}
+	return !slices.Equal(oldCommon, newCommon)
 }
 
 func rememberWorkingSelection(contract healthPolicyContract, item *policyHealthState) bool {
@@ -142,10 +170,10 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 				saved = item.LastWorkingSelection
 			}
 			if saved != nil && saved.Mode == contract.Mode &&
-				(contract.Mode != "priority" || saved.CandidateSignature == strings.Join(candidates, "\n")) &&
+				(contract.Mode != "priority" || !priorityOrderChanged(saved.CandidateSignature, candidates)) &&
 				saved.Selected != "block" && contains(candidates, saved.Selected) && contains(balancer.Members, saved.Selected) &&
 				contract.Nodes[saved.Selected].Protocol != "xray-reverse" &&
-				item.AvailabilityFailures[saved.Selected] < defaultInt(contract.Policy.FailureThreshold, 3, 1, 20) {
+				item.AvailabilityFailures[saved.Selected] < healthFailureConfirmations {
 				if available, known := item.AvailabilityOK[saved.Selected]; !known || available {
 					selected = saved.Selected
 				}
@@ -155,7 +183,7 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 				if contract.Mode == "best" {
 					ordered = uniqueCandidates(append(append([]string(nil), item.Shortlist...), candidates...))
 				}
-				threshold := defaultInt(contract.Policy.FailureThreshold, 3, 1, 20)
+				threshold := healthFailureConfirmations
 				for _, candidate := range ordered {
 					if contains(candidates, candidate) && contains(balancer.Members, candidate) &&
 						contract.Nodes[candidate].Protocol != "xray-reverse" &&

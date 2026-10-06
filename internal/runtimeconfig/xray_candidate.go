@@ -206,7 +206,8 @@ func addURLTestSelectors(config map[string]any, balancers []map[string]any) {
 	if len(prefixes) == 0 {
 		return
 	}
-	for _, lane := range xrayHealthProbeLanesForConfig(config) {
+	// Only existing, inventory-bounded balancers receive the runtime prefix.
+	for _, lane := range xrayHealthProbeLanesForConfig(config, maxHealthProbeBatch) {
 		tag := lane.Tag
 		if health := byTag[tag]; health != nil {
 			selectors := stringSlice(health["selector"])

@@ -316,7 +316,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 		"xray.json":         filepath.Join(liveRoot, "xray.json"),
 		"urltest-pool.json": filepath.Join(liveRoot, "urltest-pool.json"),
 	}
-	for name, body := range map[string]string{"xray.json": "old-xray\n", "urltest-pool.json": hotPolicyOldPool} {
+	for name, body := range map[string]string{"xray.json": `{"outbounds":[{"tag":"old-provider"}]}`, "urltest-pool.json": hotPolicyOldPool} {
 		if err := os.WriteFile(destinations[name], []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -327,7 +327,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 	}
 	poolBody := []byte(hotPolicyNewPool)
 	candidate, err := store.Prepare(strings.Repeat("d", 64), map[string][]byte{
-		"xray.json": []byte("new-xray\n"), "urltest-pool.json": poolBody,
+		"xray.json": []byte(`{"outbounds":[{"tag":"new-provider"}]}`), "urltest-pool.json": poolBody,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -344,7 +344,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 	published := make(chan error, 1)
 	controller := &recordingRuntimeController{}
 	runtime := &nativeRuntime{
-		options: RuntimeOptions{XrayHealthPool: destinations["urltest-pool.json"], XrayReadyFile: ready, XrayHotRuntimeReadyFile: hotReady},
+		options: RuntimeOptions{XrayConfig: destinations["xray.json"], XrayHealthPool: destinations["urltest-pool.json"], XrayReadyFile: ready, XrayHotRuntimeReadyFile: hotReady},
 		store:   store, controller: controller,
 		validate: func(ctx context.Context, _ runtimeconfig.RuntimeCandidate, _ []string) error {
 			go func() {
