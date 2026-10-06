@@ -188,30 +188,12 @@ func (result *configValidation) validateSystemSettings(config map[string]any) {
 				maximum int
 			}{
 				{"active_liveness_interval_seconds", 2, 30},
-				{"failure_retry_interval_seconds", 1, 10},
-				{"block_recovery_interval_seconds", 5, 60},
 				{"active_quality_interval_seconds", 10, 3600},
-				{"reserve_check_interval_seconds", 10, 86400},
-				{"full_scan_interval_seconds", 10, 86400},
-				{"probe_batch_size", 0, 10},
+				{"probe_batch_size", 0, 64},
 			} {
 				result.optionalIntegerRange(settings, field.name, "system.routing_monitor", field.minimum, field.maximum)
 			}
-			if retry, retryOK := jsonInteger(settings["failure_retry_interval_seconds"]); retryOK {
-				if liveness, livenessOK := jsonInteger(settings["active_liveness_interval_seconds"]); livenessOK && retry > liveness {
-					result.add("system.routing_monitor.failure_retry_interval_seconds", "ordering", "Failure retry cannot be slower than active availability checks.")
-				}
-			}
-			if active, activeOK := jsonInteger(settings["active_quality_interval_seconds"]); activeOK {
-				if reserve, reserveOK := jsonInteger(settings["reserve_check_interval_seconds"]); reserveOK && reserve < active {
-					result.add("system.routing_monitor.reserve_check_interval_seconds", "ordering", "Reserve checks cannot run more often than active quality checks.")
-				}
-			}
-			if reserve, reserveOK := jsonInteger(settings["reserve_check_interval_seconds"]); reserveOK {
-				if full, fullOK := jsonInteger(settings["full_scan_interval_seconds"]); fullOK && full < reserve {
-					result.add("system.routing_monitor.full_scan_interval_seconds", "ordering", "Full scans cannot run more often than reserve checks.")
-				}
-			}
+
 		}
 	}
 	deploymentReady := system["deployment_ready"] == true
@@ -661,9 +643,6 @@ func (result *configValidation) validatePolicySettings(entities map[string][]map
 		result.optionalBoolean(policy, "enabled", path)
 		result.optionalBoolean(policy, "torrent_direct", path)
 		result.optionalBoolean(policy, "pinpoint_domains_enabled", path)
-		result.optionalBoolean(policy, "speed_check_enabled", path)
-		result.optionalBoolean(policy, "return_to_primary", path)
-		result.optionalBoolean(policy, "interrupt_exist_connections", path)
 		result.optionalEnum(policy, "mode", path, map[string]bool{"best": true, "priority": true})
 		result.optionalEnum(policy, "traffic_mode", path, map[string]bool{
 			"vless_with_wan_exceptions": true, "wan_with_vless_exceptions": true,
@@ -677,36 +656,9 @@ func (result *configValidation) validatePolicySettings(entities map[string][]map
 			minimum int
 			maximum int
 		}{
-			{"quality_window", 3, 60},
-			{"max_packet_loss_percent", 0, 100},
-			{"max_latency_ms", 0, 30000},
-			{"failure_threshold", 1, 20},
-			{"recovery_threshold", 1, 20},
-			{"switch_cooldown_seconds", 0, 86400},
 			{"switch_improvement_ms", 0, 30000},
-			{"speed_improvement_percent", 0, 100},
-			{"speed_degradation_percent", 0, 99},
-			{"speed_check_interval_seconds", 300, 86400},
-			{"speed_probe_bytes", 256 * 1024, 10 * 1024 * 1024},
-			{"speed_candidate_count", 1, 5},
-			{"active_check_interval_seconds", 1, 3600},
-			{"backup_check_interval_seconds", 1, 86400},
-			{"full_scan_interval_seconds", 1, 86400},
-			{"max_active_candidates", 1, 10},
-			{"max_probe_candidates", 1, 10},
-			{"probe_batch_size", 1, 10},
 		} {
 			result.optionalIntegerRange(policy, field.name, path, field.minimum, field.maximum)
-		}
-		if active, activeOK := jsonInteger(policy["active_check_interval_seconds"]); activeOK {
-			if backup, backupOK := jsonInteger(policy["backup_check_interval_seconds"]); backupOK && backup < active {
-				result.add(path+".backup_check_interval_seconds", "ordering", "Backup checks cannot run more often than active-node checks.")
-			}
-		}
-		if backup, backupOK := jsonInteger(policy["backup_check_interval_seconds"]); backupOK {
-			if full, fullOK := jsonInteger(policy["full_scan_interval_seconds"]); fullOK && full < backup {
-				result.add(path+".full_scan_interval_seconds", "ordering", "Full scans cannot run more often than backup checks.")
-			}
 		}
 		for _, field := range []string{"countries", "locations", "selection_order", "outbounds", "direct_domains", "direct_services", "candidate_service_ids", "hidden_service_packs"} {
 			if value, exists := policy[field]; exists {

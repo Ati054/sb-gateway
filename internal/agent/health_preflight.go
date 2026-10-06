@@ -36,7 +36,8 @@ func (runtime *responsiveSelectorRuntime) PrioritizeEmergency(candidates []strin
 	ctx, cancel := context.WithTimeout(base, 3*time.Second)
 	defer cancel()
 	dialer := &net.Dialer{Timeout: 750 * time.Millisecond}
-	open, closed := emergencyTCPPreflight(ctx, candidates, runtime.currentPool.DialTargets, func(ctx context.Context, address string) error {
+	limit := defaultInt(runtime.currentPool.ProbeBudget, 10, 1, 64)
+	open, closed := emergencyTCPPreflight(ctx, candidates, runtime.currentPool.DialTargets, minInt(limit, 10), func(ctx context.Context, address string) error {
 		conn, err := dialer.DialContext(ctx, "tcp", address)
 		if err == nil {
 			_ = conn.Close()
@@ -50,35 +51,58 @@ func (runtime *responsiveSelectorRuntime) PrioritizeEmergency(candidates []strin
 	return open, closed, nil
 }
 
-func emergencyTCPPreflight(ctx context.Context, candidates []string, targets map[string]healthDialTarget, dial func(context.Context, string) error) ([]string, map[string]bool) {
+func emergencyTCPPreflight(ctx context.Context, candidates []string, targets map[string]healthDialTarget, limit int, dial func(context.Context, string) error) ([]string, map[string]bool) {
+	type endpoint struct {
+		address string
+		ids     []string
+	}
+	// Shared transport endpoints need one WAN TCP check, not one per node.
+	// HTTPS eligibility and selection are still checked separately through Xray.
+	endpoints := []endpoint{}
+	byAddress := make(map[string]int)
+	for _, id := range candidates {
+		target, ok := targets[id]
+		ip := net.ParseIP(target.Address)
+		if !ok || target.Port < 1 || target.Port > 65535 || ip == nil {
+			continue
+		}
+		address := net.JoinHostPort(ip.String(), strconv.Itoa(target.Port))
+		index, exists := byAddress[address]
+		if !exists {
+			index = len(endpoints)
+			byAddress[address] = index
+			endpoints = append(endpoints, endpoint{address: address})
+		}
+		endpoints[index].ids = append(endpoints[index].ids, id)
+	}
 	type result struct {
-		id     string
+		ids    []string
 		open   bool
 		closed bool
 	}
-	jobs := make(chan string)
-	results := make(chan result, len(candidates))
+	jobs := make(chan endpoint)
+	results := make(chan result, len(endpoints))
 	var workers sync.WaitGroup
-	for i := 0; i < minInt(10, len(candidates)); i++ {
+	for i := 0; i < minInt(maxInt(limit, 1), len(endpoints)); i++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for id := range jobs {
-				target, ok := targets[id]
-				if !ok || target.Port < 1 || target.Port > 65535 || net.ParseIP(target.Address) == nil {
-					continue
+			for target := range jobs {
+				if ctx.Err() != nil {
+					return
 				}
-				address := net.JoinHostPort(target.Address, strconv.Itoa(target.Port))
-				err := dial(ctx, address)
-				results <- result{id: id, open: err == nil, closed: errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH)}
+				err := dial(ctx, target.address)
+				results <- result{ids: target.ids, open: err == nil, closed: errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH)}
 			}
 		}()
 	}
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		defer close(jobs)
-		for _, id := range candidates {
+		for _, target := range endpoints {
 			select {
-			case jobs <- id:
+			case jobs <- target:
 			case <-ctx.Done():
 				return
 			}
@@ -89,10 +113,12 @@ func emergencyTCPPreflight(ctx context.Context, candidates []string, targets map
 	opened := make(map[string]bool)
 	closed := make(map[string]bool)
 	for result := range results {
-		if result.open {
-			opened[result.id] = true
-		} else if result.closed {
-			closed[result.id] = true
+		for _, id := range result.ids {
+			if result.open {
+				opened[id] = true
+			} else if result.closed {
+				closed[id] = true
+			}
 		}
 	}
 	ordered := make([]string, 0, len(opened))
@@ -120,7 +146,9 @@ func (controller *healthController) emergencyTargets(now time.Time, candidates [
 	item.PreflightClosed = closed
 	regular := outageProbeTargets(now, withoutClosedCandidates(candidates, closed), item, p)
 	result := make([]string, 0, p.batch)
-	for _, id := range opened {
+	// An open TCP port does not prove HTTPS health. Preserve sweep progress
+	// when a repeated preflight finds the same silent endpoints still open.
+	for _, id := range outageProbeTargets(now, opened, item, p) {
 		if len(result) >= p.batch {
 			break
 		}

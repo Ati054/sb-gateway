@@ -193,7 +193,7 @@ func TestReadOnlyStateEndpointsUseCompatibleDocuments(t *testing.T) {
 		t.Fatalf("draft failed: %d %s", draft.Code, draft.Body.String())
 	}
 	draftBody := decodeResponse(t, draft)
-	if draftBody["revision"] != "e63eb47127f2ad90e7af399f2459c487f32bc97c11a109239d891faf911e2446" {
+	if draftBody["revision"] != "4ee4203fc37fd0c37f71d55267e91669e14652546b543f22d38c18a1ccd08347" {
 		t.Fatalf("default config revision drifted: %v", draftBody["revision"])
 	}
 	config := draftBody["config"].(map[string]any)

@@ -28,15 +28,6 @@ func invalidateChangedOutboundHealth(item *policyHealthState, candidates []strin
 		delete(item.HistoryDays, id)
 		delete(item.LastProbeAt, id)
 		delete(item.LastGoodAt, id)
-		delete(item.SpeedSamplesBPS, id)
-		delete(item.SpeedHistory, id)
-		delete(item.SpeedProbation, id)
-		invalidateSpeedSurveyNode(item, id)
-		delete(item.LastSpeedProbeAt, id)
-		delete(item.LastSpeedSuccessAt, id)
-		delete(item.LastSpeedProbeStatus, id)
-		delete(item.OptimizationBackoff, id)
-		delete(item.OutagePenalty, id)
 		delete(item.DailyStats, id)
 		for _, period := range item.PeriodStats {
 			delete(period, id)
@@ -48,15 +39,11 @@ func invalidateChangedOutboundHealth(item *policyHealthState, candidates []strin
 		delete(item.AvailabilityOK, id)
 		delete(item.FailureClass, id)
 		delete(item.HTTPSProbeTargets, id)
-		delete(item.SpeedMedianBPS, id)
 		if item.LastWorkingSelection != nil && item.LastWorkingSelection.Selected == id {
 			item.LastWorkingSelection = nil
 		}
 		if item.OptimizationCandidate == id || item.OptimizationBaseline == id {
 			clearOptimizationCandidate(item)
-		}
-		if item.Selected == id {
-			item.CooldownUntil = 0
 		}
 	}
 	return changed
@@ -78,28 +65,6 @@ func pruneRemovedCandidateHealth(item *policyHealthState, candidates []string) {
 	pruneNodeMap(item.HistoryDays, active)
 	pruneNodeMap(item.LastProbeAt, active)
 	pruneNodeMap(item.LastGoodAt, active)
-	pruneNodeMap(item.SpeedSamplesBPS, active)
-	pruneNodeMap(item.SpeedHistory, active)
-	pruneNodeMap(item.SpeedProbation, active)
-	if item.SpeedDegradation != nil {
-		if !active[item.SpeedDegradation.Node] {
-			item.SpeedDegradation = nil
-		} else {
-			for node := range item.SpeedDegradation.Survey {
-				if !active[node] {
-					invalidateSpeedSurveyNode(item, node)
-				}
-			}
-			item.SpeedDegradation.SurveyTargets = keepActiveCandidates(item.SpeedDegradation.SurveyTargets, active)
-			item.SpeedDegradation.Finalists = keepActiveCandidates(item.SpeedDegradation.Finalists, active)
-			item.SpeedDegradation.Tried = keepActiveCandidates(item.SpeedDegradation.Tried, active)
-		}
-	}
-	pruneNodeMap(item.LastSpeedProbeAt, active)
-	pruneNodeMap(item.LastSpeedSuccessAt, active)
-	pruneNodeMap(item.LastSpeedProbeStatus, active)
-	pruneNodeMap(item.OptimizationBackoff, active)
-	pruneNodeMap(item.OutagePenalty, active)
 	pruneNodeMap(item.DailyStats, active)
 	for _, period := range item.PeriodStats {
 		pruneNodeMap(period, active)
@@ -115,10 +80,8 @@ func pruneRemovedCandidateHealth(item *policyHealthState, candidates []string) {
 	pruneNodeMap(item.CandidateGroups, active)
 	pruneNodeMap(item.CandidateServiceStatus, active)
 	pruneNodeMap(item.HTTPSProbeTargets, active)
-	pruneNodeMap(item.SpeedMedianBPS, active)
 	item.Shortlist = keepActiveCandidates(item.Shortlist, active)
 	item.ProbedCandidates = keepActiveCandidates(item.ProbedCandidates, active)
-	item.SpeedProbeTargets = keepActiveCandidates(item.SpeedProbeTargets, active)
 	if item.LastWorkingSelection != nil && !active[item.LastWorkingSelection.Selected] {
 		item.LastWorkingSelection = nil
 	}

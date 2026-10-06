@@ -25,7 +25,7 @@ func BuildXraySourceModel(
 	if err != nil {
 		return XraySourceArtifacts{}, err
 	}
-	inbound, err := BuildXrayInboundSource(config, readSecret, secretPath)
+	inbound, err := buildXrayInboundSource(config, readSecret, secretPath, healthProbeInventoryCount(nodes))
 	if err != nil {
 		return XraySourceArtifacts{}, err
 	}

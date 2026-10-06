@@ -120,10 +120,26 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 	}
 	waitAPI()
 	runtime := newXraySelectorRuntime(Options{XrayBinary: binary, XrayAPIServer: apiAddress})
+	control, err := newXrayControlClient(apiAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.close()
+	runtime.control = control
 	runtime.command = func(_ context.Context, timeout time.Duration, _ string, args ...string) ([]byte, error) {
 		callCtx, stop := context.WithTimeout(ctx, timeout)
 		defer stop()
-		return command(callCtx, args...).CombinedOutput()
+		started := time.Now()
+		output, err := command(callCtx, args...).CombinedOutput()
+		if err != nil {
+			// This fixture contains only loopback freedom outbounds, no credentials.
+			t.Logf("isolated API operation=%s elapsed=%s context=%v error=%v output=%q",
+				args[1], time.Since(started), callCtx.Err(), err, output[:min(len(output), 512)])
+		}
+		if callCtx.Err() != nil {
+			return output, callCtx.Err()
+		}
+		return output, err
 	}
 	if err := runtime.Select("europe", "de"); err != nil {
 		t.Fatal(err)
@@ -244,6 +260,25 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 	}
 	dynamic.Close()
 	t.Log("provider A→B→A→C retained the reselected handler and its established TCP stream")
+	runAPI := runtime.command
+	firstAdd := true
+	runtime.command = func(ctx context.Context, timeout time.Duration, binary string, args ...string) ([]byte, error) {
+		if args[1] == "ado" && firstAdd {
+			firstAdd = false
+			return nil, context.DeadlineExceeded
+		}
+		return runAPI(ctx, timeout, binary, args...)
+	}
+	runtime.pool.Outbounds["provider"] = json.RawMessage(`{"protocol":"freedom","sendThrough":"127.0.0.7"}`)
+	if err := runtime.Select("europe", "provider"); err != nil {
+		t.Fatalf("absent handler after one lost add recovered incorrectly: %v", err)
+	}
+	freshAfterRetry, retryReader := open()
+	check(freshAfterRetry, retryReader, "127.0.0.7")
+	freshAfterRetry.Close()
+	check(old, oldReader, "127.0.0.2")
+	runtime.command = runAPI
+	t.Log("one injected add deadline: readback proved absence, retry installed the handler before new TCP")
 	activeTag := runtime.activeByPolicy["europe"]
 	if _, err := runtime.command(ctx, 5*time.Second, binary, "api", "rmo", "--server="+apiAddress, activeTag); err != nil {
 		t.Fatalf("remove selected outbound for recovery test: %v", err)
@@ -255,7 +290,7 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 		t.Fatalf("selected handler was not restored: current=%q err=%v", current, err)
 	}
 	recovered, recoveredReader := open()
-	check(recovered, recoveredReader, "127.0.0.6")
+	check(recovered, recoveredReader, "127.0.0.7")
 	recovered.Close()
 	t.Log("selected outbound removed under a live selector was restored before confirmation")
 

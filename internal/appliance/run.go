@@ -2,6 +2,7 @@ package appliance
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"os"
@@ -64,9 +65,12 @@ func Run(ctx context.Context, options Options) error {
 		log.Printf("appliance: RouterOS watchdog migrated to route-aware traffic readiness")
 	}
 	if migrated, err := controlplane.MigrateLegacyDynamicRuntime(ctx, options.ControlPlane); err != nil {
+		if errors.Is(err, controlplane.ErrProbeContractMigration) {
+			return err
+		}
 		log.Printf("appliance: legacy runtime migration skipped safely: %v", err)
 	} else if migrated {
-		log.Printf("appliance: subscription-backed startup outbounds migrated to on-demand loading")
+		log.Printf("appliance: committed startup runtime contract reconciled")
 	}
 	var supervisor *Supervisor
 	nginx, err := CommandProgram(

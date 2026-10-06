@@ -85,8 +85,7 @@ func TestCandidateStorePublishesRollsBackAndKeepsOneCandidate(t *testing.T) {
 	if _, err := os.Stat(first.Directory); !os.IsNotExist(err) {
 		t.Fatalf("older reproducible candidate was retained: %v", err)
 	}
-	receipt, err = store.Activate(second)
-	if err != nil {
+	if _, err := store.Activate(second); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CommitLastKnownGood(second); err != nil {

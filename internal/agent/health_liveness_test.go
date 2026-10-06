@@ -13,10 +13,10 @@ func livenessFixture(t *testing.T, mode string) (*healthController, *fakeSelecto
 	pool := healthFixture(false)
 	contract := pool.HealthPolicies["europe"]
 	contract.Mode = mode
-	contract.Policy.ActiveCheckSeconds, contract.Policy.BackupCheckSeconds = 60, 300
+	contract.Policy.ActiveCheckSeconds = 60
 	pool.HealthPolicies["europe"] = contract
 	item := newPolicyHealthState()
-	item.Selected, item.CandidateSignature, item.NextFullScanAt = "de", "de\nnl", 2800
+	item.Selected, item.CandidateSignature = "de", "de\nnl"
 	item.LastProbeAt["de"], item.LastProbeAt["nl"] = 940, 1000
 	runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "de"},
 		probes: map[string]probeEvidence{"de": successfulEvidence(100), "nl": successfulEvidence(90)}}
@@ -61,13 +61,13 @@ func TestHealthyFastLaneDoesNotRescoreScanOrWriteHistory(t *testing.T) {
 			if strings.Join(runtime.probeCalls, ",") != "de" || strings.Join(runtime.availabilityCalls, ",") != "de,de,de,de,de" {
 				t.Fatalf("unexpected quality/availability probes: %v / %v", runtime.probeCalls, runtime.availabilityCalls)
 			}
-			if item.Recoveries["de"] != recoveries || runtime.speedCalls != 0 {
+			if item.Recoveries["de"] != recoveries {
 				t.Fatal("fast lane accelerated scoring or speed test")
 			}
 			if err := c.Tick(time.Unix(1060, 0)); err != nil {
 				t.Fatal(err)
 			}
-			if strings.Join(runtime.probeCalls, ",") != "de,de" {
+			if strings.Join(runtime.probeCalls, ",") != "de,de,nl" {
 				t.Fatal("normal quality cadence lost")
 			}
 		})

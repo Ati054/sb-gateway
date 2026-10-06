@@ -15,6 +15,10 @@ grep -Fq 'go test ./proxy' "$root/Dockerfile"
 grep -Fq 'git apply --check /tmp/xray-concurrency-safety.patch' "$root/Dockerfile"
 grep -Fq './transport/internet/tls ./transport/internet/httpupgrade' "$root/Dockerfile"
 grep -Fq 'io.sb-gateway.dependency.xray.concurrency-safety="true"' "$root/Dockerfile"
+if grep -Eq '(xray-payload-accounting|xray\.payload-accounting|SB_XRAY_PAYLOAD_EXPERIMENT)' "$root/Dockerfile"; then
+  printf '%s\n' "removed payload accounting detected in Dockerfile" >&2
+  exit 1
+fi
 grep -Fq 'io.sb-gateway.dependency.xray.vision-padding-overflow-compat="true"' "$root/Dockerfile"
 grep -Fq 'xray run -test -config /tmp/xray-build-validation.json' "$root/Dockerfile"
 if grep -Fq 'COPY tests ' "$root/Dockerfile" \

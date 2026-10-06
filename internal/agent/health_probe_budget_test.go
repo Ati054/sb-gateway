@@ -16,22 +16,20 @@ func budgetContract(nodes ...string) healthPolicyContract {
 }
 
 func TestSharedProbesBelongToOneTickAndConcreteEndpoint(t *testing.T) {
-	runtime := &fakeSelectorRuntime{probes: map[string]probeEvidence{"a": successfulEvidence(500)}, speeds: map[string]int64{"a": 10_000_000}}
+	runtime := &fakeSelectorRuntime{probes: map[string]probeEvidence{"a": successfulEvidence(500)}}
 	controller := &healthController{runtime: runtime}
 	pool := healthPool{ProbeBudget: 5}
 	contract := budgetContract("a")
 	controller.beginProbeBudget(pool, []string{"first", "second"})
 	for _, id := range []string{"first", "second"} {
 		controller.sharedQualityProbe(id, "a", contract)
-		controller.sharedSpeedProbe(id, "a", contract, defaultSpeedBytes)
 	}
-	if len(runtime.probeCalls) != 1 || len(runtime.throughputCalls) != 1 {
+	if len(runtime.probeCalls) != 1 {
 		t.Fatal("overlapping policies downloaded twice")
 	}
 	controller.beginProbeBudget(pool, []string{"first", "second"})
 	controller.sharedQualityProbe("first", "a", contract)
-	controller.sharedSpeedProbe("first", "a", contract, defaultSpeedBytes)
-	if len(runtime.probeCalls) != 2 || len(runtime.throughputCalls) != 2 {
+	if len(runtime.probeCalls) != 2 {
 		t.Fatal("same probe became another Tick's confirmation")
 	}
 	changed := budgetContract("a")
@@ -40,21 +38,17 @@ func TestSharedProbesBelongToOneTickAndConcreteEndpoint(t *testing.T) {
 	if len(runtime.probeCalls) != 3 {
 		t.Fatal("replacement inherited old evidence")
 	}
-	controller.sharedSpeedProbe("second", "a", contract, defaultSpeedBytes*2)
-	if len(runtime.throughputCalls) != 3 {
-		t.Fatal("different byte limits shared incompatible speeds")
-	}
 }
 
 func TestSharedBudgetCountsUniqueEndpointsAndDefersWithoutFailure(t *testing.T) {
 	controller := &healthController{}
 	controller.beginProbeBudget(healthPool{ProbeBudget: 5}, nil)
 	contract := budgetContract("a", "b", "c", "d", "e", "f")
-	accepted, deferred := controller.claimProbeTargets("first", contract, []string{"a", "b", "c", "d", "e"}, 0, false)
+	accepted, deferred := controller.claimProbeTargets("first", contract, []string{"a", "b", "c", "d", "e"}, false)
 	if len(accepted) != 5 || len(deferred) != 0 {
 		t.Fatal("first batch not admitted")
 	}
-	accepted, deferred = controller.claimProbeTargets("second", contract, []string{"b", "d", "f"}, 0, false)
+	accepted, deferred = controller.claimProbeTargets("second", contract, []string{"b", "d", "f"}, false)
 	if strings.Join(accepted, ",") != "b,d" || strings.Join(deferred, ",") != "f" || len(controller.probeBudget.Used) != 5 {
 		t.Fatal("shared budget charged repeated endpoint or exceeded limit")
 	}
@@ -81,27 +75,6 @@ func TestSharedQualityDoesNotRefreshCompletedParallelSample(t *testing.T) {
 	controller.sharedQualityProbe("second", "b", budgetContract("b"))
 	if len(runtime.probeCalls) != 2 || !deferred.Deferred {
 		t.Fatal("waiting for a slow parallel peer refreshed an expired result")
-	}
-}
-
-func TestSharedSpeedRechecksAttemptedAfterAdmission(t *testing.T) {
-	runtime := &fakeSelectorRuntime{speeds: map[string]int64{"a": 10_000_000, "b": 20_000_000}}
-	controller := &healthController{runtime: runtime}
-	controller.beginProbeBudget(healthPool{ProbeBudget: 2}, nil)
-	contract := budgetContract("a", "b")
-	controller.sharedSpeedProbe("first", "b", contract, defaultSpeedBytes)
-	accepted, deferred := controller.claimProbeTargets("second", contract, []string{"a", "b"}, defaultSpeedBytes, true)
-	if len(accepted) != 2 || len(deferred) != 0 {
-		t.Fatal("fresh pair was not admitted")
-	}
-	controller.sharedSpeedProbe("second", "a", contract, defaultSpeedBytes)
-	key := fmt.Sprintf("endpoint-b:%d", defaultSpeedBytes)
-	cached := controller.probeBudget.Speed[key]
-	cached.At = time.Now().Add(-sharedProbeLifetime - time.Second)
-	controller.probeBudget.Speed[key] = cached
-	_, err := controller.sharedSpeedProbe("second", "b", contract, defaultSpeedBytes)
-	if err != errSharedProbeDeferred || len(runtime.throughputCalls) != 2 {
-		t.Fatal("expiry between admission and execution repeated a download")
 	}
 }
 
@@ -132,8 +105,7 @@ func TestSharedProbeInterruptionInvalidatesPartialEvidence(t *testing.T) {
 	controller := &healthController{runtime: runtime}
 	controller.beginProbeBudget(healthPool{ProbeBudget: 5}, nil)
 	controller.probeBudget.Quality["endpoint-a"] = sharedProbeResult{At: time.Now(), Evidence: successfulEvidence(100)}
-	controller.probeBudget.Speed["endpoint-a:1"] = sharedSpeedResult{At: time.Now(), BPS: 10_000_000}
-	if controller.takeSharedProbeInterruption() == nil || len(controller.probeBudget.Quality) != 0 || len(controller.probeBudget.Speed) != 0 {
+	if controller.takeSharedProbeInterruption() == nil || len(controller.probeBudget.Quality) != 0 {
 		t.Fatal("interrupted generation left reusable endpoint evidence")
 	}
 }
@@ -142,15 +114,15 @@ func TestSharedBudgetAtomicallyDefersComparisonPair(t *testing.T) {
 	controller := &healthController{}
 	controller.beginProbeBudget(healthPool{ProbeBudget: 5}, nil)
 	contract := budgetContract("a", "b", "c", "d", "active", "reserve")
-	controller.claimProbeTargets("first", contract, []string{"a", "b", "c", "d"}, 0, false)
-	accepted, deferred := controller.claimProbeTargets("second", contract, []string{"active", "reserve"}, 0, true)
+	controller.claimProbeTargets("first", contract, []string{"a", "b", "c", "d"}, false)
+	accepted, deferred := controller.claimProbeTargets("second", contract, []string{"active", "reserve"}, true)
 	if len(accepted) != 0 || len(deferred) != 2 || len(controller.probeBudget.Used) != 4 {
 		t.Fatal("half a comparison consumed the last slot")
 	}
 }
 
 func TestSharedBudgetRotatesDisjointPoliciesAndPreservesManualCounts(t *testing.T) {
-	for _, limit := range []int{2, 5, 6, 7, 8, 9, 10} {
+	for _, limit := range []int{1, 2, 5, 10, 32, 64} {
 		controller := &healthController{}
 		seen := map[string]bool{}
 		for tick := 0; tick < 3; tick++ {
@@ -161,7 +133,7 @@ func TestSharedBudgetRotatesDisjointPoliciesAndPreservesManualCounts(t *testing.
 			for i := 0; i < limit+1; i++ {
 				nodes = append(nodes, fmt.Sprint(i))
 			}
-			accepted, deferred := controller.claimProbeTargets(ids[0], budgetContract(nodes...), nodes, 0, false)
+			accepted, deferred := controller.claimProbeTargets(ids[0], budgetContract(nodes...), nodes, false)
 			if len(accepted) != limit || len(deferred) != 1 {
 				t.Fatalf("manual limit %d not honored", limit)
 			}
@@ -174,28 +146,27 @@ func TestSharedBudgetRotatesDisjointPoliciesAndPreservesManualCounts(t *testing.
 }
 
 func TestSharedBudgetDoesNotRepeatFailedOrExpiredAttempts(t *testing.T) {
-	runtime := &fakeSelectorRuntime{probes: map[string]probeEvidence{"a": failedEvidence(), "b": successfulEvidence(100)}, speeds: map[string]int64{}}
+	runtime := &fakeSelectorRuntime{probes: map[string]probeEvidence{"a": failedEvidence(), "b": successfulEvidence(100)}}
 	controller := &healthController{runtime: runtime}
 	controller.beginProbeBudget(healthPool{ProbeBudget: 2}, nil)
 	contract := budgetContract("a", "b")
 	controller.sharedQualityProbe("first", "a", contract)
 	controller.sharedQualityProbe("first", "b", contract)
 	controller.probeBudget.Quality["endpoint-b"] = sharedProbeResult{At: time.Now().Add(-sharedProbeLifetime - time.Second), Evidence: successfulEvidence(100)}
-	accepted, deferred := controller.claimProbeTargets("second", contract, []string{"a", "b"}, 0, false)
+	accepted, deferred := controller.claimProbeTargets("second", contract, []string{"a", "b"}, false)
 	if len(accepted) != 0 || len(deferred) != 2 {
 		t.Fatal("failed or expired attempt repeated in the same Tick")
 	}
-	controller.sharedSpeedProbe("first", "a", contract, defaultSpeedBytes)
-	accepted, deferred = controller.claimProbeTargets("second", contract, []string{"a", "b"}, defaultSpeedBytes, true)
+	accepted, deferred = controller.claimProbeTargets("second", contract, []string{"a", "b"}, true)
 	if len(accepted) != 0 || len(deferred) != 2 {
 		t.Fatal("half of an attempted speed pair admitted")
 	}
 }
 
-func TestSharedBudgetManualOneAdmitsRoutineSpeedRotation(t *testing.T) {
+func TestSharedBudgetManualOneAdmitsRoutineRotation(t *testing.T) {
 	controller := &healthController{}
 	controller.beginProbeBudget(healthPool{ProbeBudget: 1}, nil)
-	accepted, deferred := controller.claimProbeTargets("first", budgetContract("a", "b"), []string{"a", "b"}, defaultSpeedBytes, false)
+	accepted, deferred := controller.claimProbeTargets("first", budgetContract("a", "b"), []string{"a", "b"}, false)
 	if strings.Join(accepted, ",") != "a" || strings.Join(deferred, ",") != "b" {
 		t.Fatal("routine rotation treated as an atomic comparison")
 	}
@@ -218,15 +189,13 @@ func TestSharedBudgetDoesNotStarveSlowerDuePolicy(t *testing.T) {
 		contract.Mode, contract.Groups = "best", nil
 		contract.Candidates = []string{active, reserve}
 		contract.Nodes = budgetContract(active, reserve).Nodes
-		contract.Policy.MaxActiveCandidates, contract.Policy.ProbeBatchSize = 2, 2
-		contract.Policy.ActiveCheckSeconds, contract.Policy.BackupCheckSeconds = interval, interval
-		contract.Policy.FullScanSeconds = 1800
+		contract.Policy.ProbeBatchSize = 2
+		contract.Policy.ActiveCheckSeconds = interval
 		pool.HealthPolicies[id] = contract
 		item := newPolicyHealthState()
 		ensureHealthMaps(item)
 		item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = active, active, true
 		item.CandidateSignature = strings.Join(contract.Candidates, "\n")
-		item.NextFullScanAt = float64(start + 1800)
 		item.AvailabilityOK, item.QualityOK = map[string]bool{}, map[string]bool{}
 		item.MedianDelayMS = map[string]*int{}
 		for nodeIndex, node := range contract.Candidates {
@@ -242,6 +211,7 @@ func TestSharedBudgetDoesNotStarveSlowerDuePolicy(t *testing.T) {
 	}
 	runtime.pool = pool
 	countB := 0
+	lastSeen := map[string]int64{}
 	for offset := int64(0); offset <= 300; offset += 3 {
 		runtime.probeCalls = nil
 		if err := controller.Tick(time.Unix(start+offset, 0)); err != nil {
@@ -250,10 +220,15 @@ func TestSharedBudgetDoesNotStarveSlowerDuePolicy(t *testing.T) {
 		if len(runtime.probeCalls) > 2 {
 			t.Fatalf("manual2 exceeded at %ds: %v", offset, runtime.probeCalls)
 		}
-		if offset%30 != 0 && len(runtime.probeCalls) != 0 {
-			t.Fatal("deferred work accelerated the configured cadence")
-		}
 		for _, node := range runtime.probeCalls {
+			interval := int64(30)
+			if strings.HasPrefix(node, "b-") {
+				interval = 60
+			}
+			if previous, exists := lastSeen[node]; exists && offset-previous < interval {
+				t.Fatal("continuing a deferred sweep repeated a node too early")
+			}
+			lastSeen[node] = offset
 			if strings.HasPrefix(node, "b-") {
 				countB++
 			}

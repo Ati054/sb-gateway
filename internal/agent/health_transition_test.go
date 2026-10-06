@@ -2,7 +2,6 @@ package agent
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -111,11 +110,11 @@ func TestRemovedActiveDoesNotTrustADeadCachedReserve(t *testing.T) {
 }
 
 func TestRemovedActiveKeepsParallelWinnerInsteadOfCachedPriority(t *testing.T) {
-	for _, cooldown := range []int{0, 600} {
-		t.Run(fmt.Sprintf("cooldown=%d", cooldown), func(t *testing.T) {
+	for _, mode := range []string{"priority", "best"} {
+		t.Run(mode, func(t *testing.T) {
 			controller, runtime, item := transitionFixture(t, 2)
 			contract := runtime.pool.HealthPolicies["europe"]
-			contract.Policy.SwitchCooldownSeconds = cooldown
+			contract.Mode = mode
 			runtime.pool.HealthPolicies["europe"] = contract
 			item.AvailabilityOK["nl"] = true
 			item.Recoveries["nl"] = 3

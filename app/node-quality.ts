@@ -7,36 +7,26 @@ type QualityNode = {
   quality: boolean;
   availability: number | null;
   loss: number | null;
-  speedBps: number | null;
-  p95: number | null;
   median: number | null;
-  decisionMedian: number | null;
   label: string;
 };
 
 // A brief failed probe is shown by the live status marker, not as a severe
 // route warning over the historical availability column.
 export function confirmedUnstableRoute(
-  outageOpen: boolean,
   availabilityOK: boolean | undefined,
   samples: number,
   lossPercent: number | null,
   maxPacketLossPercent: number,
 ): boolean {
-  return outageOpen && availabilityOK === false && samples >= 10 &&
+  return availabilityOK === false && samples >= 10 &&
     lossPercent !== null && lossPercent > maxPacketLossPercent;
 }
 
-function responsiveScoreOrder(left: QualityNode, right: QualityNode): number {
-  const leftDelay = left.decisionMedian ?? left.median ?? left.p95 ?? 0;
-  const rightDelay = right.decisionMedian ?? right.median ?? right.p95 ?? 0;
-  const leftMeasured = (left.speedBps ?? 0) > 0 && leftDelay > 0;
-  const rightMeasured = (right.speedBps ?? 0) > 0 && rightDelay > 0;
-  if (leftMeasured !== rightMeasured) return leftMeasured ? -1 : 1;
-  if (!leftMeasured || !rightMeasured) return 0;
-  const leftScore = (left.speedBps ?? 0) * rightDelay;
-  const rightScore = (right.speedBps ?? 0) * leftDelay;
-  return rightScore - leftScore;
+function latencyOrder(left: QualityNode, right: QualityNode): number {
+  const leftDelay = left.median !== null && Number.isFinite(left.median) ? left.median : Number.MAX_SAFE_INTEGER;
+  const rightDelay = right.median !== null && Number.isFinite(right.median) ? right.median : Number.MAX_SAFE_INTEGER;
+  return leftDelay - rightDelay;
 }
 
 export function qualitySheet<T extends QualityNode>(
@@ -66,18 +56,15 @@ export function qualitySheet<T extends QualityNode>(
       return (sourcePositions.get(left.id) ?? 0) - (sourcePositions.get(right.id) ?? 0);
     }
     if (left.selected !== right.selected) return left.selected ? -1 : 1;
-    // URLTest is a quality ranking: keep live reserves next to the active node,
-    // then rank the remaining background candidates by measured responsiveness.
-    if (left.inRuntimePool !== right.inRuntimePool) return left.inRuntimePool ? -1 : 1;
+    // A historical table sorts by its visible median, not the controller's
+    // latest decision sample or hidden shortlist membership.
+    const latency = latencyOrder(left, right);
+    if (latency) return latency;
     if (left.available !== right.available) return left.available ? -1 : 1;
     if (Boolean(left.unstable) !== Boolean(right.unstable)) return left.unstable ? 1 : -1;
     if (left.quality !== right.quality) return left.quality ? -1 : 1;
-    return responsiveScoreOrder(left, right)
-      || (right.availability ?? -1) - (left.availability ?? -1)
+    return (right.availability ?? -1) - (left.availability ?? -1)
       || (left.loss ?? 101) - (right.loss ?? 101)
-      || (right.speedBps ?? -1) - (left.speedBps ?? -1)
-      || (left.p95 ?? Number.MAX_SAFE_INTEGER) - (right.p95 ?? Number.MAX_SAFE_INTEGER)
-      || (left.median ?? Number.MAX_SAFE_INTEGER) - (right.median ?? Number.MAX_SAFE_INTEGER)
       || left.label.localeCompare(right.label, "ru");
   }).map((node, index) => ({
     ...node,

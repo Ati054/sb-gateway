@@ -70,7 +70,7 @@ func Serve(ctx context.Context, path string, options Options) error {
 		limit:    make(chan struct{}, options.Workers),
 		tcpLimit: make(chan struct{}, options.TCPSessions),
 	}
-	service.udpBuffers.New = func() any { return make([]byte, maxDNSMessage) }
+	service.udpBuffers.New = func() any { return new([maxDNSMessage]byte) }
 	if err := service.listen(current); err != nil {
 		current.close()
 		service.close()
@@ -182,8 +182,8 @@ func (service *service) closeRuntime() {
 func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 	defer service.wait.Done()
 	for {
-		buffer := service.udpBuffers.Get().([]byte)
-		size, address, err := connection.ReadFrom(buffer)
+		buffer := service.udpBuffers.Get().(*[maxDNSMessage]byte)
+		size, address, err := connection.ReadFrom(buffer[:])
 		if err != nil {
 			service.udpBuffers.Put(buffer)
 			return
@@ -194,7 +194,7 @@ func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 			service.udpBuffers.Put(buffer)
 			continue
 		}
-		go func(query, buffer []byte, address net.Addr) {
+		go func(query []byte, buffer *[maxDNSMessage]byte, address net.Addr) {
 			defer service.release()
 			defer service.udpBuffers.Put(buffer)
 			response, resolveErr := service.resolve(laneID, query)

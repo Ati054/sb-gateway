@@ -302,15 +302,40 @@ AES-256-GCM защищает целостность/содержимое; scrypt
 ## Зависимости сборки панели
 
 Релизный lockfile использует:
-Next.js / eslint-config-next 16.3.4, React / React DOM / RSC 19.2.8,
+Next.js / eslint-config-next 16.3.8, React / React DOM / RSC 19.2.8,
 Vite 8.2.2, Vinext 1.0.0-beta.9, RSC plugin 0.5.34,
-Cloudflare Vite plugin 1.54.8 и Wrangler 4.131.1; совместимые транзитивные
+Cloudflare Vite plugin 1.62.5 и Wrangler 4.147.0; совместимые транзитивные
 зависимости также обновлены. В частности, обе используемые ветви `sharp`
-закреплены на 0.35.4 с исправлением
-[GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c).
-`npm audit` показывает 0 известных уязвимостей на дату проверки. Это не аудит
-всех Go/Alpine/Xray-компонентов и не гарантия отсутствия ещё неизвестных
-уязвимостей.
+закреплены на 0.35.5 с исправлениями
+[GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c) и
+[GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w).
+После обновления 2026-10-06 `npm audit` сообщает 8 high, без critical
+и moderate: все оставшиеся цепочки ведут к `braces@3.0.3`. Закреплены
+исправленные `brace-expansion` 1.1.21/5.0.12, `fast-uri` 3.1.8 и
+`source-map-js` 1.2.2. Для Next.js устранено предупреждение
+[ImageResponse RCE](https://github.com/advisories/GHSA-vcvr-r3jv-pc5j).
+Ни чистый npm-аудит, ни публичный релиз не заявляются.
+`npm audit --omit=dev` сообщает 0 предупреждений в production-зависимостях
+панели. Это не аудит всего контейнера: npm не покрывает Go/Alpine/Xray-компоненты.
+
+### Ограничение вложенности braces
+
+Для [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
+на дату проверки нет опубликованной исправленной версии. `build/harden-braces.mjs`
+ограничивает стек парсера и глубину публичных AST-обходов compile/expand/stringify
+значением 64. Чрезмерная вложенность вызывает контролируемый SyntaxError до
+переполнения стека. Обычные расширения, диапазоны и micromatch проверены тестами.
+Версия, SHA-256 четырёх исходных файлов, число замен и расположение зависимости
+проверяются; неизвестная копия или новый вложенный экземпляр останавливает сборку.
+Это локальная защита инструментов сборки, не исправление опубликованного пакета.
+Npm проверяет версии, а не изменённые байты: все 8 предупреждений остаются видимыми,
+`audit:dependencies` по-прежнему возвращает ошибку. Обхода или allowlist нет.
+
+`govulncheck@v1.8.0` с Go 1.27.1 на Linux проверил `./cmd/... ./internal/...`:
+0 уязвимых вызовов и 0 предупреждений в импортируемых пакетах.
+Модульное замечание `GO-2026-5932` относится к `golang.org/x/crypto/openpgp`,
+который проект не импортирует. Это source-аудит, не проверка всех компонентов
+готового контейнера или боевого MikroTik.
 
 ### Встроенные копии image-size
 
@@ -336,7 +361,8 @@ SHA-256, версия и единственность замен проверя�
 `npm run build`, `npm run build:static`, `npm start`. Поэтому Docker-сценарий
 `npm ci --ignore-scripts` также защищён перед сборкой. После установки с
 отключёнными lifecycle scripts нельзя запускать бинарники Next/Vinext напрямую:
-используйте npm-команды проекта либо сначала `node build/harden-image-size.mjs`.
+используйте npm-команды проекта либо сначала `node build/harden-dependencies.mjs`,
+который проверяет обе группы защит.
 При обновлении фреймворков нужно проверить встроенный код, пересмотреть hashes
 и удалить локальное исправление только после доказанного upstream-исправления.
 
@@ -344,16 +370,18 @@ SHA-256, версия и единственность замен проверя�
 
 ```sh
 npm ci --ignore-scripts
+npm run test:dependencies
 npm run audit:dependencies
 npm run lint
 npm test
 npm run build:static
 ```
 
-`audit:dependencies` не допускает даже low findings и дополнительно запускает
-регрессии встроенных парсеров: повреждённые ICNS/JXL/HEIF обрабатываются в
+`audit:dependencies` сначала запускает защитные регрессии, затем npm-аудит,
+который не допускает даже low findings. Повреждённые ICNS/JXL/HEIF обрабатываются в
 дочернем процессе с таймаутом; проверяются также штатные размеры PNG, GIF,
-JPEG, SVG, HEIF и ICNS. Статическая панель MikroTik не включает Node.js,
+JPEG, SVG, HEIF и ICNS; чрезмерно глубокие braces/parentheses и AST проверяются
+в отдельном процессе с таймаутом. Статическая панель MikroTik не включает Node.js,
 Next/Vinext server или эти парсеры; данное исправление защищает инструменты
 разработки/сборки и сохраняет отдельный вариант сборки Sites.
 

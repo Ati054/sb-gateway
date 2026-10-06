@@ -12,7 +12,8 @@ fi
 for path in \
   .agents .codex .lab .openai AGENTS.md CODEX_HANDOFF.md \
   IMPLEMENTATION_REPORT.md QUATTRO_SERVERS_AUDIT.md \
-  docs/ACCEPTANCE-TESTS.md docs/research templates/xray.smoke.json; do
+  docs/ACCEPTANCE-TESTS.md docs/RC3-CHR-VERIFICATION.md \
+  docs/RC4-CHR-VERIFICATION.md docs/research templates/xray.smoke.json; do
   if git ls-files --error-unmatch "$path" >/dev/null 2>&1 \
     || git ls-files "$path/**" | grep -q .; then
     printf '%s\n' "forbidden public path: $path" >&2
@@ -36,19 +37,19 @@ for path in \
   fi
 done
 
-package_version="$(sed -nE 's/^[[:space:]]*"version":[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)",?[[:space:]]*$/\1/p' package.json | head -n 1)"
+package_version="$(sed -nE 's/^[[:space:]]*"version":[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?)",?[[:space:]]*$/\1/p' package.json | head -n 1)"
 if [ -z "$package_version" ]; then
-  printf '%s\n' "package.json does not contain a stable release version" >&2
+  printf '%s\n' "package.json must contain a stable or numbered RC version" >&2
   exit 1
 fi
 
-first_release="$(tr -d '\r' <CHANGELOG.md | sed -nE 's/^## ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | head -n 1)"
+first_release="$(tr -d '\r' <CHANGELOG.md | sed -nE 's/^## ([0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?)$/\1/p' | head -n 1)"
 if [ "$first_release" != "$package_version" ]; then
   printf '%s\n' "public CHANGELOG must start with package version $package_version" >&2
   exit 1
 fi
 
-release_count="$(tr -d '\r' <CHANGELOG.md | grep -Ec '^## [0-9]+\.[0-9]+\.[0-9]+$')"
+release_count="$(tr -d '\r' <CHANGELOG.md | grep -Ec '^## [0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$')"
 if [ "$release_count" -ne 1 ]; then
   printf '%s\n' "first public source must contain exactly one CHANGELOG release" >&2
   exit 1

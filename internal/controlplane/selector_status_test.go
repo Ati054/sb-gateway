@@ -36,4 +36,19 @@ func TestCompactSelectorStatusRequiresAuthAndOmitsHistory(t *testing.T) {
 	if len(item["shortlist"].([]any)) != 2 {
 		t.Fatal("working pool missing from fast polling")
 	}
+	if value, exists := item["latency_comparisons"]; !exists || value != nil {
+		t.Fatal("absent comparisons must explicitly clear the UI merge")
+	}
+	pairs := map[string]any{"finland": map[string]any{"active": "canada", "active_delay_ms": 600, "candidate_delay_ms": 350}}
+	if err := server.repository.saveAuxiliary("selector-health", map[string]any{
+		"europe": map[string]any{"runtime_selected": "canada", "runtime_confirmed": true, "latency_comparisons": pairs},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response = performRequest(t, server, http.MethodGet, apiPrefix+"/status?view=selectors", nil, nil, cookie)
+	item = decodeResponse(t, response)["selector_health"].(map[string]any)["europe"].(map[string]any)
+	pair := item["latency_comparisons"].(map[string]any)["finland"].(map[string]any)
+	if pair["active"] != "canada" || pair["candidate_delay_ms"] != float64(350) {
+		t.Fatalf("missing compact comparison=%v", item)
+	}
 }

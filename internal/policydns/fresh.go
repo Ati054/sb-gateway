@@ -83,13 +83,17 @@ func (connection *freshLimitedConn) Close() error {
 }
 
 func StartFreshResolver(ctx context.Context, config FreshResolverConfig, options FreshResolverOptions) (*FreshResolver, error) {
+	return startFreshResolver(ctx, config, options, newUpstream)
+}
+
+func startFreshResolver(ctx context.Context, config FreshResolverConfig, options FreshResolverOptions, createUpstream func(serverConfig, time.Duration) (upstream, error)) (*FreshResolver, error) {
 	if err := validateFreshResolverConfig(config); err != nil {
 		return nil, err
 	}
 	if options.Workers < 1 || options.Workers > 16 || options.TCPSessions < 1 || options.TCPSessions > 8 || options.Timeout < time.Second || options.Timeout > 30*time.Second {
 		return nil, errors.New("invalid fresh resolver limits")
 	}
-	resolver, err := newUpstream(serverConfig{
+	resolver, err := createUpstream(serverConfig{
 		Type:        config.Type,
 		Server:      config.Server,
 		ServerName:  config.ServerName,

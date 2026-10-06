@@ -39,6 +39,7 @@ func transactionFailure(state TransactionFailureState, values ...error) error {
 }
 
 type transactionREST interface {
+	ensureNoPendingRollbackGuard(context.Context) error
 	PrepareDirectDelta(context.Context, string, string) (string, error)
 	PrepareImportScript(context.Context, string, string) (string, error)
 	ArmRollback(context.Context, string, RollbackOptions) (string, error)
@@ -127,38 +128,47 @@ func (transaction *Transaction) ApplyCandidate(ctx context.Context, applySource,
 	if options.SettleTimeout <= 0 {
 		options.SettleTimeout = 30 * time.Second
 	}
+	// Import names are content-addressed and may still belong to an older guard.
+	// Check before uploads or preparation can replace or clean up those files.
+	if err := transaction.rest.ensureNoPendingRollbackGuard(ctx); err != nil {
+		return result, transactionFailure(TransactionRecoveryPending, err)
+	}
 	rollbackImport, err := transaction.upload(ctx, "rollback", rollbackSource)
 	if err != nil {
 		return result, err
 	}
 	applyImport, err := transaction.upload(ctx, "apply", applySource)
 	if err != nil {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), options.SettleTimeout)
-		defer cancel()
-		return result, errors.Join(err, transaction.cleanup(cleanupContext, rollbackImport))
+		return result, errors.Join(err, transaction.cleanupUnarmedImports([]string{rollbackImport}, options.SettleTimeout))
 	}
 	imports := []string{applyImport, rollbackImport}
 	rollbackName, err := transaction.rest.PrepareImportScript(ctx, "rollback", rollbackImport)
 	if err != nil {
-		return result, errors.Join(err, transaction.cleanupImports(imports, options.SettleTimeout))
+		return result, errors.Join(err, transaction.cleanupUnarmedImports(imports, options.SettleTimeout))
 	}
 	result.RollbackScript = rollbackName
 	applyName, err := transaction.rest.PrepareImportScript(ctx, "apply", applyImport)
 	if err != nil {
-		return result, errors.Join(err, transaction.cleanupImports(imports, options.SettleTimeout))
+		return result, errors.Join(err, transaction.cleanupUnarmedImports(imports, options.SettleTimeout))
 	}
 	result.ApplyScript = applyName
 	scheduler, err := transaction.rest.ArmRollback(ctx, rollbackName, RollbackOptions{
 		Delay: options.RollbackDelay, ManagedImport: rollbackImport,
 	})
 	if err != nil {
-		return result, errors.Join(classifyRollbackArmFailure(err), transaction.cleanupImports(imports, options.SettleTimeout))
+		// A pending guard may reference the same imports, and an unsuccessful
+		// response does not prove that RouterOS rejected scheduler creation.
+		failure := classifyRollbackArmFailure(err)
+		if _, pending := TransactionFailureStateOf(failure); pending {
+			return result, failure
+		}
+		return result, errors.Join(failure, transaction.cleanupUnarmedImports(imports, options.SettleTimeout))
 	}
 	return transaction.applyPrepared(ctx, result, scheduler, options, imports)
 }
 
 func classifyRollbackArmFailure(err error) error {
-	if errors.Is(err, ErrRollbackGuardPending) {
+	if errors.Is(err, ErrRollbackGuardPending) || errors.Is(err, ErrRollbackGuardUnconfirmed) {
 		return transactionFailure(TransactionRecoveryPending, err)
 	}
 	return err
@@ -362,8 +372,11 @@ func (transaction *Transaction) cleanupAfterAbort(scheduler, rollbackName string
 	return nil
 }
 
-func (transaction *Transaction) cleanupImports(imports []string, timeout time.Duration) error {
-	cleanupContext, cancel := context.WithTimeout(context.Background(), timeout)
+func (transaction *Transaction) cleanupUnarmedImports(imports []string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return transaction.cleanup(cleanupContext, imports...)
+	if err := transaction.rest.ensureNoPendingRollbackGuard(ctx); err != nil {
+		return transactionFailure(TransactionRecoveryPending, err)
+	}
+	return transaction.cleanup(ctx, imports...)
 }

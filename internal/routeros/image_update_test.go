@@ -10,6 +10,20 @@ import (
 	"testing"
 )
 
+func TestImageUpdateSpecPreservesNumberedReleaseCandidate(t *testing.T) {
+	for _, version := range []string{"1.6.44", "1.6.44-rc.1", "1.6.44-rc.12"} {
+		root := "usb1/sb-gateway/root-" + version
+		spec, err := validateImageUpdateSpec(ImageUpdateSpec{
+			Version: version, StorageRoot: "usb1/sb-gateway", CandidateRoot: root,
+			CandidateSource: "local-file", CandidateReference: "usb1/sb-gateway/data/lifecycle-uploads/candidate.tar",
+			ContainerAddress: "192.0.2.2",
+		})
+		if err != nil || spec.Version != version || spec.CandidateRoot != root {
+			t.Fatalf("candidate version was not preserved: %#v, %v", spec, err)
+		}
+	}
+}
+
 func TestScheduleImageUpdateInstallsBoundedWorkerBeforeScheduler(t *testing.T) {
 	var requests []string
 	var worker string

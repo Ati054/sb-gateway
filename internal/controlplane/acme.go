@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -51,11 +52,23 @@ const (
 	manualACMEFailureSuffix = "Выпуск не выполнен. Повторите вручную."
 )
 
-func decodeACMERecord(raw any) acmeRecord {
-	body, _ := json.Marshal(raw)
+var errInvalidACMERecord = errors.New("invalid persisted ACME record")
+
+func decodeACMERecord(raw any) (acmeRecord, error) {
+	if raw == nil {
+		return acmeRecord{}, nil
+	}
+	body, err := json.Marshal(raw)
+	if err != nil || len(body) == 0 || body[0] != '{' {
+		return acmeRecord{}, errInvalidACMERecord
+	}
 	var record acmeRecord
-	_ = json.Unmarshal(body, &record)
-	return record
+	if err := json.Unmarshal(body, &record); err != nil {
+		// Decoder errors can contain persisted values. Do not expose those values
+		// or accept a partially decoded record with lost CA retry deadlines.
+		return acmeRecord{}, errInvalidACMERecord
+	}
+	return record, nil
 }
 
 func (record *acmeRecord) preserveLegacyFailure() {
@@ -197,7 +210,11 @@ func (s *Server) acmeStatus(w http.ResponseWriter, r *http.Request) {
 		s.internalStateError(w, r, err)
 		return
 	}
-	record := decodeACMERecord(state[r.PathValue("entity")])
+	record, err := decodeACMERecord(state[r.PathValue("entity")])
+	if err != nil {
+		s.internalStateError(w, r, err)
+		return
+	}
 	var delegations []acmejob.Delegation
 	if record.Settings.Provider == "acmedns" {
 		credentials, err := s.acmeCredentials(nil, record, record.Settings)
@@ -302,7 +319,12 @@ func (s *Server) checkACMEDNSDelegations(w http.ResponseWriter, r *http.Request)
 		s.internalStateError(w, r, err)
 		return
 	}
-	record := decodeACMERecord(state[subscriptionText(body["profile_id"])])
+	record, err := decodeACMERecord(state[subscriptionText(body["profile_id"])])
+	if err != nil {
+		s.configMu.Unlock()
+		s.internalStateError(w, r, err)
+		return
+	}
 	credentials, credentialsErr := s.acmeCredentials(body, record, settings)
 	draft, draftErr := s.getDraft()
 	var recursiveResolver acmejob.RecursiveResolver
@@ -376,7 +398,11 @@ func (s *Server) configureACME(w http.ResponseWriter, r *http.Request) {
 		s.internalStateError(w, r, err)
 		return
 	}
-	record := decodeACMERecord(state[id])
+	record, err := decodeACMERecord(state[id])
+	if err != nil {
+		s.internalStateError(w, r, err)
+		return
+	}
 	record.preserveLegacyFailure()
 	if body["disable"] == true {
 		record.Settings.Enabled = false
@@ -490,15 +516,35 @@ func (s *Server) configureACME(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runACMEScheduler(ctx context.Context) {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
+	var nextFailureLog time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			_ = s.processOneACME(ctx)
+			err := s.processOneACME(ctx)
+			if err != nil && ctx.Err() == nil && !s.now().Before(nextFailureLog) {
+				log.Printf("control-plane: ACME scheduled attempt failed safely; class=%s", acmeSchedulerErrorClass(err))
+				nextFailureLog = s.now().Add(5 * time.Minute)
+			} else if err == nil {
+				nextFailureLog = time.Time{}
+			}
 			timer.Reset(15 * time.Second)
 		}
 	}
+}
+
+func acmeSchedulerErrorClass(err error) string {
+	if errors.Is(err, errInvalidACMERecord) {
+		return "invalid-record"
+	}
+	for _, stage := range []error{acmejob.ErrDelegation, acmejob.ErrDNSProvider,
+		acmejob.ErrPropagation, acmejob.ErrCAValidation, acmejob.ErrWorker} {
+		if errors.Is(err, stage) {
+			return "worker"
+		}
+	}
+	return "state-or-install"
 }
 
 func acmeDue(record acmeRecord, now time.Time) bool {
@@ -694,7 +740,11 @@ func (s *Server) processOneACME(ctx context.Context) error {
 	var record acmeRecord
 	var profile map[string]any
 	for candidate, raw := range state {
-		rec := decodeACMERecord(raw)
+		rec, decodeErr := decodeACMERecord(raw)
+		if decodeErr != nil {
+			s.configMu.Unlock()
+			return decodeErr
+		}
 		p := acmeProfile(draft, candidate)
 		if live := acmeProfile(active, candidate); live != nil && live["enabled"] != false && live["certificate_secret_ref"] == "tls-profiles/"+candidate+"/acme-bundle.pem" {
 			p = live
@@ -854,7 +904,10 @@ func (s *Server) processOneACME(ctx context.Context) error {
 	if stateErr != nil {
 		return stateErr
 	}
-	current := decodeACMERecord(state[id])
+	current, decodeErr := decodeACMERecord(state[id])
+	if decodeErr != nil {
+		return errors.Join(err, decodeErr)
+	}
 	if current.Revision != record.Revision || !current.Settings.Enabled {
 		// Never resurrect an obsolete certificate/settings result. A typed CA
 		// Retry-After is the sole safe exception: preserve only its hold so a

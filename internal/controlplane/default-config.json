@@ -114,12 +114,8 @@
     },
     "routing_monitor": {
       "active_liveness_interval_seconds": 3,
-      "failure_retry_interval_seconds": 2,
-      "block_recovery_interval_seconds": 15,
       "active_quality_interval_seconds": 60,
-      "reserve_check_interval_seconds": 300,
-      "full_scan_interval_seconds": 1800,
-      "probe_batch_size": 0
+      "probe_batch_size": 10
     },
     "management": {
       "allowed_ingress_interfaces": [],

@@ -114,7 +114,6 @@ func normalizeProfileFormat(format, userAgent, accept string) string {
 	}
 	if format == "" || format == "auto" {
 		userAgent = strings.ToLower(userAgent)
-		accept = strings.ToLower(accept)
 		switch {
 		case strings.Contains(userAgent, "happ"):
 			// Happ owns the mobile VPN/TUN. A generic JSON Accept header must

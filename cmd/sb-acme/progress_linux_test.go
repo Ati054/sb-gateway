@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -30,13 +31,9 @@ func TestWorkerProgressReporterRequiresExplicitFD3AndNeverBlocks(t *testing.T) {
 	t.Run("closed reader", func(t *testing.T) {
 		reader, writer := workerProgressPipe(t)
 		_ = reader.Close()
-		started := time.Now()
 		output, err := runWorkerProgressChild(writer, "closed")
 		if err != nil || output != "{\"result\":\"ok\"}\n" {
 			t.Fatalf("closed pipe changed worker stdout: %q %v", output, err)
-		}
-		if elapsed := time.Since(started); elapsed > 750*time.Millisecond {
-			t.Fatalf("closed telemetry reader blocked worker: %v", elapsed)
 		}
 	})
 	t.Run("full pipe", func(t *testing.T) {
@@ -56,13 +53,9 @@ func TestWorkerProgressReporterRequiresExplicitFD3AndNeverBlocks(t *testing.T) {
 			}
 			t.Fatalf("fill pipe: %v", err)
 		}
-		started := time.Now()
 		output, err := runWorkerProgressChild(writer, "full")
 		if err != nil || output != "{\"result\":\"ok\"}\n" {
 			t.Fatalf("full pipe changed worker stdout: %q %v", output, err)
-		}
-		if elapsed := time.Since(started); elapsed > 750*time.Millisecond {
-			t.Fatalf("full telemetry pipe blocked worker: %v", elapsed)
 		}
 	})
 	t.Run("actual event", func(t *testing.T) {
@@ -106,7 +99,9 @@ func workerProgressPipe(t *testing.T) (*os.File, *os.File) {
 }
 
 func runWorkerProgressChild(writer *os.File, mode string) (string, error) {
-	command := exec.Command(os.Args[0], "-test.run=^TestWorkerProgressReporterProcessHelper$")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkerProgressReporterProcessHelper$")
 	command.Env = workerProgressChildEnv(mode)
 	if mode != "missing" {
 		command.Env = append(command.Env, "SB_ACME_PROGRESS_FD=3")
@@ -139,7 +134,12 @@ func TestWorkerProgressReporterProcessHelper(t *testing.T) {
 		return
 	}
 	reporter := newWorkerProgressReporter()
+	started := time.Now()
 	reporter.report(acmejob.ProgressPreparing)
+	// Measure reporting, not process startup or the race runtime's exit delay.
+	if time.Since(started) > 750*time.Millisecond {
+		os.Exit(2)
+	}
 	_, _ = os.Stdout.WriteString("{\"result\":\"ok\"}\n")
 	os.Exit(0)
 }

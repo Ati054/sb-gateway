@@ -43,13 +43,10 @@ func TestValidateRoutingMonitorSettings(t *testing.T) {
 	monitor["active_quality_interval_seconds"] = 120
 	monitor["reserve_check_interval_seconds"] = 60
 	monitor["full_scan_interval_seconds"] = 30
-	monitor["probe_batch_size"] = 11
+	monitor["probe_batch_size"] = 65
 	result := validateCurrentConfig(config)
 	for _, path := range []string{
 		"system.routing_monitor.active_liveness_interval_seconds",
-		"system.routing_monitor.failure_retry_interval_seconds",
-		"system.routing_monitor.reserve_check_interval_seconds",
-		"system.routing_monitor.full_scan_interval_seconds",
 		"system.routing_monitor.probe_batch_size",
 	} {
 		if !hasValidationPath(result.Errors, path) {
@@ -58,12 +55,15 @@ func TestValidateRoutingMonitorSettings(t *testing.T) {
 	}
 }
 
-func TestValidateRoutingMonitorAllowsTenChecksPerCycle(t *testing.T) {
-	config := currentConfigFixture(t)
-	monitor := objectAt(config, "system")["routing_monitor"].(map[string]any)
-	monitor["probe_batch_size"] = 10
-	if result := validateCurrentConfig(config); !result.Valid {
-		t.Fatalf("configured ten-check batch rejected: %#v", result.Errors)
+func TestValidateRoutingMonitorAllowsBoundedNumericConcurrency(t *testing.T) {
+	for _, batch := range []any{0, 1, 5, 10, 24, 64, 65, -1, 1.5} {
+		config := currentConfigFixture(t)
+		monitor := objectAt(config, "system")["routing_monitor"].(map[string]any)
+		monitor["probe_batch_size"] = batch
+		wantInvalid := batch == 65 || batch == -1 || batch == 1.5
+		if got := hasValidationPath(validateCurrentConfig(config).Errors, "system.routing_monitor.probe_batch_size"); got != wantInvalid {
+			t.Fatalf("batch=%v invalid=%v want=%v", batch, got, wantInvalid)
+		}
 	}
 }
 
@@ -561,22 +561,16 @@ func TestValidateCurrentConfigRejectsPolicyValuesTheSelectorWouldOtherwiseClamp(
 		"domain_strategy": "Magic", "on_all_unavailable": "direct", "selection_order": []any{"country:DE", "country:DE"},
 		"quality_window": 2, "max_packet_loss_percent": 101, "max_latency_ms": 30001,
 		"failure_threshold": 0, "recovery_threshold": 21, "switch_cooldown_seconds": -1,
-		"switch_improvement_ms": 30001, "speed_improvement_percent": 101, "speed_degradation_percent": 100,
-		"speed_check_interval_seconds": 299, "speed_probe_bytes": 1024, "speed_candidate_count": 6,
+		"switch_improvement_ms":         30001,
 		"active_check_interval_seconds": 300, "backup_check_interval_seconds": 60, "full_scan_interval_seconds": 30,
-		"max_active_candidates": 11, "max_probe_candidates": 0, "probe_batch_size": 11,
+		"max_active_candidates": 11, "max_probe_candidates": 0, "probe_batch_size": 65,
 		"candidate_service_access": map[string]any{"country:DE": "claude"},
 	}}
 
 	result := validateCurrentConfig(config)
 	for _, wanted := range []string{
 		"policies[0].enabled", "policies[0].mode", "policies[0].traffic_mode", "policies[0].domain_strategy",
-		"policies[0].on_all_unavailable", "policies[0].selection_order", "policies[0].quality_window",
-		"policies[0].max_packet_loss_percent", "policies[0].max_latency_ms", "policies[0].failure_threshold",
-		"policies[0].recovery_threshold", "policies[0].switch_cooldown_seconds", "policies[0].switch_improvement_ms",
-		"policies[0].speed_improvement_percent", "policies[0].speed_degradation_percent", "policies[0].speed_check_interval_seconds", "policies[0].speed_probe_bytes",
-		"policies[0].speed_candidate_count", "policies[0].backup_check_interval_seconds", "policies[0].full_scan_interval_seconds",
-		"policies[0].max_active_candidates", "policies[0].max_probe_candidates", "policies[0].probe_batch_size",
+		"policies[0].on_all_unavailable", "policies[0].selection_order", "policies[0].switch_improvement_ms",
 		"policies[0].candidate_service_access.country:DE",
 	} {
 		if !hasValidationPath(result.Errors, wanted) {
@@ -602,7 +596,7 @@ func TestValidateCurrentConfigRequiresSafeUserNodeGroups(t *testing.T) {
 	}
 }
 
-func TestValidateSpeedDegradationPercentPreservesArbitraryThresholds(t *testing.T) {
+func TestValidateLegacySpeedSettingsDoNotBlockMigration(t *testing.T) {
 	for _, mode := range []string{"best", "priority"} {
 		for _, value := range []any{nil, 0, 1, 25, 30, 50, 99, -1, 100, 25.5, "30"} {
 			config := currentConfigFixture(t)
@@ -611,9 +605,12 @@ func TestValidateSpeedDegradationPercentPreservesArbitraryThresholds(t *testing.
 				policy["speed_degradation_percent"] = value
 			}
 			config["policies"] = []any{policy}
-			bad := value == -1 || value == 100 || value == 25.5 || value == "30"
-			if got := hasValidationPath(validateCurrentConfig(config).Errors, "policies[0].speed_degradation_percent"); got != bad {
-				t.Fatalf("mode=%s value=%v error=%v", mode, value, got)
+			normalizeConfigCompatibility(config)
+			if _, exists := policy["speed_degradation_percent"]; exists {
+				t.Fatalf("mode=%s value=%v retained obsolete setting", mode, value)
+			}
+			if result := validateCurrentConfig(config); !result.Valid {
+				t.Fatalf("mode=%s value=%v errors=%#v", mode, value, result.Errors)
 			}
 		}
 	}
@@ -687,7 +684,7 @@ func TestValidateCurrentConfigAcceptsEveryVisiblePolicyControlAtItsBoundary(t *t
 	config["policies"] = []any{map[string]any{
 		"id": "europe", "enabled": true, "mode": "best", "traffic_mode": "vless_with_wan_exceptions",
 		"domain_strategy": "IPIfNonMatch", "on_all_unavailable": "block", "torrent_direct": true,
-		"pinpoint_domains_enabled": true, "speed_check_enabled": true, "return_to_primary": true,
+		"pinpoint_domains_enabled": true, "return_to_primary": true,
 		"interrupt_exist_connections": false, "countries": []any{"DE"}, "locations": []any{"de-berlin"},
 		"selection_order": []any{"country:DE"}, "outbounds": []any{"reverse-vless-home"},
 		"direct_domains": []any{"example.com"}, "direct_services": []any{"torrent"},
@@ -696,10 +693,9 @@ func TestValidateCurrentConfigAcceptsEveryVisiblePolicyControlAtItsBoundary(t *t
 		"service_routes":           map[string]any{"telegram": "europe"},
 		"quality_window":           60, "max_packet_loss_percent": 100, "max_latency_ms": 30000,
 		"failure_threshold": 20, "recovery_threshold": 20, "switch_cooldown_seconds": 86400,
-		"switch_improvement_ms": 30000, "speed_improvement_percent": 100,
-		"speed_check_interval_seconds": 86400, "speed_probe_bytes": 10 * 1024 * 1024, "speed_candidate_count": 5,
+		"switch_improvement_ms":         30000,
 		"active_check_interval_seconds": 3600, "backup_check_interval_seconds": 3600, "full_scan_interval_seconds": 86400,
-		"max_active_candidates": 10, "max_probe_candidates": 10, "probe_batch_size": 10,
+		"max_active_candidates": 10, "max_probe_candidates": 10, "probe_batch_size": 64,
 	}}
 
 	if result := validateCurrentConfig(config); !result.Valid {
