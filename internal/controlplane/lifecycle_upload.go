@@ -147,7 +147,8 @@ func (server *Server) uploadLifecycleImage(response http.ResponseWriter, request
 	}
 	maximum := maxLifecycleImageUploadBytes()
 	limited := http.MaxBytesReader(response, request.Body, maximum)
-	version, size, digest, inspectErr := inspectDockerImageStream(limited, temporary)
+	upload := newImageUploadWriter(temporary)
+	version, size, digest, inspectErr := inspectDockerImageStream(limited, upload)
 	if inspectErr != nil {
 		temporary.Close()
 		var maxBytesError *http.MaxBytesError
@@ -158,7 +159,7 @@ func (server *Server) uploadLifecycleImage(response http.ResponseWriter, request
 		}
 		return
 	}
-	if err := temporary.Sync(); err != nil {
+	if err := upload.Flush(); err != nil {
 		temporary.Close()
 		server.internalStateError(response, request, err)
 		return

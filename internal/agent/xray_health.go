@@ -235,7 +235,7 @@ func readyProcessPIDAt(root, path, name string) int {
 
 func (runtime *xraySelectorRuntime) Select(selector, member string) (selectionErr error) {
 	trace := beginHealthStage("select", runtime.stageLane(), selector, member)
-	defer func() { trace.finish(selectionErr == nil) }()
+	defer func() { trace.finishError(selectionErr, runtime.requestContext().Err() != nil) }()
 	runtimeMember := member
 	_, policySelector := runtime.pool.Policies[selector]
 	if selector == runtime.probeSelectorName() {

@@ -228,7 +228,7 @@ func (server *Server) trafficReadiness(response http.ResponseWriter, request *ht
 		return
 	}
 	baseReady, payload := server.routerReadinessState(active)
-	selector, err := server.repository.auxiliary("selector-health")
+	selector, err := server.repository.selectorReadiness()
 	if err != nil {
 		server.internalStateError(response, request, err)
 		return
@@ -313,27 +313,10 @@ func (server *Server) status(response http.ResponseWriter, request *http.Request
 		return
 	}
 	if request.URL.Query().Get("view") == "selectors" {
-		selector, err := server.repository.auxiliary("selector-health")
+		compact, err := server.repository.selectorStatus()
 		if err != nil {
 			server.internalStateError(response, request, err)
 			return
-		}
-		compact := make(map[string]any, len(selector))
-		for id, raw := range selector {
-			item, _ := raw.(map[string]any)
-			fields := make(map[string]any)
-			for _, key := range []string{"runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_nodes", "candidate_count", "availability_ok", "shortlist", "latency_comparisons"} {
-				if value, exists := item[key]; exists {
-					fields[key] = value
-				}
-			}
-			// An empty error must clear an earlier failure in the UI merge.
-			if fields["runtime_error"] == nil {
-				fields["runtime_error"] = ""
-			}
-			// Clear a previous comparison in the compact-poll UI merge.
-			fields["latency_comparisons"] = item["latency_comparisons"]
-			compact[id] = fields
 		}
 		metadata, err := server.repository.metadata()
 		if err != nil {

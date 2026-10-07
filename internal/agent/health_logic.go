@@ -498,17 +498,26 @@ func updateHistories(item *policyHealthState, candidates []string, measured map[
 	cutoff := float64(now.Add(-24 * time.Hour).Unix())
 	oldestDay := now.UTC().AddDate(0, 0, -(historyRetentionDays - 1)).Format("2006-01-02")
 	for _, candidate := range candidates {
-		history := []healthSample{}
-		for _, sample := range item.DailySamples[candidate] {
+		previous := item.DailySamples[candidate]
+		history := previous[:0]
+		if history == nil {
+			history = []healthSample{}
+		}
+		// This controller owns the history. Compact it in place instead of
+		// allocating a new daily buffer for every node on every health tick.
+		for _, sample := range previous {
 			if sample.At >= cutoff {
 				history = append(history, sample)
 			}
 		}
+		clear(previous[len(history):])
 		if evidence, ok := measured[candidate]; ok {
 			history = append(history, healthSample{At: float64(now.Unix()), OK: evidence.OK, DelayMS: evidence.DelayMS})
 		}
 		if len(history) > 1440 {
-			history = history[len(history)-1440:]
+			copy(history, history[len(history)-1440:])
+			clear(history[1440:])
+			history = history[:1440]
 		}
 		item.DailySamples[candidate] = history
 		days := item.HistoryDays[candidate]
@@ -520,7 +529,7 @@ func updateHistories(item *policyHealthState, candidates []string, measured map[
 		} else if _, ok := measured[candidate]; ok {
 			appendHistoryDay(days, history[len(history)-1])
 		}
-		for _, key := range sortedKeys(days) {
+		for key := range days {
 			if key < oldestDay {
 				delete(days, key)
 			}
@@ -554,15 +563,20 @@ func appendHistoryDay(days map[string]dayBucket, sample healthSample) {
 }
 
 func summarizeSamples(samples []healthSample) healthStats {
-	delays := []int{}
-	failures := 0
+	failures, latencyCount := 0, 0
 	for _, sample := range samples {
 		if sample.OK {
 			if sample.DelayMS != nil {
-				delays = append(delays, *sample.DelayMS)
+				latencyCount++
 			}
 		} else {
 			failures++
+		}
+	}
+	delays := make([]int, 0, latencyCount)
+	for _, sample := range samples {
+		if sample.OK && sample.DelayMS != nil {
+			delays = append(delays, *sample.DelayMS)
 		}
 	}
 	return buildStats(len(samples), len(samples)-failures, failures, delays, 0)
@@ -574,22 +588,23 @@ func summarizeDays(days map[string]dayBucket, count int, now time.Time) healthSt
 	}
 	oldestDay := now.UTC().AddDate(0, 0, -(count - 1)).Format("2006-01-02")
 	newestDay := now.UTC().Format("2006-01-02")
-	keys := []string{}
-	for _, key := range sortedKeys(days) {
+	samples, successes, failures, dayCount, latencyCount := 0, 0, 0, 0, 0
+	for key, bucket := range days {
 		if key >= oldestDay && key <= newestDay {
-			keys = append(keys, key)
+			samples += bucket.Samples
+			successes += bucket.Successes
+			failures += bucket.Failures
+			latencyCount += len(bucket.LatencySamples)
+			dayCount++
 		}
 	}
-	samples, successes, failures := 0, 0, 0
-	delays := []int{}
-	for _, key := range keys {
-		bucket := days[key]
-		samples += bucket.Samples
-		successes += bucket.Successes
-		failures += bucket.Failures
-		delays = append(delays, bucket.LatencySamples...)
+	delays := make([]int, 0, latencyCount)
+	for key, bucket := range days {
+		if key >= oldestDay && key <= newestDay {
+			delays = append(delays, bucket.LatencySamples...)
+		}
 	}
-	stats := buildStats(samples, successes, failures, delays, len(keys))
+	stats := buildStats(samples, successes, failures, delays, dayCount)
 	stats.LatencySampleCount = len(delays)
 	stats.PercentilesApproximate = successes > len(delays)
 	return stats
@@ -603,8 +618,14 @@ func buildStats(samples, successes, failures int, delays []int, days int) health
 		stats.LossPercent, stats.AvailabilityPercent = &loss, &availability
 	}
 	if len(delays) > 0 {
-		median := medianInt(delays)
-		p95 := percentile(delays, .95)
+		// Both callers own this scratch buffer; never sort stored history in place.
+		sort.Ints(delays)
+		n := len(delays)
+		median := delays[n/2]
+		if n%2 == 0 {
+			median = (delays[n/2-1] + delays[n/2]) / 2
+		}
+		p95 := delays[int(float64(n-1)*.95+.999999)]
 		stats.MedianMS, stats.P95MS = &median, &p95
 	}
 	return stats
