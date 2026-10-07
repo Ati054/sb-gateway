@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 func geoIPFixture(t *testing.T) Options {
@@ -70,6 +72,17 @@ func TestActivateSkipsFreshStartupBaselineButNotUnknownOrMutatedCore(t *testing.
 	pack := filepath.Join(options.RulesetDir, "geoip-cn.json")
 	baselinePack := []byte(`{"rules":[{"ip_cidr":["203.0.113.0/24"]}]}`)
 	if err := os.WriteFile(pack, baselinePack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := geoipasset.Ensure(options.RulesetDir, "geoip-cn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := os.ReadFile(options.XrayConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(options.XrayConfig, []byte(strings.ReplaceAll(string(config), "203.0.113.0/24", ref)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	options.ValidatedFile = filepath.Join(filepath.Dir(options.XrayConfig), "proof")
@@ -242,7 +255,11 @@ func TestActivateReplacesOnlyGeoIPCIDRAndConfirmsOrder(t *testing.T) {
 		t.Fatalf("unrelated routing changed: %#v", applied)
 	}
 	ip, _ := applied[1]["ip"].([]any)
-	if len(ip) != 1 || ip[0] != "198.51.100.0/24" {
+	ref, refErr := geoipasset.Ensure(options.RulesetDir, "geoip-cn")
+	if refErr != nil {
+		t.Fatal(refErr)
+	}
+	if len(ip) != 1 || ip[0] != ref {
 		t.Fatalf("GeoIP CIDR did not change: %#v", applied[1])
 	}
 	changed, err = Activate(context.Background(), options, state)
@@ -294,7 +311,11 @@ func TestActivateRestoresBaselineAfterPreviousHotUpdate(t *testing.T) {
 		t.Fatalf("baseline restore = %t, %v, replacements=%d", changed, err, replacements)
 	}
 	ip, _ := applied[1]["ip"].([]any)
-	if len(ip) != 1 || ip[0] != "203.0.113.0/24" {
+	ref, refErr := geoipasset.Ensure(options.RulesetDir, "geoip-cn")
+	if refErr != nil {
+		t.Fatal(refErr)
+	}
+	if len(ip) != 1 || ip[0] != ref {
 		t.Fatalf("baseline CIDR was not restored: %#v", applied[1])
 	}
 }
@@ -338,8 +359,52 @@ func TestActivateRollsBackAfterReadbackFailure(t *testing.T) {
 	if err == nil || changed || len(applied) != 2 {
 		t.Fatalf("unconfirmed activation was not rolled back: %t, %v, calls=%d", changed, err, len(applied))
 	}
-	if !strings.Contains(string(applied[0]), "198.51.100.0/24") || !strings.Contains(string(applied[1]), "203.0.113.0/24") {
+	ref, refErr := geoipasset.Ensure(options.RulesetDir, "geoip-cn")
+	if refErr != nil {
+		t.Fatal(refErr)
+	}
+	if !strings.Contains(string(applied[0]), ref) || !strings.Contains(string(applied[1]), "203.0.113.0/24") {
 		t.Fatalf("rollback did not restore old CIDRs")
+	}
+}
+
+func TestRollbackUsesLastConfirmedVersionAfterMultipleUpdates(t *testing.T) {
+	options := geoIPFixture(t)
+	state := &State{}
+	var applied [][]byte
+	failed := false
+	options.Run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if args[1] == "lsrules" {
+			if failed {
+				return []byte(`{"rules":[]}`), nil
+			}
+			return []byte(`{"rules":[{},{"ruleTag":"sb-geoip-geoip-cn-2-0"},{}]}`), nil
+		}
+		body, err := os.ReadFile(args[len(args)-1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied = append(applied, body)
+		return []byte(`{}`), nil
+	}
+	for _, prefix := range []string{"198.51.100.0/24", "192.0.2.0/24"} {
+		if err := os.WriteFile(filepath.Join(options.RulesetDir, "geoip-cn.json"), []byte(`{"rules":[{"ip_cidr":["`+prefix+`"]}]}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if changed, err := Activate(context.Background(), options, state); err != nil || !changed {
+			t.Fatalf("update=%t %v", changed, err)
+		}
+	}
+	confirmed := string(applied[1])
+	if err := os.WriteFile(filepath.Join(options.RulesetDir, "geoip-cn.json"), []byte(`{"rules":[{"ip_cidr":["10.0.0.0/8"]}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	failed = true
+	if changed, err := Activate(context.Background(), options, state); err == nil || changed {
+		t.Fatalf("bad readback=%t %v", changed, err)
+	}
+	if len(applied) != 4 || string(applied[3]) != confirmed {
+		t.Fatal("rollback returned startup database instead of last confirmed routing")
 	}
 }
 
@@ -364,7 +429,11 @@ func TestActivateRollsBackAfterAmbiguousAPIError(t *testing.T) {
 	if err == nil || changed || len(applied) != 2 {
 		t.Fatalf("ambiguous API failure was not rolled back: %t, %v, calls=%d", changed, err, len(applied))
 	}
-	if !strings.Contains(string(applied[0]), "198.51.100.0/24") || !strings.Contains(string(applied[1]), "203.0.113.0/24") {
+	ref, refErr := geoipasset.Ensure(options.RulesetDir, "geoip-cn")
+	if refErr != nil {
+		t.Fatal(refErr)
+	}
+	if !strings.Contains(string(applied[0]), ref) || !strings.Contains(string(applied[1]), "203.0.113.0/24") {
 		t.Fatal("rollback did not restore the committed CIDRs")
 	}
 }

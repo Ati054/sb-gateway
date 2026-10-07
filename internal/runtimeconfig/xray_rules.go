@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 type xrayRuleCompiler struct {
@@ -140,7 +142,8 @@ func (compiler *xrayRuleCompiler) expand(raw map[string]any) ([]map[string]any, 
 			}
 			for _, key := range []string{"domain_suffix", "domain", "domain_keyword", "domain_regex", "ip_cidr", "port", "port_range"} {
 				if _, exists := entry[key]; exists {
-					merged[key] = stringOrList(entry[key])
+					// Conversion owns the final slice; expansion only reads entries.
+					merged[key] = entry[key]
 				}
 			}
 			if network := entry["network"]; joinStringOrList(network) != "" {
@@ -174,6 +177,15 @@ func (compiler *xrayRuleCompiler) load(name string) ([]map[string]any, error) {
 	if name == "" || filepath.Base(name) != name {
 		return nil, errors.New("invalid ruleset name")
 	}
+	if strings.HasPrefix(name, "geoip-") {
+		reference, err := geoipasset.Ensure(compiler.root, name)
+		if err != nil {
+			return nil, err
+		}
+		entries := []map[string]any{{"ip_cidr": []string{reference}}}
+		compiler.cache[name] = entries
+		return entries, nil
+	}
 	file, err := os.Open(filepath.Join(compiler.root, name+".json"))
 	if err != nil {
 		return nil, err
@@ -195,6 +207,13 @@ func (compiler *xrayRuleCompiler) load(name string) ([]map[string]any, error) {
 	}
 	if info, err := file.Stat(); err == nil && info.Size() > maxPolicyDNSRulesetBytes {
 		return nil, errors.New("ruleset exceeds 16 MiB")
+	}
+	for _, entry := range document.Rules {
+		for _, key := range []string{"domain_suffix", "domain", "domain_keyword", "domain_regex", "ip_cidr", "port", "port_range"} {
+			if value, exists := entry[key]; exists {
+				entry[key] = stringOrList(value)
+			}
+		}
 	}
 	compiler.cache[name] = document.Rules
 	return document.Rules, nil

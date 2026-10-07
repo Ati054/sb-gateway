@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+export XRAY_LOCATION_ASSET="${SB_RULESET_DIR:-/config/rulesets}"
 
 config="${SB_XRAY_CONFIG:-/config/generated/xray.json}"
 lkg="${SB_XRAY_LKG_CONFIG:-/data/last-known-good/xray.json}"
