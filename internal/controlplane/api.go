@@ -324,6 +324,8 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("POST "+apiPrefix+"/lifecycle/image-upload/preflight", server.preflightLifecycleImageUpload)
 	server.mux.HandleFunc("PUT "+apiPrefix+"/lifecycle/image-upload", server.uploadLifecycleImage)
 	server.mux.HandleFunc("POST "+apiPrefix+"/lifecycle/image-update", server.scheduleLifecycleImageUpdate)
+	server.mux.HandleFunc("GET "+apiPrefix+"/routeros/container/memory", server.containerMemoryStatus)
+	server.mux.HandleFunc("POST "+apiPrefix+"/routeros/container/memory", server.updateContainerMemory)
 	server.mux.HandleFunc("GET "+apiPrefix+"/lifecycle/uninstall", server.uninstallPreview)
 	server.mux.HandleFunc("POST "+apiPrefix+"/lifecycle/uninstall", server.scheduleFullUninstall)
 	server.mux.HandleFunc("GET "+apiPrefix+"/client-telemetry", server.clientTelemetry)

@@ -23,6 +23,7 @@ import { withoutRetiredURLTestSettings } from "./urltest-settings";
 import { automaticCidrHint, supportsAutomaticCidr } from "./cdn-capabilities";
 import { AcmeFields, useAcmeProfile } from "./acme-fields";
 import { TlsTransferDialog } from "./tls-transfer";
+import { ContainerMemory } from "./container-memory";
 import { mergeSubscriptionMetadata } from "./subscription-metadata";
 import { subscriptionFeedGroups } from "./subscription-feed";
 import { disableSubscriptionPublication } from "./subscription-publication";
@@ -9439,12 +9440,14 @@ function Settings({
   config,
   routeros,
   onDraftChanged,
+  onRouterOSChanged,
 }: {
   config: JsonObject;
   routeros: JsonObject;
   onDraftChanged: () => Promise<void>;
+  onRouterOSChanged: () => Promise<void>;
 }) {
-  const { locale, tr } = useLanguage();
+  const { tr } = useLanguage();
   const systemFromDraft = asObject(config.system);
   const managementFromDraft = asObject(systemFromDraft.management);
   const networkingFromDraft = asObject(systemFromDraft.networking);
@@ -9560,27 +9563,12 @@ function Settings({
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirmation, setNewPasswordConfirmation] = useState("");
-  const currentSystem = asObject(config.system);
   const currentStorage = asObject(config.storage);
-  const currentContainer = asObject(currentSystem.container);
   const liveContainer = asObject(routeros.container);
   const usbPath = asText(
     liveContainer.root_dir,
     asText(currentStorage.root, tr("Live REST недоступен")),
   );
-  const liveMemoryLimit = asText(
-    liveContainer.memory_max,
-    asText(liveContainer.memory_high, ""),
-  );
-  const configuredMemoryMb = asText(currentContainer.memory_limit_mb, "");
-  const memoryLimitLabel =
-    liveMemoryLimit.toLowerCase() === "unlimited"
-      ? tr("Без ограничения")
-      : liveMemoryLimit
-        ? formatBytes(liveMemoryLimit, locale)
-        : configuredMemoryMb
-          ? tr("{value1} МБ (из черновика)", { value1: configuredMemoryMb })
-          : tr("Live REST недоступен");
   const panelHosts = Array.from(new Set(asObjectList(connectionSnapshot.local_addresses)
     .filter((row) => managementIngressInterfaces.includes(asText(row.interface, "")) && row.interface !== containerBridgeName)
     .map((row) => asText(row.address, ""))))
@@ -9937,9 +9925,7 @@ function Settings({
           <label className="field">
              {tr("Root-dir контейнера")} <input value={usbPath} readOnly />
           </label>
-          <label className="field">
-             {tr("Лимит памяти контейнера")} <input value={memoryLimitLabel} readOnly />
-          </label>
+          <ContainerMemory container={liveContainer} onChanged={onRouterOSChanged} />
         </article>
 
         <article className="card settings-card">
@@ -18425,6 +18411,7 @@ function GatewayConsole({
               config={draftConfig}
               routeros={routerosSummary}
               onDraftChanged={refreshDraft}
+              onRouterOSChanged={refreshLiveRouterOSContainer}
             />
           ) : null}
         </main>

@@ -504,7 +504,11 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.doesNotMatch(page, /Нет live-данных/);
   assert.match(page, /IPv4-only WAN/);
   assert.match(page, /Root-dir контейнера/);
-  assert.match(page, /Лимит памяти контейнера/);
+  assert.match(page, /<ContainerMemory container=\{liveContainer\}/);
+  const memoryFields = await readFile(new URL("../app/container-memory.tsx", import.meta.url), "utf8");
+  assert.match(memoryFields, /memory-high/);
+  assert.match(memoryFields, /memory-max/);
+  assert.match(memoryFields, /type="number" min="16" max="8192" step="1"/);
   assert.doesNotMatch(page, /Kernel TPROXY/);
   assert.doesNotMatch(page, /Без userspace TUN\/gVisor/);
   assert.match(page, /Без ограничения/);

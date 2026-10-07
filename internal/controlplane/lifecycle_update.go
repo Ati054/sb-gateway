@@ -23,8 +23,6 @@ const lifecycleScheduleConfirmationWindow = time.Minute
 const (
 	lifecycleContainerMemoryHigh = int64(224 << 20)
 	lifecycleContainerMemoryMax  = int64(256 << 20)
-	legacyContainerMemoryHigh    = int64(320 << 20)
-	legacyContainerMemoryMax     = int64(384 << 20)
 )
 
 func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter, request *http.Request) {
@@ -245,9 +243,6 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 		}
 	}
 	currentRoot := ""
-	currentID := ""
-	currentMemoryHigh := int64(0)
-	currentMemoryMax := int64(0)
 	currentCount := 0
 	transitionCount := 0
 	for _, container := range containers {
@@ -255,9 +250,6 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 		case "SB-GATEWAY container":
 			currentCount++
 			currentRoot = strings.Trim(text(container["root-dir"]), "/")
-			currentID = text(container[".id"])
-			currentMemoryHigh, _ = routerOSByteSize(container["memory-high"])
-			currentMemoryMax, _ = routerOSByteSize(container["memory-max"])
 		case "SB-GATEWAY container candidate", "SB-GATEWAY container rollback", "SB-GATEWAY container failed":
 			transitionCount++
 		}
@@ -277,20 +269,6 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 	} else if !schedulerPresent && transitionCount == 0 {
 		switch currentRoot {
 		case text(operation["candidate_root"]):
-			targetHigh := max(currentMemoryHigh, lifecycleContainerMemoryHigh)
-			targetMax := max(currentMemoryMax, lifecycleContainerMemoryMax, targetHigh)
-			// Migrate only the exact historical default pair. Any other higher
-			// limits are treated as an explicit administrator override.
-			if currentMemoryHigh == legacyContainerMemoryHigh && currentMemoryMax == legacyContainerMemoryMax {
-				targetHigh = lifecycleContainerMemoryHigh
-				targetMax = lifecycleContainerMemoryMax
-			}
-			if currentMemoryHigh != targetHigh || currentMemoryMax != targetMax {
-				if err := stack.REST.SetContainerMemoryLimits(ctx, currentID, targetHigh, targetMax); err != nil {
-					log.Printf("lifecycle image update memory reconciliation pending: %v", err)
-					return operation
-				}
-			}
 			nextState = "completed"
 		case text(operation["previous_root"]):
 			if nextState == "preparing" && text(operation["schedule_confirmation"]) == "pending" {
