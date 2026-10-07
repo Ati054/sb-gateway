@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 func TestCatalogAndOfflineSeeds(t *testing.T) {
@@ -102,6 +104,34 @@ func TestCompileDomainListRecursiveIncludes(t *testing.T) {
 	if !reflect.DeepEqual(rule["domain"], []string{"api.example.net"}) ||
 		!reflect.DeepEqual(rule["domain_suffix"], []string{"cdn.example.org", "example.com"}) {
 		t.Fatalf("unexpected compiled rules: %#v", rule)
+	}
+}
+
+func TestGeoIPAssetFailureDoesNotPublishJSONPack(t *testing.T) {
+	pack, err := CustomPack("geoip-ru", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	old := []byte(`{"version":3,"rules":[{"ip_cidr":["192.0.2.0/24"]}]}`)
+	path := filepath.Join(root, "geoip-ru.json")
+	if err := os.WriteFile(path, old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := geoipasset.Publish(root, "geoip-ru", []byte(`{"version":3,"rules":[{"ip_cidr":["198.51.100.0/24"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _ := geoipasset.ReferenceName(ref)
+	if err := os.WriteFile(filepath.Join(root, name), []byte("damaged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshPack(pack, root, func(string) (string, error) { return "198.51.100.0/24", nil }); err == nil {
+		t.Fatal("published pack despite failed asset validation")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(old) {
+		t.Fatal("portable GeoIP changed after publication failure")
 	}
 }
 
