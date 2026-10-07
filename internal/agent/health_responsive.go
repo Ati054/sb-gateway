@@ -320,6 +320,9 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 				break
 			}
 		}
+		if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+			runtime.interrupted = errHealthYield
+		}
 		return measured
 	}
 	type result struct {
@@ -403,6 +406,11 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 			if onResult != nil && onResult(value.candidate, value.evidence) {
 				cancel()
 				<-done
+				// Select and worker shutdown can overlap Apply publication. The
+				// cancelled batch context is expected; check its parent instead.
+				if generationStamp(runtime.generationPaths) != stamp || runtime.ctx.Err() != nil {
+					runtime.interrupted = errHealthYield
+				}
 				return measured
 			}
 		case <-ticker.C:

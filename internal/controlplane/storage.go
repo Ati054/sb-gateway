@@ -21,6 +21,8 @@ type stateRepository struct {
 	generations string
 	mu          sync.RWMutex
 	cache       map[string]cachedDocument
+	readiness   cachedSelectorReadiness
+	selectors   cachedSelectorStatus
 }
 
 type cachedDocument struct {
@@ -33,6 +35,11 @@ type cachedDocument struct {
 // auxiliary document. Older generation variants are read on demand instead of
 // occupying router memory "just in case".
 const stateDocumentCacheLimit = 4
+
+// Large histories are caller-owned: caching them would retain a second object
+// graph and clone it again for each request. This bounds encoded cache input,
+// not the size of the decoded Go heap.
+const stateDocumentCacheMaxBytes = 256 << 10
 
 func newStateRepository(root string) (*stateRepository, error) {
 	abs, err := filepath.Abs(root)
@@ -73,6 +80,12 @@ func (repository *stateRepository) readJSON(path string) (map[string]any, error)
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
+	}
+	if info.Size() > stateDocumentCacheMaxBytes {
+		repository.mu.Lock()
+		delete(repository.cache, path)
+		repository.mu.Unlock()
+		return readJSONObject(path)
 	}
 	repository.mu.RLock()
 	cached, ok := repository.cache[path]
@@ -128,6 +141,10 @@ func (repository *stateRepository) writeJSON(path string, value map[string]any) 
 		delete(repository.cache, path)
 		return err
 	}
+	if info.Size() > stateDocumentCacheMaxBytes {
+		delete(repository.cache, path)
+		return nil
+	}
 	repository.cacheDocument(path, cachedDocument{
 		modified: info.ModTime().UnixNano(),
 		size:     info.Size(),
@@ -138,7 +155,7 @@ func (repository *stateRepository) writeJSON(path string, value map[string]any) 
 
 func writeAtomic(path string, body []byte, mode os.FileMode, skipUnchanged bool) error {
 	if skipUnchanged {
-		if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, body) {
+		if fileMatchesBytes(path, body) {
 			return nil
 		}
 	}
@@ -186,6 +203,29 @@ func writeAtomic(path string, body []byte, mode os.FileMode, skipUnchanged bool)
 		_ = directory.Close()
 	}
 	return err
+}
+
+func fileMatchesBytes(path string, body []byte) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(body)) {
+		return false
+	}
+	buffer := make([]byte, min(len(body), 32<<10))
+	for offset := 0; offset < len(body); {
+		length := min(len(buffer), len(body)-offset)
+		if _, err := io.ReadFull(file, buffer[:length]); err != nil || !bytes.Equal(buffer[:length], body[offset:offset+length]) {
+			return false
+		}
+		offset += length
+	}
+	var tail [1]byte
+	n, err := file.Read(tail[:])
+	return n == 0 && err == io.EOF
 }
 
 func (repository *stateRepository) loadDraft() (map[string]any, error) {

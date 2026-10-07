@@ -43,10 +43,10 @@ func (transport *SSHTransport) RunManagedScript(ctx context.Context, name string
 		}
 		return errors.New("RouterOS SSH managed script execution failed")
 	}
-	if !output.completed(receipt) {
+	if failure := output.completionFailure(receipt); failure != "" {
 		// Do not expose arbitrary script output (which may contain secrets), or
 		// accept a script error returned with RouterOS's successful SSH exit code.
-		return errors.New("RouterOS managed script completion was not confirmed")
+		return errors.New("RouterOS managed script completion was not confirmed (" + failure + ")")
 	}
 	return nil
 }
@@ -87,8 +87,28 @@ func (tail *scriptReceiptTail) Write(p []byte) (int, error) {
 }
 
 func (tail *scriptReceiptTail) completed(receipt string) bool {
+	return tail.completionFailure(receipt) == ""
+}
+
+func (tail *scriptReceiptTail) completionFailure(receipt string) string {
 	tail.mu.Lock()
 	defer tail.mu.Unlock()
 	lines := strings.Split(strings.TrimSpace(string(tail.data)), "\n")
-	return strings.TrimSpace(lines[len(lines)-1]) == receipt
+	explicitError := "ERROR:" + strings.TrimPrefix(receipt, "OK:")
+	seen := false
+	for _, line := range lines {
+		switch strings.TrimSpace(line) {
+		case explicitError:
+			return "explicit_error"
+		case receipt:
+			seen = true
+		}
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) == receipt {
+		return ""
+	}
+	if seen {
+		return "ok_seen_not_last"
+	}
+	return "receipt_missing"
 }

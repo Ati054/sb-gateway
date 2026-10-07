@@ -59,3 +59,46 @@ func TestEnsureStartupNginxTrafficReadinessRejectsAmbiguousLegacyConfig(t *testi
 		t.Fatal("ambiguous source was modified")
 	}
 }
+
+func TestEnsureStartupNginxTrafficReadinessNormalizesCRLF(t *testing.T) {
+	for _, header := range []string{nginxSchema2Header, nginxSchema3Header} {
+		t.Run(header, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "nginx.conf")
+			probe := ""
+			if header == nginxSchema3Header {
+				probe = nginxTrafficReady
+			}
+			original := header + "\nhttp {\n" + nginxInternalStart + probe + nginxInternalTail + "    }\n}\n"
+			original = strings.ReplaceAll(original, "\n", "\r\n")
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, err := EnsureStartupNginxTrafficReadiness(path)
+			if err != nil || !changed {
+				t.Fatalf("CRLF migration = %t, %v", changed, err)
+			}
+			result := string(mustReadFile(t, path))
+			if strings.Contains(result, "\r") || !strings.HasPrefix(result, nginxSchema3Header+"\n") || strings.Count(result, "location = /traffic-ready") != 1 {
+				t.Fatal("CRLF config was not normalized and upgraded")
+			}
+			if changed, err = EnsureStartupNginxTrafficReadiness(path); err != nil || changed {
+				t.Fatalf("second migration = %t, %v", changed, err)
+			}
+		})
+	}
+}
+
+func TestEnsureStartupNginxTrafficReadinessPreservesInvalidCRLF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nginx.conf")
+	original := nginxSchema3Header + "\nhttp {\n" + nginxInternalStart + nginxTrafficReady + nginxTrafficReady + nginxInternalTail + "    }\n}\n"
+	original = strings.ReplaceAll(original, "\n", "\r\n")
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := EnsureStartupNginxTrafficReadiness(path); err == nil || changed {
+		t.Fatalf("invalid CRLF migration = %t, %v", changed, err)
+	}
+	if result := string(mustReadFile(t, path)); result != original {
+		t.Fatal("invalid CRLF config was modified")
+	}
+}

@@ -39,7 +39,8 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	text := string(body)
+	text := strings.ReplaceAll(string(body), "\r\n", "\n")
+	normalized := text != string(body)
 	if strings.Count(text, nginxInternalStart) != 1 {
 		return false, errors.New("startup Nginx internal server is missing or ambiguous")
 	}
@@ -54,7 +55,12 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 		if strings.Count(internal, "location = /traffic-ready") != 1 {
 			return false, errors.New("schema-3 Nginx traffic readiness is missing or ambiguous")
 		}
-		return false, nil
+		if normalized {
+			if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
+				return false, err
+			}
+		}
+		return normalized, nil
 	}
 	if !strings.HasPrefix(text, nginxSchema2Header+"\n") {
 		return false, errors.New("startup Nginx schema is unsupported")

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -106,5 +107,39 @@ func TestEmergencyCancellationJoinsWorkersWithoutSelection(t *testing.T) {
 	_, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, effectivePolicySettings{})
 	if selected != "" || !errors.Is(err, errHealthYield) {
 		t.Fatalf("cancelled emergency selected a route: selected=%q err=%v", selected, err)
+	}
+}
+
+func TestEmergencyCallbackCannotPublishAcrossApply(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		for _, change := range []string{"generation", "cancellation"} {
+			t.Run(fmt.Sprintf("parallel=%t/%s", parallel, change), func(t *testing.T) {
+				runtime, path := delayedAvailabilityRuntime(t, time.Millisecond, nil)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				runtime.ctx = ctx
+				candidates := []string{"a", "b"}
+				if !parallel {
+					runtime.selectorRuntime = &fakeSelectorRuntime{probes: map[string]probeEvidence{"a": successfulEvidence(1)}}
+					candidates = candidates[:1]
+				}
+				calls := 0
+				runtime.ProbeEmergencyAvailabilityParallel(candidates, func(string, probeEvidence) bool {
+					calls++
+					// Select can overlap the atomic publication of a new Apply pool.
+					if change == "generation" {
+						if err := os.WriteFile(path, []byte("replacement-generation"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						cancel()
+					}
+					return true
+				})
+				if calls != 1 || !errors.Is(runtime.takeProbeInterruption(), errHealthYield) {
+					t.Fatal("callback accepted evidence from a replaced or cancelled runtime")
+				}
+			})
+		}
 	}
 }

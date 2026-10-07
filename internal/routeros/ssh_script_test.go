@@ -47,3 +47,24 @@ func TestManagedSSHScriptReceiptIsBoundedAndRejectsSilentErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedScriptFailureClassificationNeverExposesOutput(t *testing.T) {
+	const receipt = "OK:SB-GATEWAY-apply-0123456789ab"
+	for _, test := range []struct {
+		output, want string
+	}{
+		{"", "receipt_missing"},
+		{"secret-script-output\r\n", "receipt_missing"},
+		{receipt + "\nsecret-script-output\n", "ok_seen_not_last"},
+		{"ERROR:SB-GATEWAY-apply-0123456789ab\n", "explicit_error"},
+		{"ERROR:SB-GATEWAY-apply-0123456789ab\n" + receipt, "explicit_error"},
+		{"ERROR:unrelated-script\n" + receipt, ""},
+		{"script loaded\r\n" + receipt + "\r\n", ""},
+	} {
+		var tail scriptReceiptTail
+		_, _ = tail.Write([]byte(test.output))
+		if got := tail.completionFailure(receipt); got != test.want {
+			t.Fatalf("unexpected receipt classification: got=%q want=%q", got, test.want)
+		}
+	}
+}

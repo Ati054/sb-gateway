@@ -80,7 +80,7 @@ func (client *xrayControlClient) invoke(parent context.Context, operation, servi
 	}
 	trace := beginHealthStage("api", lane, "", "")
 	trace.command(operation)
-	defer func() { trace.finish(err == nil) }()
+	defer func() { trace.finishError(err, parent.Err() != nil) }()
 	select {
 	case slot <- struct{}{}:
 		defer func() { <-slot }()

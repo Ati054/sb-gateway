@@ -2,6 +2,9 @@ package controlplane
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +53,62 @@ func TestCompactSelectorStatusRequiresAuthAndOmitsHistory(t *testing.T) {
 	pair := item["latency_comparisons"].(map[string]any)["finland"].(map[string]any)
 	if pair["active"] != "canada" || pair["candidate_delay_ms"] != float64(350) {
 		t.Fatalf("missing compact comparison=%v", item)
+	}
+}
+
+func TestSelectorStatusCacheExcludesHistoryAndObservesAtomicReplacement(t *testing.T) {
+	repository, err := newStateRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(repository.root, "selector-health.json")
+	body := `{"route":{"runtime_selected":"node-a","candidate_count":10,"history_days":{"samples":[` + strings.Repeat(`100,`, 10000) + `100]}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := repository.selectorStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := objectAt(first, "route")
+	if len(item) != 4 || text(item["runtime_selected"]) != "node-a" {
+		t.Fatalf("unexpected projection: %#v", item)
+	}
+	if len(repository.cache) != 0 || len(objectAt(repository.selectors.value, "route")) != 4 {
+		t.Fatal("full history entered the polling cache")
+	}
+	item["runtime_selected"] = "changed"
+	second, err := repository.selectorStatus()
+	if err != nil || text(objectAt(second, "route")["runtime_selected"]) != "node-a" {
+		t.Fatal("caller mutated the compact cache")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(path, []byte(strings.Replace(body, "node-a", "node-b", 1)), 0o600, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	third, err := repository.selectorStatus()
+	if err != nil || text(objectAt(third, "route")["runtime_selected"]) != "node-b" {
+		t.Fatal("same-size atomic replacement used stale status")
+	}
+	for _, invalid := range []string{`{"route":`, `{} {}`} {
+		if err := writeAtomic(path, []byte(invalid), 0o600, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.selectorStatus(); err == nil {
+			t.Fatal("corrupt status was accepted")
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	missing, err := repository.selectorStatus()
+	if err != nil || len(missing) != 0 {
+		t.Fatal("deleted status reused a stale cache")
 	}
 }
