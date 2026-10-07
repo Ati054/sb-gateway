@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 const (
@@ -354,6 +356,11 @@ func RefreshPack(pack ServicePack, root string, fetch Fetch) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
+	if pack.UpdateMode == "geoip" {
+		if _, err := geoipasset.Publish(root, pack.ID, encoded); err != nil {
+			return nil, err
+		}
+	}
 	if err := writeJSON(filepath.Join(root, pack.ID+".json"), payload); err != nil {
 		return nil, err
 	}
@@ -365,7 +372,7 @@ func RefreshPack(pack ServicePack, root string, fetch Fetch) (map[string]any, er
 }
 
 // CompileGeoIPList keeps country CIDRs as a bounded, portable JSON ruleset.
-// It never introduces a dependency on an external geoip.dat at runtime.
+// The JSON remains the portable source for DNS, RouterOS and binary Xray assets.
 func CompileGeoIPList(source string) (map[string]any, error) {
 	if len(source) > maxSourceBytes {
 		return nil, errors.New("GeoIP source exceeds the size limit")
