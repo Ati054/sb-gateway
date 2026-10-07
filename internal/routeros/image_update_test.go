@@ -76,8 +76,6 @@ func TestScheduleImageUpdateInstallsBoundedWorkerBeforeScheduler(t *testing.T) {
 	for _, fragment := range []string{
 		`:local memoryHigh [/container/get $current memory-high]`,
 		`:local memoryMax [/container/get $current memory-max]`,
-		`:if ($memoryHigh < 234881024) do={ :set memoryHigh 234881024 }`,
-		`:if ($memoryMax < 268435456) do={ :set memoryMax 268435456 }`,
 		"memory-high=$memoryHigh memory-max=$memoryMax",
 		`file="usb1/sb-gateway/data/lifecycle-uploads/sb-gateway-upload-0123456789abcdef.tar"`,
 		`root-dir=$candidateRoot`,
@@ -99,6 +97,9 @@ func TestScheduleImageUpdateInstallsBoundedWorkerBeforeScheduler(t *testing.T) {
 		if !strings.Contains(worker, fragment) {
 			t.Fatalf("worker is missing %q", fragment)
 		}
+	}
+	if strings.Contains(worker, `:set memoryHigh 234881024`) || strings.Contains(worker, `:set memoryMax 268435456`) {
+		t.Fatal("image update must preserve the owner's memory limits without automatic floors")
 	}
 	if strings.Contains(worker, "SB_GATEWAY_IMAGE_") {
 		t.Fatal("worker contains an unquoted RouterOS variable name")

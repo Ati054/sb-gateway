@@ -354,12 +354,12 @@ func TestLifecycleStatusReconcilesCompletedRouterOSImageUpdate(t *testing.T) {
 	if operation["state"] != "completed" || text(operation["completed_at"]) == "" {
 		t.Fatalf("operation was not reconciled: %#v", operation)
 	}
-	if memoryPatch["memory-high"] != float64(lifecycleContainerMemoryHigh) || memoryPatch["memory-max"] != float64(lifecycleContainerMemoryMax) {
-		t.Fatalf("memory limits were not raised after self-update: %#v", memoryPatch)
+	if memoryPatch != nil {
+		t.Fatalf("read-only lifecycle polling changed memory limits and could restart the container: %#v", memoryPatch)
 	}
 }
 
-func TestLifecycleStatusMigratesLegacyDefaultMemoryLimits(t *testing.T) {
+func TestLifecycleStatusPreservesLegacyDefaultMemoryLimits(t *testing.T) {
 	var memoryPatch map[string]any
 	router := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -391,8 +391,8 @@ func TestLifecycleStatusMigratesLegacyDefaultMemoryLimits(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("lifecycle status failed: %d %s", response.Code, response.Body.String())
 	}
-	if memoryPatch["memory-high"] != float64(lifecycleContainerMemoryHigh) || memoryPatch["memory-max"] != float64(lifecycleContainerMemoryMax) {
-		t.Fatalf("legacy defaults were not migrated after self-update: %#v", memoryPatch)
+	if memoryPatch != nil {
+		t.Fatalf("existing memory limits were changed after self-update: %#v", memoryPatch)
 	}
 }
 

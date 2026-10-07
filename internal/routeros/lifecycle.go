@@ -26,6 +26,8 @@ func validFixedManagedScript(name, source string) bool {
 		prefix = "# SB-GATEWAY exact-scope full uninstall\n"
 	case imageUpdateWorker:
 		prefix = "# SB-GATEWAY autonomous one-image switch\n"
+	case containerMemoryWorker:
+		prefix = "# SB-GATEWAY one-shot container memory update\n"
 	default:
 		return false
 	}
