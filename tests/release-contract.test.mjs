@@ -32,7 +32,16 @@ test("public changelog stops at either stable or numbered RC headings", async ()
 test("public source excludes internal CHR verification receipts", async () => {
   const exporter = await readFile(new URL("../scripts/export-public-source.ps1", import.meta.url), "utf8");
   const verifier = await readFile(new URL("../scripts/verify-public-tree.sh", import.meta.url), "utf8");
-  for (const file of ["docs/RC3-CHR-VERIFICATION.md", "docs/RC4-CHR-VERIFICATION.md"]) {
+  for (const file of [
+    "docs/RC3-CHR-VERIFICATION.md", "docs/RC4-CHR-VERIFICATION.md",
+    "docs/LARGE-POOL-VERIFICATION.md", "docs/URLTEST-CLEANUP-VERIFICATION.md",
+    "docs/URLTEST-LATENCY-VERIFICATION.md", "docs/URLTEST-SIMPLIFICATION-VERIFICATION.md",
+    "docs/URLTEST-LOAD-RESEARCH.md", "docs/URLTEST-TRAFFIC-ACCOUNTING.md",
+    "docs/GEOIP-BINARY-EXPERIMENT.md", "docs/XRAY-PAYLOAD-SNAPSHOT.md",
+    "tools/geoipbench/run-chr.sh",
+    "internal/appliance/image_artifact_test.go",
+    "internal/routeros/image_transfer_chr_test.go", "internal/routeros/logging_native_test.go",
+  ]) {
     assert.ok(exporter.includes("'" + file + "'"), file);
     assert.ok(verifier.includes(file), file);
   }

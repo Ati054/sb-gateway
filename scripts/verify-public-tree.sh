@@ -13,13 +13,24 @@ for path in \
   .agents .codex .lab .openai AGENTS.md CODEX_HANDOFF.md \
   IMPLEMENTATION_REPORT.md QUATTRO_SERVERS_AUDIT.md \
   docs/ACCEPTANCE-TESTS.md docs/RC3-CHR-VERIFICATION.md \
-  docs/RC4-CHR-VERIFICATION.md docs/research templates/xray.smoke.json; do
+  docs/RC4-CHR-VERIFICATION.md docs/research templates/xray.smoke.json \
+  docs/LARGE-POOL-VERIFICATION.md docs/URLTEST-CLEANUP-VERIFICATION.md \
+  docs/URLTEST-LATENCY-VERIFICATION.md docs/URLTEST-SIMPLIFICATION-VERIFICATION.md \
+  docs/URLTEST-LOAD-RESEARCH.md docs/URLTEST-TRAFFIC-ACCOUNTING.md \
+  docs/GEOIP-BINARY-EXPERIMENT.md docs/XRAY-PAYLOAD-SNAPSHOT.md \
+  tools/geoipbench/run-chr.sh internal/appliance/image_artifact_test.go \
+  internal/routeros/image_transfer_chr_test.go internal/routeros/logging_native_test.go; do
   if git ls-files --error-unmatch "$path" >/dev/null 2>&1 \
     || git ls-files "$path/**" | grep -q .; then
     printf '%s\n' "forbidden public path: $path" >&2
     exit 1
   fi
 done
+
+if git ls-files docs | grep -E '(-VERIFICATION|-RESEARCH)\.md$' >/dev/null; then
+  printf '%s\n' "internal report entered the public tree" >&2
+  exit 1
+fi
 
 if ! git ls-files | grep -E '(^|/)[^/]+_test\.go$' >/dev/null \
   || ! git ls-files | grep -E '^tests/[^/]+\.test\.mjs$' >/dev/null; then
@@ -88,15 +99,15 @@ if git grep -Il -E -- \
   exit 1
 fi
 
-if git rev-list --objects HEAD \
+if git rev-list --objects --all \
   | cut -d' ' -f2- \
-  | grep -E '(^|/)(\.lab|\.agents|\.codex|\.openai)(/|$)' \
+  | grep -E '(^|/)(\.lab|\.agents|\.codex|\.openai)(/|$)|^docs/(research/|.*(-VERIFICATION|-RESEARCH)\.md$|GEOIP-BINARY-EXPERIMENT\.md$|URLTEST-TRAFFIC-ACCOUNTING\.md$|XRAY-PAYLOAD-SNAPSHOT\.md$)|^internal/(appliance/image_artifact_test|routeros/(image_transfer_chr_test|logging_native_test))\.go$' \
   >/dev/null; then
   printf '%s\n' "private project material exists in public Git history" >&2
   exit 1
 fi
 
-for revision in $(git rev-list HEAD); do
+for revision in $(git rev-list --all); do
   if git grep -Il -E -- \
     '-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}' \
     "$revision" -- | grep -q .; then
