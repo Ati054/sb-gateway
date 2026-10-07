@@ -89,7 +89,13 @@ try {
         '.agents', '.codex', '.lab', '.openai', 'AGENTS.md', 'CODEX_HANDOFF.md',
         'IMPLEMENTATION_REPORT.md', 'QUATTRO_SERVERS_AUDIT.md',
         'docs/ACCEPTANCE-TESTS.md', 'docs/RC3-CHR-VERIFICATION.md',
-        'docs/RC4-CHR-VERIFICATION.md', 'docs/research', 'templates/xray.smoke.json'
+        'docs/RC4-CHR-VERIFICATION.md', 'docs/research', 'templates/xray.smoke.json',
+        'docs/LARGE-POOL-VERIFICATION.md', 'docs/URLTEST-CLEANUP-VERIFICATION.md',
+        'docs/URLTEST-LATENCY-VERIFICATION.md', 'docs/URLTEST-SIMPLIFICATION-VERIFICATION.md',
+        'docs/URLTEST-LOAD-RESEARCH.md', 'docs/URLTEST-TRAFFIC-ACCOUNTING.md',
+        'docs/GEOIP-BINARY-EXPERIMENT.md', 'docs/XRAY-PAYLOAD-SNAPSHOT.md',
+        'tools/geoipbench/run-chr.sh', 'internal/appliance/image_artifact_test.go',
+        'internal/routeros/image_transfer_chr_test.go', 'internal/routeros/logging_native_test.go'
     )
     foreach ($relative in $forbiddenRoots) {
         $target = Join-Path $sourceRoot $relative

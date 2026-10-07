@@ -29,7 +29,16 @@ the race runtime's one-second exit delay. A five-second parent context bounds
 stuck children. The reporter threshold remains 750 ms; race detection and its
 normal exit behavior are not disabled.
 
-
+govulncheck distinguishes reachable symbols from merely required modules.
+A passing source scan is not a security certificate for a release image: also
+inspect the actual built binaries, their embedded Go version and dependencies.
+It does not cover npm, Alpine packages or configuration/exposure vulnerabilities.
+For a binary audit, extract the gateway, ACME worker and Xray executables from
+the exact candidate image without starting it. Record their hashes and embedded
+build metadata, then run `govulncheck -mode=binary` on each executable. Private
+hardware runners and environment-specific receipts are not published.
+References: [Staticcheck](https://staticcheck.dev/docs/getting-started/) and
+[Go vulnerability management](https://go.dev/doc/security/vuln/).
 
 The pinned stripped binaries have no symbol table usable by govulncheck 1.8.0:
 binary findings fall back to module-wide precision. Preserve these findings;
@@ -41,10 +50,13 @@ although the Go vulnerability database currently still flags that version.
 The opt-in `TestXrayAPIRejectsMissingAuthority` sends three HTTP/2 requests
 without both authority/Host headers to an isolated real core. Each must return
 HTTP 400/gRPC 13 and a subsequent ordinary selector command must succeed.
-The CHR regression wrapper accepts this test; it never contacts live selectors.
+This isolated regression never contacts live selectors.
 A source scan or this regression does not certify every dependency or exposure.
 
-
+Review reported dependency paths against the exact pinned Xray source and
+ARM64 import closure, not an unrelated upstream version. A narrow source review
+is not a clean binary scan or a scanner exception. Preserve nonzero audit
+results; a different core requires a new review.
 
 Configuration drafts remain untyped JSON objects so invalid drafts and older
 fields can be retained. Consumers must validate before runtime publication;
@@ -61,8 +73,14 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 ## Public Export Boundary
 
 Public source export retains only the current stable or numbered RC changelog
-section. Internal CHR verification receipts are excluded alongside private lab
-files, and replacement deletes are constrained to their resolved output root.
+section. User conversations, attachments, incident logs, owner test reports,
+private topology and hardware acceptance receipts must never enter public
+history, source archives or release descriptions. Generic regression tests and
+operational documentation remain public. Replacement deletes are constrained
+to their resolved output root. Hardware-specific image/logging fixtures and
+benchmark launchers are excluded alongside the private acceptance reports.
+Inspect archive contents and the complete public
+history as well as the worktree; filename/secret checks alone are insufficient.
 Run `node --test tests/release-contract.test.mjs` and verify the actual exported
 tree with `scripts/verify-public-tree.sh` before publication. Update an existing
 public checkout without importing private local history or rewriting public history.

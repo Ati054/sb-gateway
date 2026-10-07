@@ -1,6 +1,6 @@
 # Typed Health Configuration Boundary
 
-Updated 2026-10-06. These are source changes, not an installed CHR image claim.
+The shared typed boundary covers route-health configuration, not the complete schema.
 
 ## Scope
 
@@ -28,6 +28,13 @@ Port-reservation helpers retain a bounded fallback for malformed drafts;
 complete candidate compilation still rejects the malformed health contract.
 This does not add network probes or a per-packet conversion: projection
 happens during configuration generation.
+
+## Verification
+
+Shared-contract and renderer regressions cover omitted/blank/zero tolerance,
+global cadences and budget, candidate service access, malformed known fields,
+retired fields, unknown-property exclusion and preservation of the draft.
+These code-level contracts do not replace testing on the deployment platform.
 
 ## Remaining Risks
 
