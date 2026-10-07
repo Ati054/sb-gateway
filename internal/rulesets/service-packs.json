@@ -976,11 +976,15 @@
       "api.bybit.eu",
       "api.bybit.id",
       "api.manepa.jp",
+      "api-testnet.manepa.jp",
+      "api.spark-fintech.com",
+      "api-testnet.spark-fintech.com",
       "stream.bybit.tr",
       "stream.bybit.kz",
       "stream.bybit.id",
       "stream.bybitgeorgia.ge",
-      "stream.manepa.jp"
+      "stream.manepa.jp",
+      "stream.spark-fintech.com"
     ],
     "id": "bybit-api",
     "included_pack_ids": [],
@@ -1027,6 +1031,7 @@
       "api.gateio.ws",
       "fx-api.gateio.ws",
       "fx-api-testnet.gateio.ws",
+      "api-testnet.gateapi.io",
       "ws-testnet.gate.com"
     ],
     "id": "gateio-api",
