@@ -1,12 +1,8 @@
 # Changelog
 
-## 1.6.44
+## 1.6.45
 
-Изменения относительно публичной 1.6.35.
-
-- URLTest выбирает узлы по HTTPS-задержке без скоростных скачиваний. Удалены скоростные настройки, накопительные штрафы, пауза возврата 600 секунд и P95.
-- Упрощён мониторинг: интервал доступности, интервал оценки задержки и общий числовой лимит параллельных проверок 1–64, по умолчанию 10. Общие узлы нескольких листов проверяются без дублирования.
-- Плановое переключение URLTest требует настроенного преимущества в миллисекундах и двух свежих подтверждений. Первоначальный выбор не ограничен этим порогом; сохранённый исправный выбор восстанавливается при перезапуске. «Приоритет + резерв» сохраняет порядок пользователя.
-- Аварийный обход обоих режимов сохраняет продвижение по большим спискам и принимает свежий исправный резерв, не ожидая медленных соседей. Сигналы отказа Xray обрабатываются раньше фоновых проверок; фактическое переключение сверяется с ядром.
-- Таблица качества отсортирована по медиане выбранного периода. Все узлы, включая активный, показывают медиану; «Delta, %» сравнивает свежие пригодные HTTPS-пробы. Доля ошибок подписана как ошибки HTTPS, исправлены флаги и размещение полей.
-- Исправлены обработка тайм-аута добавления узла Xray и сохранение выбранного узла при горячем обновлении. Повреждённые записи ACME не вызывают повторный заказ сертификата; ошибки планировщика не теряются. Сервисы собраны на Go 1.27.1.
+- Managed GeoIP uses immutable content-addressed binary Xray assets instead of repeated inline CIDRs. Check, Apply, startup migration and hot refresh share the same asset directory; portable IPv4/IPv6 packs remain available to DNS and RouterOS.
+- A failed hot update rolls back to the last confirmed GeoIP version. Obsolete databases are cleaned after confirmation, retaining active/LKG/Apply/rollback references and short-lived publication leases. Recovery archives include the required country sources and binary files.
+- Both native RouterOS memory limits are editable with explicit restart confirmation and actual readback. Ordinary Apply and image commit do not silently reset limits or mutate a running container's boot policy.
+- Includes startup/readiness, upload-cache, selector-history and exchange-card corrections. Known dependency audit findings and extended memory/recovery verification remain open; see the release notes.

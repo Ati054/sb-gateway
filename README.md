@@ -54,7 +54,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.44-routeros-bundle.zip` from the GitHub release and
+Download `sb-gateway-1.6.45-routeros-bundle.zip` from the GitHub release and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 
@@ -268,7 +268,9 @@ part of that suite. Passing CI therefore verifies the published functional
 regressions as well as compilation, but does not replace validation on the
 target MikroTik and the administrator's external nodes.
 
-
+Selection and failover behavior is documented in
+[Operations](docs/OPERATIONS.md). Known dependency audit findings and verification
+limitations are documented in [Security](docs/SECURITY.md) and the release notes.
 
 ## Documentation
 

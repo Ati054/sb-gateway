@@ -337,6 +337,46 @@ Npm проверяет версии, а не изменённые байты: в
 который проект не импортирует. Это source-аудит, не проверка всех компонентов
 готового контейнера или боевого MikroTik.
 
+Бинарная проверка фактического ARM64 образа `1.6.45-rc.2` от 2026-10-07
+**не прошла**. `sb-gateway` и `sb-acme` получили предупреждение
+`GO-2026-5932` (OpenPGP); проверенный Linux import graph обоих production
+targets не содержит OpenPGP, а source-проверка не нашла уязвимых вызовов или
+импортируемых пакетов. Расхождение с бинарными wildcard-symbol findings
+не считается чистым бинарным аудитом.
+В отдельно собранном Xray сканер отметил `GO-2026-6443` (gRPC),
+`GO-2026-5841` (compress/s2) и тот же OpenPGP. Узкий ARM64 тест трёх HTTP/2
+запросов без authority/Host вернул HTTP 400/gRPC 13 без падения, после каждого
+обычный API работал. Это не закрывает применимость gRPC advisory к остальным
+путям и не проверяет compress. Xray в RC.2 не обновлён. Allowlist и подавления
+findings нет; безопасный публичный релиз нельзя обосновывать только source-аудитом.
+
+The exact final `1.6.45` ARM64 image was scanned again on 2026-10-07, source
+revision `0748f22`, archive SHA256
+`6d3286b4a3c8b0aa7a8b9053b45b8432b368779cc8641be04186b86b5ad14e8a`.
+The binary audit still fails: OpenPGP wildcard-symbol findings in `sb-gateway`
+and `sb-acme`, and the same OpenPGP/gRPC/compress findings in the unchanged
+Xray 26.9.30. The complete source-package audit found no affected calls or
+imported-package findings, but this does not clear the binary findings.
+Build-tool npm audit also retains eight high findings despite the maintained
+local parser guards. Node/npm are not shipped in the MikroTik runtime image.
+No allowlist, suppression or clean-public-release claim is authorized by the
+CHR functional tests or the final version number.
+
+Офлайн восстановление не требует работающей панели или передачи ей tar.
+Генератор принимает доверенный SHA-256, проверяет весь архив и создаёт скрипт
+для точной identity/root/veth. На роутере проверяется размер файла, не SHA-256;
+используйте аутентифицированный Winbox/SFTP и доверенные release metadata.
+Генератор не создаёт и не требует отдельного backup: существующие persistent
+каталоги не удаляются и используются на месте. Перезапись существующего
+recovery script и запуск сломанного
+предшественника запрещены; active transaction/неоднозначная ownership
+останавливают импорт до мутаций. См. аварийную процедуру в `OPERATIONS.md`.
+Инертный JSON-журнал переноса содержит только roots, имена mounts/veth и фазу,
+не env values или содержимое конфигурации. Проверяются ownership, точные roots,
+reference, типы, mounts и адрес veth; неоднозначность не превращается в удаление
+чужих объектов. Перед остановкой неудачного кандидата diversion выключается
+даже если его последний traffic-ready был успешен.
+
 ### Встроенные копии image-size
 
 Нулевой npm-аудит не покрывает код, встроенный внутрь чужих пакетов.
