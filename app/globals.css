@@ -5098,6 +5098,28 @@ td small {
   column-gap: 14px;
 }
 
+.memory-limits-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.memory-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.memory-confirmation input {
+  flex: 0 0 16px;
+  margin-top: 3px;
+}
+
+@media (max-width: 640px) {
+  .memory-limits-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 .settings-card {
   display: inline-block;
   width: 100%;

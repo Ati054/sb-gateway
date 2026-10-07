@@ -363,6 +363,17 @@ export interface UploadProgress {
   percent: number;
 }
 
+export function getContainerMemoryStatus<T = JsonObject>(): Promise<T> {
+  return apiRequest<T>("/routeros/container/memory");
+}
+
+export function updateContainerMemory<T = JsonObject>(value: JsonObject): Promise<T> {
+  return apiRequest<T>("/routeros/container/memory", {
+    method: "POST",
+    body: JSON.stringify(value),
+  });
+}
+
 export function preflightContainerImageUpload<T = JsonObject>(file: File): Promise<T> {
   return apiRequest<T>("/lifecycle/image-upload/preflight", {
     method: "POST",

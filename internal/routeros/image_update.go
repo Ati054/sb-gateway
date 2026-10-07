@@ -13,6 +13,7 @@ import (
 const (
 	imageUpdateWorker    = "SB-GATEWAY-image-update-worker"
 	imageUpdateScheduler = "SB-GATEWAY-image-update"
+	imageUpdateTransfer  = "SB-GATEWAY-image-update-transfer"
 )
 
 var (
@@ -29,12 +30,13 @@ type ImageUpdateSpec struct {
 	CandidateReference string
 	ContainerAddress   string
 	KeepPrevious       bool
+	// Offline recovery must not restart an already broken predecessor.
+	StoppedPredecessor bool
 }
 
-// SetContainerMemoryLimits raises the runtime limits of one already-owned
-// container after a successful self-update. RouterOS accepts these properties
-// on a running container without restarting it; callers must resolve and
-// validate ownership before passing the resource ID.
+// SetContainerMemoryLimits changes the limits of one already-owned container.
+// RouterOS 7.24.2 restarts a running container on this change. Callers must
+// validate ownership and must not use this from read-only status reconciliation.
 func (client *Client) SetContainerMemoryLimits(ctx context.Context, id string, memoryHigh, memoryMax int64) error {
 	if !regexp.MustCompile(`^\*[0-9A-Fa-f]+$`).MatchString(id) {
 		return errors.New("RouterOS container identifier is invalid")
@@ -129,6 +131,18 @@ func validateImageUpdateSpec(spec ImageUpdateSpec) (ImageUpdateSpec, error) {
 }
 
 func renderImageUpdateWorker(spec ImageUpdateSpec) string {
+	quote := func(value string) string {
+		return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "\n", `\n`).Replace(value) + `"`
+	}
+	// Re-arm cleanup, never initial extraction, if the job dies between deleting
+	// terminal metadata and deleting its scheduler.
+	terminalEvent := `:local t [/system/script/find where name="` + imageUpdateTransfer + `"]; :if ([:len $t] > 1) do={ :error "SB-GATEWAY terminal transfer is ambiguous" }; :if ([:len $t] = 1) do={ :if ([/system/script/get $t comment] != "SB-GATEWAY image transfer metadata") do={ :error "SB-GATEWAY terminal transfer is not owned" }; :local r [:deserialize from=json value=[/system/script/get $t source]]; :if ((($r->"phase") != "restored") || (($r->"candidate-root") != "/` + spec.CandidateRoot + `") || (($r->"reference") != "` + spec.CandidateReference + `")) do={ :error "SB-GATEWAY terminal transfer does not match" }; /system/script/remove $t }; /system/scheduler/remove [find where name="` + imageUpdateScheduler + `" and comment="SB-GATEWAY autonomous image update"]`
+	startPrevious := func(id string) string {
+		if spec.StoppedPredecessor {
+			return `/container/set ` + id + ` start-on-boot=no; :do { /container/set ` + id + ` restart-policy=no } on-error={ /container/set ` + id + ` auto-restart-interval=0s }`
+		}
+		return `:local previousBoot true; :if ([:len $transfer] = 1) do={ :set previousBoot ($receipt->"previous-start-on-boot") }; /container/set ` + id + ` start-on-boot=$previousBoot; /container/start ` + id
+	}
 	retainPrevious := "false"
 	if spec.KeepPrevious {
 		retainPrevious = "true"
@@ -161,6 +175,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`:local current [/container/find where comment="SB-GATEWAY container"]`,
 		`:local candidate [/container/find where comment="SB-GATEWAY container candidate"]`,
 		`:local rollback [/container/find where comment="SB-GATEWAY container rollback"]`,
+		`:local failed [/container/find where comment="SB-GATEWAY container failed"]`,
 		`:local previous [/container/find where comment="SB-GATEWAY container previous"]`,
 		`:local previousIf [/interface/veth/find where name="veth-sb-previous"]`,
 		`:local retainPrevious ` + retainPrevious,
@@ -168,17 +183,89 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`:local hold [/interface/veth/find where comment="SB-GATEWAY image update hold"]`,
 		`:local swap [/interface/veth/find where comment="SB-GATEWAY image update swap"]`,
 		`:local candidateRoot "/` + spec.CandidateRoot + `"`,
+		`:local transfer [/system/script/find where name="` + imageUpdateTransfer + `"]`,
+		`:local receipt`,
+		`:local phase ""`,
 		`:local healthURL "http://` + spec.ContainerAddress + `:9080/healthz"`,
 		`:local trafficURL "http://` + spec.ContainerAddress + `:9080/traffic-ready"`,
 		`:global sbGatewayImageProbation`,
 		`:global sbGatewayImageMisses`,
 		`:if (([:len $current] > 1) || ([:len $candidate] > 1) || ([:len $rollback] > 1) || ([:len $scheduler] > 1) || ([:len $hold] > 1) || ([:len $swap] > 1)) do={ :error "SB-GATEWAY image update state is ambiguous" }`,
+		`:if (([:len $failed] > 1) || ([:len $transfer] > 1)) do={ :error "SB-GATEWAY image transfer state is ambiguous" }`,
+		`:if ([:len $hold] = 1) do={ :if ([/interface/veth/get $hold name] != "veth-sb-update") do={ :error "SB-GATEWAY hold interface does not match" } }`,
+		`:if ([:len $swap] = 1) do={ :if ([/interface/veth/get $swap name] != "veth-sb-swap") do={ :error "SB-GATEWAY swap interface does not match" } }`,
+		// The inert JSON receipt survives interrupted detach/attach and role swaps.
+		// An interrupted forward transfer restores the predecessor rather than
+		// guessing whether the candidate was started before the job disappeared.
+		`:if ([:len $transfer] = 1) do={`,
+		`  :if ([/system/script/get $transfer comment] != "SB-GATEWAY image transfer metadata") do={ :error "SB-GATEWAY image transfer metadata is not owned" }`,
+		`  :set receipt [:deserialize from=json value=[/system/script/get $transfer source]]`,
+		`  :set phase ($receipt->"phase")`,
+		`  :if (([:typeof $receipt] != "array") || (($receipt->"candidate-root") != $candidateRoot) || (($receipt->"reference") != "` + spec.CandidateReference + `") || (($phase != "transfer") && ($phase != "probation") && ($phase != "commit") && ($phase != "rollback") && ($phase != "restored"))) do={ :error "SB-GATEWAY image transfer metadata does not match" }`,
+		`  :local oldRoot ($receipt->"previous-root")`,
+		`  :if (([:typeof $oldRoot] != "str") || ($oldRoot = $candidateRoot) || (([:pick $oldRoot 0 ` + fmt.Sprint(len("/"+spec.StorageRoot+"/root-")) + `] != "/` + spec.StorageRoot + `/root-") && ($oldRoot != "/` + spec.StorageRoot + `/root"))) do={ :error "SB-GATEWAY image transfer previous root is invalid" }`,
+		`  :if ([:typeof [:find $oldRoot "/" ` + fmt.Sprint(len("/"+spec.StorageRoot+"/root-")) + `]] = "num") do={ :error "SB-GATEWAY image transfer previous root is nested" }`,
+		`  :local savedMountlists ($receipt->"mountlists")`,
+		`  :local savedIf ($receipt->"live-if")`,
+		`  :if ([:typeof $savedIf] = "array") do={ :if ([:len $savedIf] != 1) do={ :error "SB-GATEWAY image transfer live interface is ambiguous" }; :foreach value in=$savedIf do={ :set savedIf $value } }`,
+		`  :if (([:typeof $savedMountlists] != "array") || ([:len $savedMountlists] = 0) || ([:typeof $savedIf] != "str") || ([:typeof ($receipt->"previous-start-on-boot")] != "bool")) do={ :error "SB-GATEWAY image transfer persistent settings are invalid" }`,
+		`  :foreach list in=$savedMountlists do={ :if (([:typeof $list] != "str") || ([:len $list] = 0) || ([:len [/container/mounts/find where list=$list]] = 0)) do={ :error "SB-GATEWAY image transfer mountlist is missing" } }`,
+		`  :local savedVeth [/interface/veth/find where name=$savedIf]`,
+		`  :if ([:len $savedVeth] != 1) do={ :error "SB-GATEWAY image transfer live interface is missing" }`,
+		`  :if ([:pick [:tostr [/interface/veth/get $savedVeth address]] 0 ` + fmt.Sprint(len(spec.ContainerAddress)+1) + `] != "` + spec.ContainerAddress + `/") do={ :error "SB-GATEWAY image transfer live address does not match" }`,
+		`  :local old [/container/find where root-dir=$oldRoot]`,
+		`  :local next [/container/find where root-dir=$candidateRoot]`,
+		`  :if (([:len $old] > 1) || ([:len $next] > 1) || (([:len $old] = 0) && ($phase != "commit")) || (([:len $next] = 0) && ($phase != "rollback") && ($phase != "restored"))) do={ :error "SB-GATEWAY image transfer roots are ambiguous" }`,
+		`  :foreach item in=$old do={ :local role [/container/get $item comment]; :if (($role != "SB-GATEWAY container") && ($role != "SB-GATEWAY container rollback") && ($role != "SB-GATEWAY container previous")) do={ :error "SB-GATEWAY image transfer predecessor is not owned" } }`,
+		`  :foreach item in=$next do={ :local role [/container/get $item comment]; :if (($role != "SB-GATEWAY container") && ($role != "SB-GATEWAY container candidate") && ($role != "SB-GATEWAY container failed")) do={ :error "SB-GATEWAY image transfer candidate is not owned" } }`,
+		`  :foreach item in=[/container/find] do={ :if (($item != $old) && ($item != $next)) do={ :if ([/container/get $item interface] = $savedIf) do={ :error "SB-GATEWAY image transfer live interface is shared" }; :local role [/container/get $item comment]; :if (($role = "SB-GATEWAY container") || ($role = "SB-GATEWAY container candidate") || ($role = "SB-GATEWAY container rollback") || ($role = "SB-GATEWAY container failed")) do={ :error "SB-GATEWAY image transfer role belongs to another root" } } }`,
+		`  :if (($phase = "transfer") || ($phase = "rollback") || ($phase = "restored")) do={`,
+		`    :if ($phase = "restored") do={ :if (([:len $next] != 0) || ([/container/get $old comment] != "SB-GATEWAY container") || ([/container/get $old interface] != $savedIf) || ([:serialize to=json value=[/container/get $old mountlists]] != [:serialize to=json value=$savedMountlists])) do={ :error "SB-GATEWAY terminal restored state does not match" } }`,
+		`    :if ($phase != "restored") do={`,
+		`    :set ($receipt->"phase") "rollback"`,
+		`    /system/script/set $transfer source=[:serialize to=json value=$receipt]`,
+		`    :local recoveryGate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]`,
+		`    :if ([:len $recoveryGate] > 1) do={ :error "SB-GATEWAY recovery diversion gate is ambiguous" }`,
+		`    :if ([:len $recoveryGate] = 1) do={ /ip/firewall/mangle/disable $recoveryGate }`,
+		`    :foreach item in=$next do={ :do { /container/set $item restart-policy=no } on-error={ /container/set $item auto-restart-interval=0s }; /container/set $item start-on-boot=no }`,
+		`    :foreach item in=$old do={ :do { /container/stop $item } on-error={} }`,
+		`    :foreach item in=$next do={ :do { /container/stop $item } on-error={} }`,
+		`    :local stopTry 0`,
+		`    :local stopped false`,
+		`    :while (($stopped = false) && ($stopTry < 60)) do={`,
+		`      :set stopped true`,
+		`      :foreach item in=$old do={ :if ([/container/get $item stopped] != true) do={ :set stopped false } }`,
+		`      :foreach item in=$next do={ :if ([/container/get $item stopped] != true) do={ :set stopped false } }`,
+		`      :if ($stopped = false) do={ :set stopTry ($stopTry + 1); :delay 2s }`,
+		`    }`,
+		`    :if ($stopped = false) do={ :error "SB-GATEWAY image transfer containers did not stop" }`,
+		`    :foreach item in=$next do={ /container/set $item mountlists=""; /container/remove $item }`,
+		`    :set rollback $old`,
+		`    /container/set $rollback mountlists=$savedMountlists`,
+		`    /container/set $rollback interface=$savedIf comment="SB-GATEWAY container"`,
+		`    ` + startPrevious("$rollback"),
+		`    }`,
+		`    :if ([:len $swap] = 1) do={ /interface/veth/remove $swap }`,
+		`    :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
+		`    :set ($receipt->"phase") "restored"`,
+		`    /system/script/set $transfer source=[:serialize to=json value=$receipt]`,
+		`    :if ([:len $scheduler] = 1) do={ /system/scheduler/set $scheduler on-event=` + quote(terminalEvent) + ` }`,
+		`    /system/script/remove $transfer`,
+		`    :if ([:len $scheduler] = 1) do={ /system/scheduler/remove $scheduler }`,
+		`    :set sbGatewayImageProbation`,
+		`    :set sbGatewayImageMisses`,
+		`    :log warning "SB-GATEWAY: image transfer restored predecessor; persistent mounts restored"`,
+		`    :return true`,
+		`  }`,
+		`}`,
+		`:if ([:len $failed] > 0) do={ :error "SB-GATEWAY failed image has no recoverable transfer metadata" }`,
 
 		// Completed cleanup: the candidate already owns the canonical role.
 		`:if (([:len $current] = 1) && ([:len $candidate] = 0) && ([:len $rollback] = 0)) do={`,
 		`  :if ([/container/get $current root-dir] = $candidateRoot) do={`,
 		`    :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
 		`    :if ([:len $swap] = 1) do={ /interface/veth/remove $swap }`,
+		`    :if ([:len $transfer] = 1) do={ /system/script/remove $transfer }`,
 		`    :if ([:len $scheduler] = 1) do={ /system/scheduler/remove $scheduler }`,
 		`    :return true`,
 		`  }`,
@@ -203,7 +290,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  /container/remove $candidate`,
 		`  :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
 		`  :if ([:len $swap] = 1) do={ /interface/veth/remove $swap }`,
-		`  :do { :if ([/container/get $current stopped] = true) do={ /container/start $current } } on-error={}`,
+		`  :do { :if ([/container/get $current stopped] = true) do={ ` + startPrevious("$current") + ` } } on-error={}`,
 		`  :if ([:len $scheduler] = 1) do={ /system/scheduler/remove $scheduler }`,
 		`  :log warning "SB-GATEWAY: interrupted image extraction was cleaned up"`,
 		`  :return true`,
@@ -225,6 +312,8 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :if ([:typeof $sbGatewayImageMisses] = "nil") do={ :set sbGatewayImageMisses 0 }`,
 		`  :if (($healthy = true) && ($restartCount = 0)) do={ :set sbGatewayImageProbation ($sbGatewayImageProbation + 1); :set sbGatewayImageMisses 0 } else={ :set sbGatewayImageProbation 0; :set sbGatewayImageMisses ($sbGatewayImageMisses + 1) }`,
 		`  :if ($sbGatewayImageProbation >= 3) do={`,
+		`    :if ([:len $transfer] = 1) do={ :set ($receipt->"phase") "commit"; /system/script/set $transfer source=[:serialize to=json value=$receipt] }`,
+		`    :if ([/container/get $current start-on-boot] != true) do={ :error "SB-GATEWAY candidate boot policy changed during probation" }`,
 		previousGuard,
 		`    :if ([:len $previous] = 1) do={ /container/remove $previous }`,
 		`    :if ($retainPrevious = true) do={`,
@@ -237,6 +326,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`    }`,
 		`    :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
 		`    :if ([:len $swap] = 1) do={ /interface/veth/remove $swap }`,
+		`    :if ([:len $transfer] = 1) do={ /system/script/remove $transfer }`,
 		`    :if ([:len $scheduler] = 1) do={ /system/scheduler/remove $scheduler }`,
 		`    :set sbGatewayImageProbation`,
 		`    :set sbGatewayImageMisses`,
@@ -244,8 +334,16 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`    :return true`,
 		`  }`,
 		`  :if (($sbGatewayImageMisses < 60) && ($restartCount = 0)) do={ :return true }`,
+		`  :if ([:len $probationGate] = 1) do={ /ip/firewall/mangle/disable $probationGate }`,
+		`  :if ([:len $transfer] = 1) do={`,
+		`    :set ($receipt->"phase") "rollback"`,
+		`    /system/script/set $transfer source=[:serialize to=json value=$receipt]`,
+		`    :return true`,
+		`  }`,
 		`  :local failed $current`,
 		`  :local failedMountlists [/container/get $failed mountlists]`,
+		`  :if ([:len $failedMountlists] = 0) do={ :set failedMountlists [/container/get $rollback mountlists] }`,
+		`  :if ([:len $failedMountlists] = 0) do={ :error "SB-GATEWAY rollback mountlists are missing" }`,
 		`  :do { /container/stop $failed } on-error={}`,
 		`  :local failedStopped false`,
 		`  :local failedStopTry 0`,
@@ -264,7 +362,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  /container/set $failed interface="veth-sb-update" comment="SB-GATEWAY container failed"`,
 		`  /container/set $rollback interface=$liveIf comment="SB-GATEWAY container"`,
 		`  /interface/veth/remove $swap`,
-		`  /container/start $rollback`,
+		`  ` + startPrevious("$rollback"),
 		`  /container/remove $failed`,
 		`  :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
 		`  :if ([:len $scheduler] = 1) do={ /system/scheduler/remove $scheduler }`,
@@ -278,16 +376,14 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		previousGuard,
 		`:if ([:len $previous] = 1) do={ /container/set $previous mountlists="" }`,
 		`:if ([:len $hold] = 0) do={ /interface/veth/add name="veth-sb-update" address=192.0.2.1/30 gateway=192.0.2.2 comment="SB-GATEWAY image update hold"; :set hold [/interface/veth/find where comment="SB-GATEWAY image update hold"] }`,
-		`:local liveIf [/container/get $current interface]`,
+		`:local liveIf [:tostr [/container/get $current interface]]`,
 		`:local mountlists [/container/get $current mountlists]`,
 		`:local envlist [/container/get $current envlist]`,
 		`:local dns [/container/get $current dns]`,
 		`:local logging [/container/get $current logging]`,
 		`:local memoryHigh [/container/get $current memory-high]`,
 		`:local memoryMax [/container/get $current memory-max]`,
-		`:if ($memoryHigh < 234881024) do={ :set memoryHigh 234881024 }`,
-		`:if ($memoryMax < 268435456) do={ :set memoryMax 268435456 }`,
-		`/container/add ` + addImage + ` root-dir=$candidateRoot interface="veth-sb-update" envlist=$envlist dns=$dns logging=$logging start-on-boot=yes memory-high=$memoryHigh memory-max=$memoryMax comment="SB-GATEWAY container candidate"`,
+		`/container/add ` + addImage + ` root-dir=$candidateRoot interface="veth-sb-update" envlist=$envlist dns=$dns logging=$logging start-on-boot=no memory-high=$memoryHigh memory-max=$memoryMax comment="SB-GATEWAY container candidate"`,
 		`:set candidate [/container/find where comment="SB-GATEWAY container candidate"]`,
 		`:if ([:len $candidate] != 1) do={ :error "SB-GATEWAY candidate was not created" }`,
 		`:local extracted false`,
@@ -298,11 +394,18 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :if ($extracted = false) do={ :set extractTry ($extractTry + 1); :delay 2s }`,
 		`}`,
 		`:if ($extracted = false) do={ :error "SB-GATEWAY candidate extraction timed out" }`,
+		`:if (([:typeof $mountlists] != "array") || ([:len $mountlists] = 0)) do={ :error "SB-GATEWAY persistent mountlists are missing" }`,
+		`:set receipt {"candidate-root"=$candidateRoot;"previous-root"=[/container/get $current root-dir];"reference"="` + spec.CandidateReference + `";"mountlists"=$mountlists;"live-if"=$liveIf;"previous-start-on-boot"=[/container/get $current start-on-boot];"phase"="transfer"}`,
+		`/system/script/add name="` + imageUpdateTransfer + `" policy=read comment="SB-GATEWAY image transfer metadata" source=[:serialize to=json value=$receipt]`,
+		`:set transfer [/system/script/find where name="` + imageUpdateTransfer + `"]`,
+		`:if ([:len $transfer] != 1) do={ :error "SB-GATEWAY image transfer metadata was not created" }`,
+		`:local readback [:deserialize from=json value=[/system/script/get $transfer source]]`,
+		`:if ([:serialize to=json value=$readback] != [:serialize to=json value=$receipt]) do={ :error "SB-GATEWAY image transfer metadata readback failed" }`,
 		`:do { /container/set $candidate restart-policy=always restart-interval=10s } on-error={ /container/set $candidate auto-restart-interval=10s }`,
 		`:local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]`,
 		`:if ([:len $gate] = 1) do={ /ip/firewall/mangle/disable $gate }`,
 		`/ip/firewall/connection/remove [find where connection-mark="sb-managed"]`,
-		`/container/stop $current`,
+		`:if ([/container/get $current stopped] != true) do={ /container/stop $current }`,
 		`:local currentStopped false`,
 		`:local currentStopTry 0`,
 		`:while (($currentStopped = false) && ($currentStopTry < 60)) do={`,
@@ -312,13 +415,14 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :if ($currentStopped = false) do={ :set currentStopTry ($currentStopTry + 1); :delay 2s }`,
 		`}`,
 		`:if ($currentStopped = false) do={ :error "SB-GATEWAY current container did not stop; diversion remains fail-open" }`,
+		`/container/set $current start-on-boot=no`,
 		`:do {`,
 		`  /container/set $current mountlists=""`,
 		`  /container/set $candidate mountlists=$mountlists`,
 		`} on-error={`,
 		`  :do { /container/set $candidate mountlists="" } on-error={}`,
 		`  :do { /container/set $current mountlists=$mountlists } on-error={}`,
-		`  :do { /container/start $current } on-error={}`,
+		`  :do { ` + startPrevious("$current") + ` } on-error={}`,
 		`  :error "SB-GATEWAY persistent mount ownership transfer failed; diversion remains fail-open"`,
 		`}`,
 		`:if ([:len $swap] = 0) do={ /interface/veth/add name="veth-sb-swap" address=192.0.2.5/30 gateway=192.0.2.6 comment="SB-GATEWAY image update swap"; :set swap [/interface/veth/find where comment="SB-GATEWAY image update swap"] }`,
@@ -326,7 +430,12 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`/container/set $current interface="veth-sb-update" comment="SB-GATEWAY container rollback"`,
 		`/container/set $candidate interface=$liveIf comment="SB-GATEWAY container"`,
 		`/interface/veth/remove $swap`,
+		// RouterOS 7.24.2 restarts a running container when start-on-boot changes.
+		// Set it while stopped, after the canonical mounts/interface transfer.
+		`/container/set $candidate start-on-boot=yes`,
 		`/container/start $candidate`,
+		`:set ($receipt->"phase") "probation"`,
+		`/system/script/set $transfer source=[:serialize to=json value=$receipt]`,
 		`:set sbGatewayImageProbation 0`,
 		`:set sbGatewayImageMisses 0`,
 		cleanupArchive,
