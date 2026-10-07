@@ -175,6 +175,31 @@ func TestRecoveryArchiveSkipsOnlyRecognizedAtomicTemporaryFiles(t *testing.T) {
 	}
 }
 
+func TestRecoveryArchiveIncludesGeoIPSourcesAndBinaryAssets(t *testing.T) {
+	root := t.TempDir()
+	rules := filepath.Join(root, "config", "rulesets")
+	if err := os.MkdirAll(rules, 0700); err != nil {
+		t.Fatal(err)
+	}
+	name := "sb-geoip-ru-" + strings.Repeat("a", 64) + ".dat"
+	for _, name := range []string{name, "geoip-ru.json", "youtube.json", "user.dat", ".geoip-temp"} {
+		if err := os.WriteFile(filepath.Join(rules, name), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := collectRecoveryFiles(filepath.Join(root, "config"), filepath.Join(root, "state"), filepath.Join(root, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]bool)
+	for _, file := range files {
+		paths[file.archivePath] = true
+	}
+	if len(paths) != 2 || !paths["config/rulesets/"+name] || !paths["config/rulesets/geoip-ru.json"] {
+		t.Fatalf("GeoIP recovery dependencies=%v", paths)
+	}
+}
+
 func TestRecoveryArchiveSkipsReconstructedRuntimeState(t *testing.T) {
 	root := t.TempDir()
 	stateRoot := filepath.Join(root, "state")

@@ -710,7 +710,7 @@ func (runtime *nativeRuntime) validateCandidate(ctx context.Context, candidate r
 		var err error
 		switch name {
 		case "xray.json":
-			err = runValidationCommand(ctx, runtime.options.XrayBinary, "run", "-test", "-config", candidate.Files[name])
+			err = runValidationCommandWithEnv(ctx, []string{"XRAY_LOCATION_ASSET=" + runtime.options.RuleSetDir}, runtime.options.XrayBinary, "run", "-test", "-config", candidate.Files[name])
 		case "nginx.conf":
 			err = runValidationCommand(ctx, runtime.options.NginxBinary, "-t", "-c", candidate.Files[name], "-p", "/")
 		case "policy-dns.json":
@@ -731,7 +731,12 @@ func (runtime *nativeRuntime) validateCandidate(ctx context.Context, candidate r
 }
 
 func runValidationCommand(ctx context.Context, executable string, arguments ...string) error {
+	return runValidationCommandWithEnv(ctx, nil, executable, arguments...)
+}
+
+func runValidationCommandWithEnv(ctx context.Context, environment []string, executable string, arguments ...string) error {
 	command := exec.CommandContext(ctx, executable, arguments...)
+	command.Env = append(os.Environ(), environment...)
 	output := &limitedWriter{remaining: 64 << 10}
 	command.Stdout = output
 	command.Stderr = output

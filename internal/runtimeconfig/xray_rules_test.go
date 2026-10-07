@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 func TestConvertXrayRulesPreservesPolicyAndTerminalBlock(t *testing.T) {
@@ -95,7 +97,11 @@ func TestConvertXrayRulesTagsGeoIPForLiveRefresh(t *testing.T) {
 	if len(rules) != 2 || rules[0]["ruleTag"] != "sb-geoip-geoip-cn-0-0" {
 		t.Fatalf("GeoIP rule has no stable live-refresh tag: %#v", rules)
 	}
-	if !reflect.DeepEqual(rules[0]["ip"], []string{"203.0.113.0/24", "2001:db8::/32"}) ||
+	reference, err := geoipasset.Ensure(root, "geoip-cn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rules[0]["ip"], []string{reference}) ||
 		!reflect.DeepEqual(rules[0]["source"], []string{"192.0.2.1/32"}) {
 		t.Fatalf("GeoIP rule conditions changed: %#v", rules[0])
 	}

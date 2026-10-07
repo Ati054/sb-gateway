@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 	"github.com/sb-gateway/sb-gateway/internal/rulesets"
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
@@ -82,7 +83,7 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 		return false, err
 	}
 	if !legacy {
-		legacy, err = legacyGeoIPRouting(opts.StateDir, opts.Runtime.XrayConfig)
+		legacy, err = legacyGeoIPRouting(opts.StateDir, opts.Runtime.XrayConfig, opts.Runtime.RuleSetDir)
 		if err != nil {
 			return false, err
 		}
@@ -194,7 +195,7 @@ func runtimeMigrationInputsPresent(paths ...string) (bool, error) {
 	return true, nil
 }
 
-func legacyGeoIPRouting(stateDir, xrayPath string) (bool, error) {
+func legacyGeoIPRouting(stateDir, xrayPath, rulesetDir string) (bool, error) {
 	catalog, err := rulesets.Catalog()
 	if err != nil {
 		return false, err
@@ -222,19 +223,27 @@ func legacyGeoIPRouting(stateDir, xrayPath string) (bool, error) {
 	var xray struct {
 		Routing struct {
 			Rules []struct {
-				RuleTag string `json:"ruleTag"`
+				RuleTag string   `json:"ruleTag"`
+				IP      []string `json:"ip"`
 			} `json:"rules"`
 		} `json:"routing"`
 	}
 	if err := json.Unmarshal(body, &xray); err != nil {
 		return false, err
 	}
+	found := false
 	for _, rule := range xray.Routing.Rules {
 		if strings.HasPrefix(rule.RuleTag, "sb-geoip-") {
-			return false, nil
+			found = true
+			if len(rule.IP) != 1 {
+				return true, nil
+			}
+			if err := geoipasset.Verify(rulesetDir, rule.IP[0]); err != nil {
+				return true, nil
+			}
 		}
 	}
-	return true, nil
+	return !found, nil
 }
 
 func hasStartupProbePolicies(config map[string]any) bool {
