@@ -1,25 +1,32 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type healthStageRecord struct {
-	StartedAt  string `json:"started_at"`
-	FinishedAt string `json:"finished_at"`
-	Stage      string `json:"stage"`
-	Lane       string `json:"lane"`
-	Policy     string `json:"policy,omitempty"`
-	Node       string `json:"node,omitempty"`
-	Target     string `json:"target,omitempty"`
-	Operation  string `json:"operation,omitempty"`
-	ElapsedMS  int64  `json:"elapsed_ms"`
-	QueueMS    int64  `json:"queue_ms,omitempty"`
-	ExecMS     int64  `json:"exec_ms,omitempty"`
-	OK         bool   `json:"ok"`
+	StartedAt       string `json:"started_at"`
+	FinishedAt      string `json:"finished_at"`
+	Stage           string `json:"stage"`
+	Lane            string `json:"lane"`
+	Policy          string `json:"policy,omitempty"`
+	Node            string `json:"node,omitempty"`
+	Target          string `json:"target,omitempty"`
+	Operation       string `json:"operation,omitempty"`
+	ElapsedMS       int64  `json:"elapsed_ms"`
+	QueueMS         int64  `json:"queue_ms,omitempty"`
+	ExecMS          int64  `json:"exec_ms,omitempty"`
+	OK              bool   `json:"ok"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	ParentCancelled bool   `json:"parent_cancelled,omitempty"`
 }
 
 type healthStageTrace struct {
@@ -95,6 +102,30 @@ func (trace *healthStageTrace) finish(ok bool) {
 	if body, err := json.Marshal(trace.result(time.Now(), ok)); err == nil {
 		log.Printf("agent: health-stage %s", body)
 	}
+}
+
+func (trace *healthStageTrace) finishError(err error, parentCancelled bool) {
+	if trace == nil {
+		return
+	}
+	trace.record.ParentCancelled = parentCancelled
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled):
+			trace.record.ErrorCode = "Canceled"
+		case errors.Is(err, context.DeadlineExceeded):
+			trace.record.ErrorCode = "DeadlineExceeded"
+		default:
+			code := status.Code(err)
+			_, rpcError := status.FromError(err)
+			if rpcError && code >= codes.Canceled && code <= codes.Unauthenticated {
+				trace.record.ErrorCode = code.String()
+			} else {
+				trace.record.ErrorCode = "local_error"
+			}
+		}
+	}
+	trace.finish(err == nil)
 }
 
 func (runtime *xraySelectorRuntime) stageLane() string {

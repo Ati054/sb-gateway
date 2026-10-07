@@ -224,7 +224,9 @@ func appendEntityDNSRules(
 	}
 	for _, service := range directServiceIDs {
 		rule := identity
-		rule.RuleSet = []string{"service-" + service}
+		for _, dependency := range serviceRuleSetIDs(service, catalog.byID) {
+			rule.RuleSet = append(rule.RuleSet, "service-"+dependency)
+		}
 		rule.Action, rule.Server = "route", "direct-public-dns"
 		source.Rules = append(source.Rules, rule)
 	}
@@ -268,7 +270,9 @@ func appendEntityDNSRules(
 			continue
 		}
 		rule := identity
-		rule.RuleSet = []string{"service-" + service}
+		for _, dependency := range serviceRuleSetIDs(service, catalog.byID) {
+			rule.RuleSet = append(rule.RuleSet, "service-"+dependency)
+		}
 		outbound := serviceRoutes[name]
 		if selectableNonDirect(outbound, available) {
 			server, serverErr := policyServer(outbound)

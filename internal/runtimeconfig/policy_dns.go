@@ -144,18 +144,44 @@ type policyDNSRuleSetDocument struct {
 }
 
 type policyDNSRuleSetRule struct {
-	Domain       []string          `json:"domain"`
-	DomainSuffix []string          `json:"domain_suffix"`
-	IPCIDR       []string          `json:"ip_cidr"`
-	Port         []json.RawMessage `json:"port"`
-	PortRange    []json.RawMessage `json:"port_range"`
-	Protocol     json.RawMessage   `json:"protocol"`
-	Network      json.RawMessage   `json:"network"`
+	Domain       []string            `json:"domain"`
+	DomainSuffix []string            `json:"domain_suffix"`
+	IPCIDR       policyDNSIPPresence `json:"ip_cidr"`
+	Port         []json.RawMessage   `json:"port"`
+	PortRange    []json.RawMessage   `json:"port_range"`
+	Protocol     json.RawMessage     `json:"protocol"`
+	Network      json.RawMessage     `json:"network"`
 }
 
 func (rule policyDNSRuleSetRule) nonDNSCondition() bool {
-	return len(rule.IPCIDR) != 0 || len(rule.Port) != 0 || len(rule.PortRange) != 0 ||
+	return rule.IPCIDR.present || len(rule.Port) != 0 || len(rule.PortRange) != 0 ||
 		nonEmptyPolicyJSON(rule.Protocol) || nonEmptyPolicyJSON(rule.Network)
+}
+
+// DNS ignores IP values; only their presence prevents an IP-only ruleset from
+// becoming a catch-all DNS rule. Keep the same []string JSON type validation
+// without retaining hundreds of thousands of unused prefixes per compiler.
+type policyDNSIPPresence struct{ present bool }
+
+func (value *policyDNSIPPresence) UnmarshalJSON(body []byte) error {
+	var entries []policyDNSIgnoredString
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return err
+	}
+	value.present = len(entries) != 0
+	return nil
+}
+
+type policyDNSIgnoredString struct{}
+
+func (*policyDNSIgnoredString) UnmarshalJSON(body []byte) error {
+	body = bytes.TrimSpace(body)
+	// The enclosing JSON decoder validates escapes and syntax. Like []string,
+	// a null element is accepted; other scalar/container types are rejected.
+	if bytes.Equal(body, []byte("null")) || (len(body) > 0 && body[0] == '"') {
+		return nil
+	}
+	return errors.New("IP condition must contain JSON strings")
 }
 
 func nonEmptyPolicyJSON(value json.RawMessage) bool {

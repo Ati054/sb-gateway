@@ -1,10 +1,17 @@
 package agent
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestHealthStageTraceIsOptIn(t *testing.T) {
@@ -60,4 +67,34 @@ func TestHealthStageTraceDoesNotExposeUnknownOperationsOrTargets(t *testing.T) {
 	if trace.record.Operation != "bi" || trace.record.Target != "gstatic-204" {
 		t.Fatal("fixed labels discarded")
 	}
+}
+
+func TestHealthStageTraceErrorsContainOnlyFixedCodes(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{nil, ""},
+		{context.Canceled, "Canceled"},
+		{errors.Join(errors.New("private-token"), context.DeadlineExceeded), "DeadlineExceeded"},
+		{status.Error(codes.Unavailable, "user:password@private.example"), "Unavailable"},
+		{errors.New("api-token=private-token"), "local_error"},
+	} {
+		trace := &healthStageTrace{record: healthStageRecord{Stage: "api"}, started: time.Now()}
+		trace.finishError(test.err, true)
+		if trace.record.ErrorCode != test.want || !trace.record.ParentCancelled {
+			t.Fatalf("unexpected safe error classification: %+v", trace.record)
+		}
+	}
+	for _, secret := range []string{"private-token", "password", "private.example", "api-token"} {
+		if strings.Contains(output.String(), secret) {
+			t.Fatal("private error message entered trace")
+		}
+	}
+	var disabled *healthStageTrace
+	disabled.finishError(errors.New("private-token"), true)
 }
