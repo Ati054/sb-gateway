@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 func startupProbeMigrationFixture(t *testing.T, global any) (*Server, map[string]any, map[string][]byte) {
@@ -396,16 +398,39 @@ func TestLegacyGeoIPRuntimeMigratesOnlySelectedUntaggedRules(t *testing.T) {
 	if err := os.WriteFile(xray, []byte(`{"routing":{"rules":[{"type":"field","ip":["203.0.113.0/24"]}]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := legacyGeoIPRouting(root, xray)
+	legacy, err := legacyGeoIPRouting(root, xray, root)
 	if err != nil || !legacy {
 		t.Fatalf("untagged GeoIP must migrate: %t, %v", legacy, err)
 	}
 	if err := os.WriteFile(xray, []byte(`{"routing":{"rules":[{"type":"field","ruleTag":"sb-geoip-geoip-cn-0-0","ip":["203.0.113.0/24"]}]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err = legacyGeoIPRouting(root, xray)
-	if err != nil || legacy {
-		t.Fatalf("tagged GeoIP migrated again: %t, %v", legacy, err)
+	legacy, err = legacyGeoIPRouting(root, xray, root)
+	if err != nil || !legacy {
+		t.Fatalf("tagged inline GeoIP must migrate: %t, %v", legacy, err)
+	}
+	if err := os.WriteFile(xray, []byte(`{"routing":{"rules":[{"type":"field","ruleTag":"sb-geoip-geoip-cn-0-0","ip":["ext:sb-geoip-cn-`+strings.Repeat("a", 64)+`.dat:cn"]}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if legacy, err := legacyGeoIPRouting(root, xray, root); err != nil || !legacy {
+		t.Fatalf("missing binary GeoIP did not migrate: %t %v", legacy, err)
+	}
+	reference, err := geoipasset.Publish(root, "geoip-cn", []byte(`{"rules":[{"ip_cidr":["203.0.113.0/24"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(xray, []byte(`{"routing":{"rules":[{"ruleTag":"sb-geoip-geoip-cn-0-0","ip":["`+reference+`"]}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if legacy, err := legacyGeoIPRouting(root, xray, root); err != nil || legacy {
+		t.Fatalf("verified binary asset migrated again: %t %v", legacy, err)
+	}
+	name, _ := geoipasset.ReferenceName(reference)
+	if err := os.WriteFile(filepath.Join(root, name), []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if legacy, err := legacyGeoIPRouting(root, xray, root); err != nil || !legacy {
+		t.Fatalf("damaged binary asset did not require reconciliation: %t %v", legacy, err)
 	}
 }
 

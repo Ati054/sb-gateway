@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 	"github.com/sb-gateway/sb-gateway/internal/runtimeproof"
 )
 
@@ -42,6 +42,8 @@ type Options struct {
 	APIServer          string
 	XrayBinary         string
 	Run                func(context.Context, string, ...string) ([]byte, error)
+	CandidateDir       string
+	LKGConfig          string
 }
 
 func OptionsFromEnvironment() Options {
@@ -55,6 +57,8 @@ func OptionsFromEnvironment() Options {
 		ProcRoot:           "/proc",
 		APIServer:          env("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
 		XrayBinary:         env("SB_XRAY_BINARY", "/usr/local/bin/xray"),
+		CandidateDir:       env("SB_RUNTIME_CANDIDATE_DIR", "/state/runtime-candidates"),
+		LKGConfig:          env("SB_XRAY_LKG_CONFIG", filepath.Join(env("SB_GATEWAY_DATA_DIR", "/data"), "last-known-good", "xray.json")),
 	}
 }
 
@@ -72,6 +76,8 @@ type State struct {
 	generation        string
 	mutationAttempted bool
 	confirmed         string
+	confirmedAssets   []byte
+	lastCleanup       time.Time
 }
 
 // The appliance retains this state across monitor-only restarts. A newly
@@ -145,7 +151,8 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 	}
 	if managed == 0 {
 		state.confirmed = ""
-		return false, nil
+		state.confirmedAssets = nil
+		return false, cleanup(options, state, oldRouting)
 	}
 	packIDs := make([]string, 0, len(packRules))
 	for id := range packRules {
@@ -161,7 +168,7 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 			return false, fmt.Errorf("read %s: %w", id, err)
 		}
 		signature.Write(packBody)
-		cidrs, err := parseGeoIPPack(packBody)
+		reference, err := geoipasset.Publish(options.RulesetDir, id, packBody)
 		if err != nil {
 			return false, fmt.Errorf("validate %s: %w", id, err)
 		}
@@ -169,7 +176,7 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 			if _, exists := rule["ip"]; !exists {
 				return false, errors.New("managed GeoIP rule has no IP condition")
 			}
-			rule["ip"] = cidrs
+			rule["ip"] = []string{reference}
 		}
 	}
 	want := hex.EncodeToString(signature.Sum(nil))
@@ -193,9 +200,10 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 	}
 	if state.generation != generation {
 		state.generation, state.confirmed, state.mutationAttempted = generation, "", false
+		state.confirmedAssets = nil
 	}
 	if state.confirmed == want {
-		return false, nil
+		return false, cleanup(options, state, state.confirmedAssets)
 	}
 	if activationGuarded(options) || !stillReady(options.ReadyFile, pid, options.XrayConfig, body) {
 		return false, ErrDeferred
@@ -207,14 +215,23 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 	if validated && state.mayReuseStartup && proof != state.baselineProof &&
 		!state.mutationAttempted && string(desired) == string(oldRouting) {
 		state.confirmed = want
-		return false, nil
+		state.confirmedAssets = routingAssets(rules)
+		return false, cleanup(options, state, state.confirmedAssets)
 	}
 	// The generated config is a baseline, not a readback of Xray's live table.
 	// A prior hot update may still be active after the pack returns to that
 	// baseline, so equality here cannot prove that no reload is needed.
 	run := options.Run
 	if run == nil {
-		run = runXray
+		run = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
+			return runXrayWithAssets(ctx, options.RulesetDir, binary, args...)
+		}
+	}
+	if len(state.confirmedAssets) != 0 {
+		oldRouting, err = rollbackRouting(oldRouting, state.confirmedAssets)
+		if err != nil {
+			return false, err
+		}
 	}
 	state.confirmed = ""
 	state.mutationAttempted = true
@@ -246,25 +263,55 @@ func Activate(ctx context.Context, options Options, state *State) (bool, error) 
 		return false, fmt.Errorf("confirm GeoIP routing: %w", err)
 	}
 	state.confirmed = want
-	return true, nil
+	state.confirmedAssets = routingAssets(rules)
+	return true, cleanup(options, state, state.confirmedAssets)
 }
 
-func parseGeoIPPack(body []byte) ([]string, error) {
-	var document struct {
-		Rules []struct {
-			IP []string `json:"ip_cidr"`
-		} `json:"rules"`
-	}
-	if err := json.Unmarshal(body, &document); err != nil || len(document.Rules) != 1 || len(document.Rules[0].IP) == 0 || len(document.Rules[0].IP) > 250_000 {
-		return nil, errors.New("GeoIP CIDR document is invalid")
-	}
-	for _, value := range document.Rules[0].IP {
-		prefix, err := netip.ParsePrefix(value)
-		if err != nil || prefix.Masked().String() != value {
-			return nil, errors.New("GeoIP CIDR is invalid")
+// Keep only the small reference map across ticks, not another full routing table.
+func routingAssets(rules []any) []byte {
+	assets := make(map[string]string)
+	for _, raw := range rules {
+		rule := raw.(map[string]any)
+		tag, _ := rule["ruleTag"].(string)
+		if managedRuleTag.MatchString(tag) {
+			assets[tag] = rule["ip"].([]string)[0]
 		}
 	}
-	return document.Rules[0].IP, nil
+	body, _ := json.Marshal(assets)
+	return body
+}
+
+func rollbackRouting(baseline, assets []byte) ([]byte, error) {
+	var previous map[string]string
+	var config struct {
+		Routing map[string]any `json:"routing"`
+	}
+	if err := json.Unmarshal(assets, &previous); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(baseline, &config); err != nil {
+		return nil, err
+	}
+	for _, raw := range config.Routing["rules"].([]any) {
+		rule := raw.(map[string]any)
+		tag, _ := rule["ruleTag"].(string)
+		if reference, ok := previous[tag]; ok {
+			rule["ip"] = []string{reference}
+		}
+	}
+	return json.Marshal(config)
+}
+
+func cleanup(options Options, state *State, live []byte) error {
+	if options.CandidateDir == "" || activationGuarded(options) || time.Since(state.lastCleanup) < time.Minute {
+		return nil
+	}
+	_, err := geoipasset.Prune(options.RulesetDir, []string{options.XrayConfig, options.LKGConfig}, []string{options.CandidateDir}, live, time.Now())
+	if err != nil {
+		return fmt.Errorf("cleanup obsolete GeoIP assets: %w", err)
+	}
+	state.lastCleanup = time.Now()
+	return nil
 }
 
 func confirmRules(body []byte, expected []any) error {
@@ -307,9 +354,15 @@ func applyRouting(ctx context.Context, options Options, run func(context.Context
 }
 
 func runXray(ctx context.Context, binary string, args ...string) ([]byte, error) {
+	return runXrayWithAssets(ctx, env("SB_RULESET_DIR", "/config/rulesets"), binary, args...)
+}
+
+func runXrayWithAssets(ctx context.Context, root, binary string, args ...string) ([]byte, error) {
 	call, cancel := context.WithTimeout(ctx, 330*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(call, binary, args...).CombinedOutput()
+	command := exec.CommandContext(call, binary, args...)
+	command.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+root)
+	output, err := command.CombinedOutput()
 	if len(output) > 1<<20 {
 		return nil, errors.New("Xray API response exceeds the limit")
 	}

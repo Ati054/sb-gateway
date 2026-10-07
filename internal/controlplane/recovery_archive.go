@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
 const (
@@ -542,7 +544,7 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 		skipTop      map[string]bool
 	}
 	specs := []rootSpec{
-		{configRoot, "config", map[string]bool{"generated": true, "rulesets": true}},
+		{configRoot, "config", map[string]bool{"generated": true}},
 		{stateRoot, "state", map[string]bool{"runtime-candidates": true}},
 		{filepath.Join(dataRoot, "last-known-good"), "data/last-known-good", nil},
 	}
@@ -566,6 +568,13 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 				return nil
 			}
 			parts := strings.Split(filepath.ToSlash(relative), "/")
+			if spec.prefix == "config" && parts[0] == "rulesets" && !entry.IsDir() {
+				asset := geoipasset.IsManagedName(entry.Name())
+				pack := recoveryGeoIPPackPattern.MatchString(entry.Name())
+				if len(parts) != 2 || (!asset && !pack) {
+					return nil
+				}
+			}
 			if len(parts) == 1 && entry.IsDir() && spec.skipTop[parts[0]] {
 				return filepath.SkipDir
 			}
@@ -628,6 +637,7 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 }
 
 var recoveryPayloadPathPattern = regexpMust(`^(?:config|state|data/last-known-good)/[A-Za-z0-9._/-]+$`)
+var recoveryGeoIPPackPattern = regexpMust(`^geoip-[a-z]{2}\.json$`)
 
 func regexpMust(pattern string) *regexp.Regexp { return regexp.MustCompile(pattern) }
 
