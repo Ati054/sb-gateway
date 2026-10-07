@@ -1,5 +1,7 @@
 # WSL/Linux entrypoints must retain LF shebangs on Windows checkouts.
 *.sh text eol=lf
+# Runtime templates are also consumed by LF-based startup migrations.
+*.j2 text eol=lf
 # Unified diff context has a mandatory space before Go's tab indentation.
 *.patch text eol=lf whitespace=-space-before-tab,-blank-at-eol
 
@@ -21,6 +23,15 @@ QUATTRO_SERVERS_AUDIT.md export-ignore
 docs/ACCEPTANCE-TESTS.md export-ignore
 docs/research export-ignore
 docs/research/** export-ignore
+docs/*-VERIFICATION.md export-ignore
+docs/*-RESEARCH.md export-ignore
+docs/GEOIP-BINARY-EXPERIMENT.md export-ignore
+docs/URLTEST-TRAFFIC-ACCOUNTING.md export-ignore
+docs/XRAY-PAYLOAD-SNAPSHOT.md export-ignore
+tools/geoipbench/run-chr.sh export-ignore
+internal/appliance/image_artifact_test.go export-ignore
+internal/routeros/image_transfer_chr_test.go export-ignore
+internal/routeros/logging_native_test.go export-ignore
 
 # The public export script keeps only the package version's release document.
 # Do not maintain a version whitelist here: it can silently omit new notes.
