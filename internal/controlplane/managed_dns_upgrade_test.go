@@ -27,6 +27,10 @@ func TestManagedDNSUpgradeOffersApplyWithoutConfigurationEdits(t *testing.T) {
 	if legacyPorts == source {
 		t.Fatal("fixture must retain the split-port conntrack selector")
 	}
+	legacyAdmission := strings.Replace(source, "      /ip/firewall/mangle/enable $gate\n      $clearRecoveredDNS", "      $clearRecoveredDNS\n      /ip/firewall/mangle/enable $gate", 1)
+	if legacyAdmission == source {
+		t.Fatal("fixture must retain DNS admission before recovery cleanup")
+	}
 	for _, test := range []struct {
 		name, source string
 		update       bool
@@ -34,6 +38,8 @@ func TestManagedDNSUpgradeOffersApplyWithoutConfigurationEdits(t *testing.T) {
 		{"older renderer", legacy, true},
 		{"older recovery filter", legacyRecovery, true},
 		{"older endpoint format", legacyPorts, true},
+		{"older recovery admission order", legacyAdmission, true},
+		{"older CRLF recovery admission order", strings.ReplaceAll(legacyAdmission, "\n", "\r\n"), true},
 		{"updated renderer", source, false},
 		{"no committed traffic script", "", false},
 	} {

@@ -480,6 +480,11 @@ func managedDNSRulesNeedUpdate(active string, metadata map[string]any) bool {
 	if strings.Contains(source, ":local clearRecoveredDNS do={") && !strings.Contains(source, "find where dst-port=53") {
 		return true
 	}
+	cleanup := strings.Index(source, "$clearRecoveredDNS")
+	admission := strings.Index(source, "/ip/firewall/mangle/enable $gate")
+	if cleanup >= 0 && admission >= 0 && cleanup < admission {
+		return true
+	}
 	for _, comment := range []string{
 		"SB-GATEWAY managed DNS mark UDP", "SB-GATEWAY managed DNS mark TCP",
 		"SB-GATEWAY managed DNS UDP", "SB-GATEWAY managed DNS TCP",
