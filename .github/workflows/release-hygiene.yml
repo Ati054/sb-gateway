@@ -22,9 +22,7 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Install pinned analysis tools
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
-          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+        run: sh scripts/install-analysis-tools.sh "$(go env GOPATH)/bin"
       - name: Staticcheck correctness checks
         run: staticcheck -checks='SA*' ./...
       - name: Race detection

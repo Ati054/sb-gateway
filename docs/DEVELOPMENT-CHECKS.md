@@ -4,6 +4,7 @@ The release-hygiene workflow has an independent Go quality job:
 
 - `go vet ./...`;
 - Staticcheck v0.8.1, `-checks='SA*' ./...`;
+- Analysis tools use the pinned `golang.org/x/tools` v0.51.0 importer for Go 1.27.2 export-format compatibility. Install them with `sh scripts/install-analysis-tools.sh "$(go env GOPATH)/bin"`; this does not change runtime dependencies.
 - `CGO_ENABLED=1 go test -race ./... -count=1 -timeout=15m`;
 - govulncheck v1.8.0, `govulncheck ./...`.
 
