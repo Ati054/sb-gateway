@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strconv"
 	"sync"
 	"time"
 
@@ -104,21 +103,14 @@ func startFreshResolver(ctx context.Context, config FreshResolverConfig, options
 	if err != nil {
 		return nil, err
 	}
-	packet, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	packet, listener, err := listenFreshResolverSockets(net.Listen, net.ListenPacket)
 	if err != nil {
 		resolver.close()
-		return nil, fmt.Errorf("listen fresh resolver UDP: %w", err)
-	}
-	port := packet.LocalAddr().(*net.UDPAddr).Port
-	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		_ = packet.Close()
-		resolver.close()
-		return nil, fmt.Errorf("listen fresh resolver TCP: %w", err)
+		return nil, err
 	}
 	child, cancel := context.WithCancel(ctx)
 	forwarder := &FreshResolver{
-		address:  net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		address:  listener.Addr().String(),
 		ctx:      child,
 		cancel:   cancel,
 		timeout:  options.Timeout,
@@ -151,6 +143,28 @@ func startFreshResolver(ctx context.Context, config FreshResolverConfig, options
 		_ = forwarder.Close()
 	}()
 	return forwarder, nil
+}
+
+func listenFreshResolverSockets(
+	listenTCP func(string, string) (net.Listener, error),
+	listenUDP func(string, string) (net.PacketConn, error),
+) (net.PacketConn, net.Listener, error) {
+	var lastError error
+	// Choose a TCP-valid port first; a free UDP port may still be occupied or
+	// reserved for TCP. Retry boundedly if the matching UDP port is unavailable.
+	for range 8 {
+		listener, err := listenTCP("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, nil, fmt.Errorf("listen fresh resolver TCP: %w", err)
+		}
+		packet, err := listenUDP("udp4", listener.Addr().String())
+		if err == nil {
+			return packet, listener, nil
+		}
+		_ = listener.Close()
+		lastError = err
+	}
+	return nil, nil, fmt.Errorf("listen fresh resolver UDP: %w", lastError)
 }
 
 func validateFreshResolverConfig(config FreshResolverConfig) error {

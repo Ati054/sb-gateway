@@ -73,6 +73,7 @@ func TestXrayPinnedRendererCompatibility(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			candidate := xrayPinnedRendererCandidate(t, certificatePath, keyPath, scenario.quic, scenario.masquerade)
+			objectValue(candidate.Config["log"])["error"] = filepath.Join(t.TempDir(), "xray-error.log")
 			hysteria := findXraySourceRule(objectSlice(candidate.Config["inbounds"]), func(inbound map[string]any) bool {
 				return inbound["tag"] == "hysteria2-direct"
 			})

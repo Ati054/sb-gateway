@@ -57,6 +57,10 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	item.RuntimeSelected = actual
 	item.RuntimeError = ""
 	evidence := controller.runtime.ProbeAvailability(selected)
+	if err := takeProbeInterruption(controller.runtime); err != nil {
+		item.LatencyComparisons = nil
+		return true, err
+	}
 	controller.livenessAt[policyID] = now
 	if evidence.LocalFailure {
 		item.LatencyComparisons = nil

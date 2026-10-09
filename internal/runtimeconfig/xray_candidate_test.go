@@ -44,6 +44,10 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbounds := objectSlice(artifacts.Config["inbounds"])
+	managed := findXraySourceRule(inbounds, func(inbound map[string]any) bool { return inbound["tag"] == managedDNSInbound })
+	if managed == nil || managed["listen"] != "172.31.255.2" || managed["port"] != ManagedDNSPort {
+		t.Fatal("managed router DNS must listen only on the actual container IPv4")
+	}
 	if inbounds[len(inbounds)-1]["tag"] != "xray-api" {
 		t.Fatalf("API inbound is not last: %#v", inbounds)
 	}
@@ -65,6 +69,9 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 		t.Fatalf("health URLTest prefix missing: %#v", balancers[1])
 	}
 	rules := objectSlice(routing["rules"])
+	if rules[1]["outboundTag"] != "block" || !reflect.DeepEqual(stringSlice(rules[1]["inboundTag"]), []string{managedDNSInbound}) {
+		t.Fatal("an empty managed allowlist must block before general DNS rules")
+	}
 	if !reflect.DeepEqual(rules[0], map[string]any{
 		"type": "field", "inboundTag": []string{"xray-api"}, "outboundTag": "xray-api",
 	}) {

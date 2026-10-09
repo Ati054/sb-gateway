@@ -20,6 +20,7 @@ import { nodePresentation, selectorCandidateIds, routeCandidateIds, compareRoute
 import { confirmedUnstableRoute, qualitySheet } from "./node-quality";
 import { activeQualityMetrics, freshLatencyComparison, qualityStatsSince } from "./quality-window";
 import { withoutRetiredURLTestSettings } from "./urltest-settings";
+import { DraftAutosave } from "./draft-autosave";
 import { automaticCidrHint, supportsAutomaticCidr } from "./cdn-capabilities";
 import { AcmeFields, useAcmeProfile } from "./acme-fields";
 import { TlsTransferDialog } from "./tls-transfer";
@@ -358,6 +359,11 @@ function cdnProviderName(value: unknown): string {
 }
 
 const DIRECT_SERVICE_PACKS = [
+  { id: "ewelink", name: "eWeLink / Sonoff", category: "Умный дом", description: "API, региональные диспетчеры и облачные соединения eWeLink.", updateMode: "official", broad: false },
+  { id: "xiaomi-home", name: "Xiaomi Home / Mi Home", category: "Умный дом", description: "MIoT API, MQTT и вход в аккаунт Xiaomi.", updateMode: "official", broad: false },
+  { id: "tuya", name: "Tuya / Smart Life", category: "Умный дом", description: "Региональные API и MQTT облака Tuya.", updateMode: "official", broad: false },
+  { id: "aqara", name: "Aqara Home", category: "Умный дом", description: "Региональные API приложения и облачные сервисы устройств Aqara.", updateMode: "official", broad: false },
+  { id: "shelly", name: "Shelly Smart Control", category: "Умный дом", description: "Облачный API и WebSocket-соединения устройств Shelly.", updateMode: "official", broad: false },
   { id: "ru-government", name: "Госуслуги и государственные сайты", category: "Россия · важное", description: "Федеральные и региональные порталы, налоги, Госключ.", updateMode: "daily", broad: false },
   { id: "ru-banks", name: "Банки и платежи РФ", category: "Россия · важное", description: "Банки, СБП/НСПК и основные платежные кабинеты.", updateMode: "daily", broad: false },
   { id: "ru-marketplaces", name: "Маркетплейсы, объявления, доставка и ритейл РФ", category: "Россия · покупки", description: "Маркетплейсы, объявления, магазины, службы доставки и их CDN.", updateMode: "daily", broad: false },
@@ -4684,6 +4690,9 @@ function Routing({
   revisionState,
   routeros,
   onDraftChanged,
+  onAutosaveChange,
+  onPendingChange,
+  onSavingChange,
 }: {
   onAddPolicy: () => void;
   onEditPolicy: (id: string) => void;
@@ -4693,6 +4702,9 @@ function Routing({
   revisionState: RevisionState;
   routeros: JsonObject;
   onDraftChanged: () => Promise<void>;
+  onAutosaveChange: (autosave: DraftAutosave | null, reset?: () => void) => void;
+  onPendingChange: (pending: boolean) => void;
+  onSavingChange: (saving: boolean) => void;
 }) {
   const { locale, tr } = useLanguage();
   const [historyPeriod, setHistoryPeriod] = useState<"24h" | "7d" | "30d">("7d");
@@ -5265,6 +5277,9 @@ function Routing({
         runtime={runtime}
         routeros={routeros}
         onDraftChanged={onDraftChanged}
+        onAutosaveChange={onAutosaveChange}
+        onPendingChange={onPendingChange}
+        onSavingChange={onSavingChange}
       />
     </>
   );
@@ -5377,11 +5392,17 @@ function RoutingInfrastructureSettings({
   runtime,
   routeros,
   onDraftChanged,
+  onAutosaveChange,
+  onPendingChange,
+  onSavingChange,
 }: {
   config: JsonObject;
   runtime?: JsonObject;
   routeros: JsonObject;
   onDraftChanged: () => Promise<void>;
+  onAutosaveChange: (autosave: DraftAutosave | null, reset?: () => void) => void;
+  onPendingChange: (pending: boolean) => void;
+  onSavingChange: (saving: boolean) => void;
 }) {
   const { tr } = useLanguage();
   const system = asObject(config.system);
@@ -5460,6 +5481,24 @@ function RoutingInfrastructureSettings({
     if (typeof window === "undefined") return "";
     return window.sessionStorage.getItem(ROUTING_SAVE_MESSAGE_STORAGE_KEY) ?? "";
   });
+  const autosaveRef = useRef<DraftAutosave | null>(null);
+  const saveRoutingRef = useRef<() => Promise<void>>(async () => undefined);
+  const resetRoutingRef = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    const autosave = new DraftAutosave({
+      save: () => saveRoutingRef.current(),
+      onPending: onPendingChange,
+      onSaving: (saving) => { setSaveBusy(saving); onSavingChange(saving); },
+      onError: (error) => setSaveMessage(prefixedErrorMessage(error)),
+    });
+    autosaveRef.current = autosave;
+    onAutosaveChange(autosave, () => resetRoutingRef.current());
+    return () => {
+      autosave.dispose();
+      autosaveRef.current = null;
+      onAutosaveChange(null);
+    };
+  }, [onAutosaveChange, onPendingChange, onSavingChange]);
   const reverseVlessCollector = useRef<(() => JsonObject[]) | null>(null);
   const registerReverseVlessCollector = useCallback(
     (collector: (() => JsonObject[]) | null) => {
@@ -5537,6 +5576,7 @@ function RoutingInfrastructureSettings({
   }
 
   function resetRoutingInfrastructure() {
+    autosaveRef.current?.discard();
     setWireguardEnabled(networking.wireguard_egress_enabled === true);
     setWireguardExits(
       configuredWireguardExits.map((item) => {
@@ -5576,15 +5616,11 @@ function RoutingInfrastructureSettings({
     if (monitorRanges.some(([key, minimum, maximum]) =>
       !Number.isInteger(routingMonitor[key]) || routingMonitor[key] < minimum || routingMonitor[key] > maximum
     )) {
-      setSaveMessage(prefixedErrorMessage(new Error(tr("Проверьте значения мониторинга маршрутов."))));
-      return;
+      throw new Error(tr("Проверьте значения мониторинга маршрутов."));
     }
 
     if (!wireguardValid) {
-      setSaveMessage(
-        tr("Ошибка: выберите хотя бы один доступный WireGuard-интерфейс."),
-      );
-      return;
+      throw new Error(tr("Ошибка: выберите хотя бы один доступный WireGuard-интерфейс."));
     }
     setSaveBusy(true);
     setSaveMessage("");
@@ -5593,23 +5629,26 @@ function RoutingInfrastructureSettings({
       const reverseVlessExits =
         reverseVlessCollector.current?.() ??
         asObjectList(config.reverse_vless_exits);
+      const latest = await getCurrentDraft<DraftEnvelope>();
+      const latestConfig = asObject(latest.config);
+      const latestSystem = asObject(latestConfig.system);
       await saveCurrentDraft({
         config: withDeploymentReadiness(
           {
-            ...config,
+            ...latestConfig,
             reverse_vless_exits: reverseVlessExits,
             system: {
-              ...system,
+              ...latestSystem,
               routing_monitor: routingMonitor,
               networking: {
-                ...networking,
+                ...asObject(latestSystem.networking),
                 wireguard_egress_enabled: wireguardEnabled,
                 wireguard_egress_exits: wireguardExits,
                 remote_ipv6_mode: remoteIpv6Enabled ? "proxy_only" : "disabled",
               },
             },
             dns: {
-              ...dns,
+              ...asObject(latestConfig.dns),
               force_tcp_for_proxy_services: forceTcpForProxyServices,
               direct_resolver: {
                 provider: directDnsProvider,
@@ -5634,10 +5673,16 @@ function RoutingInfrastructureSettings({
       setSaveMessage(successMessage);
     } catch (error) {
       setSaveMessage(prefixedErrorMessage(error));
+      throw error;
     } finally {
       setSaveBusy(false);
     }
   }
+
+  useEffect(() => {
+    saveRoutingRef.current = saveRoutingInfrastructure;
+    resetRoutingRef.current = resetRoutingInfrastructure;
+  });
 
   const wanDnsResolverOptions = [
     ["yandex", "doh", tr("Яндекс DNS (DoH · HTTPS)")],
@@ -5654,7 +5699,8 @@ function RoutingInfrastructureSettings({
   ] as const;
 
   return (
-    <section className="routing-infrastructure">
+    <section className="routing-infrastructure" inert={saveBusy}
+      onChangeCapture={() => autosaveRef.current?.update()}>
       <div className="routing-infrastructure-grid">
         <ReverseVlessSettings
           key={routingResetVersion}
@@ -5662,6 +5708,7 @@ function RoutingInfrastructureSettings({
           runtime={runtime}
           onDraftChanged={onDraftChanged}
           onCollectorChange={registerReverseVlessCollector}
+          beforeMutation={async () => { await autosaveRef.current?.flush(); }}
           saving={saveBusy}
         />
 
@@ -5856,26 +5903,9 @@ function RoutingInfrastructureSettings({
       </div>
       <RoutingMonitorSettings
         values={routingMonitor}
-        onChange={setRoutingMonitor}
+        onChange={(values) => { setRoutingMonitor(values); autosaveRef.current?.update(); }}
         disabled={saveBusy}
       />
-      <div className="routing-save-bar">
-        <button
-          className="button button-ghost"
-          type="button"
-          onClick={resetRoutingInfrastructure}
-          disabled={saveBusy}
-        >
-           {tr("Сбросить")} </button>
-        <button
-          className="button button-primary"
-          type="button"
-          onClick={saveRoutingInfrastructure}
-          disabled={saveBusy || !wireguardValid}
-        >
-          {saveBusy ? tr("Сохраняю…") : tr("Сохранить")}
-        </button>
-      </div>
       {saveMessage ? (
         <div
           className={`inline-result ${isErrorMessage(saveMessage) ? "inline-result-error" : ""}`}
@@ -5894,12 +5924,14 @@ function ReverseVlessSettings({
   runtime,
   onDraftChanged,
   onCollectorChange,
+  beforeMutation,
   saving,
 }: {
   config: JsonObject;
   runtime?: JsonObject;
   onDraftChanged: () => Promise<void>;
   onCollectorChange: (collector: (() => JsonObject[]) | null) => void;
+  beforeMutation: () => Promise<void>;
   saving: boolean;
 }) {
   const { tr } = useLanguage();
@@ -5984,6 +6016,7 @@ function ReverseVlessSettings({
     setBusyId("new");
     setMessage("");
     try {
+      await beforeMutation();
       await createCollectionItem("reverse-vless-exits", {
         id,
         display_name: tr("Reverse VLESS клиент"),
@@ -6005,6 +6038,7 @@ function ReverseVlessSettings({
     setBusyId(exitId);
     setMessage("");
     try {
+      await beforeMutation();
       await deleteCollectionItem("reverse-vless-exits", exitId);
       await onDraftChanged();
       setMessage(tr("Клиент удалён."));
@@ -17651,6 +17685,31 @@ function GatewayConsole({
   const [runtimeError, setRuntimeError] = useState("");
   const [draftEnvelope, setDraftEnvelope] = useState<DraftEnvelope>();
   const [draftError, setDraftError] = useState("");
+  const routingAutosave = useRef<DraftAutosave | null>(null);
+  const routingReset = useRef<(() => void) | undefined>(undefined);
+  const [routingFormPending, setRoutingFormPending] = useState(false);
+  const [routingFormSaving, setRoutingFormSaving] = useState(false);
+  const [routingMountVersion, setRoutingMountVersion] = useState(0);
+  const [preparingApply, setPreparingApply] = useState(false);
+  const preparingApplyRef = useRef(false);
+  const navigationRequest = useRef(0);
+  const committedScreen = useRef(screen);
+  const registerRoutingAutosave = useCallback(
+    (autosave: DraftAutosave | null, reset?: () => void) => {
+      routingAutosave.current = autosave;
+      routingReset.current = reset;
+    }, [],
+  );
+
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!routingAutosave.current?.pending) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, []);
   const [pendingChangePopoverOpen, setPendingChangePopoverOpen] =
     useState(false);
   const runtimeRefreshInFlight = useRef(false);
@@ -17661,15 +17720,25 @@ function GatewayConsole({
   const routerosContainerRefreshInFlight = useRef(false);
   const routerosRefreshedAt = useRef(0);
 
-  const navigateToScreen = useCallback((nextScreen: Screen) => {
+  const navigateToScreen = useCallback(async (nextScreen: Screen) => {
+    const request = ++navigationRequest.current;
     const currentScreen = screenFromHash(window.location.hash);
     if (currentScreen === nextScreen) return;
+    try {
+      await routingAutosave.current?.flush();
+    } catch (error) {
+      if (request !== navigationRequest.current) return;
+      setDraftError(errorMessage(error));
+      return;
+    }
     const commitNavigation = () => {
+      if (request !== navigationRequest.current) return;
       if (currentScreen === "routing" && nextScreen !== "routing") {
         window.sessionStorage.removeItem(ROUTING_EXPANDED_POLICY_STORAGE_KEY);
         window.sessionStorage.removeItem(ROUTING_SAVE_MESSAGE_STORAGE_KEY);
       }
       flushSync(() => setScreen(nextScreen));
+      committedScreen.current = nextScreen;
       window.history.pushState(null, "", screenHash(nextScreen));
     };
     const transitionDocument = document as ViewTransitionDocument;
@@ -17692,14 +17761,24 @@ function GatewayConsole({
   }, []);
 
   useEffect(() => {
-    let previousScreen = screenFromHash(window.location.hash);
-    const syncScreenFromLocation = () => {
+    const syncScreenFromLocation = async () => {
+      const request = ++navigationRequest.current;
+      const previousScreen = committedScreen.current;
       const nextScreen = screenFromHash(window.location.hash);
+      try {
+        await routingAutosave.current?.flush();
+      } catch (error) {
+        if (request !== navigationRequest.current) return;
+        setDraftError(errorMessage(error));
+        window.history.replaceState(null, "", screenHash(previousScreen));
+        return;
+      }
+      if (request !== navigationRequest.current) return;
       if (previousScreen === "routing" && nextScreen !== "routing") {
         window.sessionStorage.removeItem(ROUTING_EXPANDED_POLICY_STORAGE_KEY);
         window.sessionStorage.removeItem(ROUTING_SAVE_MESSAGE_STORAGE_KEY);
       }
-      previousScreen = nextScreen;
+      committedScreen.current = nextScreen;
       setScreen(nextScreen);
     };
 
@@ -17775,14 +17854,15 @@ function GatewayConsole({
         pendingConfigChangeCount === 0));
   const hasPendingAction =
     configurationHydrated &&
-    (pendingConfigChangeCount > 0 || runtimeUpdateOnly);
+    (pendingConfigChangeCount > 0 || runtimeUpdateOnly || routingFormPending);
+  const displayedChangeCount = pendingConfigChangeCount + Number(routingFormPending);
   const hasActiveConfiguration = Boolean(
     activeRevision || draftEnvelope?.has_active_configuration,
   );
   const revisionState: RevisionState =
     !configurationHydrated
       ? "loading"
-      : hasActiveConfiguration && pendingConfigChangeCount === 0
+      : hasActiveConfiguration && pendingConfigChangeCount === 0 && !routingFormPending
         ? "applied"
         : "draft";
   const draftReviewCounts = importReviewCounts(draftConfig);
@@ -17966,6 +18046,22 @@ function GatewayConsole({
   const refreshAll = useCallback(async () => {
     await Promise.all([refreshRuntime(), refreshDraft(), refreshDetailedStatus(), refreshSelectorStatus()]);
   }, [refreshDetailedStatus, refreshDraft, refreshRuntime, refreshSelectorStatus]);
+
+  async function prepareApply() {
+    if (preparingApplyRef.current) return;
+    preparingApplyRef.current = true;
+    setPreparingApply(true);
+    try {
+      await routingAutosave.current?.flush();
+      setDraftError("");
+      setApplyMode("apply");
+    } catch (error) {
+      setDraftError(errorMessage(error));
+    } finally {
+      preparingApplyRef.current = false;
+      setPreparingApply(false);
+    }
+  }
 
   useEffect(() => {
     if (screen !== "routing") return;
@@ -18228,7 +18324,7 @@ function GatewayConsole({
                 }
               }}
             >
-              {pendingConfigChangeCount > 0 && !draftError ? (
+              {displayedChangeCount > 0 && !draftError ? (
                 <button
                   type="button"
                   className={`draft-label revision-${revisionState}`}
@@ -18240,7 +18336,7 @@ function GatewayConsole({
                   }
                 >
                   <i aria-hidden="true" />
-                  {tr("Изменения · {value1}", { value1: pendingConfigChangeCount })}
+                  {tr("Изменения · {value1}", { value1: displayedChangeCount })}
                 </button>
               ) : (
                 <span
@@ -18290,8 +18386,16 @@ function GatewayConsole({
             </div>
             <button
               className="button button-secondary"
-              onClick={() => setResetDraftOpen(true)}
-              disabled={pendingConfigChangeCount === 0 || !hasActiveConfiguration}
+              onClick={() => {
+                try {
+                  routingReset.current?.();
+                  setDraftError("");
+                  if (pendingConfigChangeCount > 0) setResetDraftOpen(true);
+                } catch (error) {
+                  setDraftError(errorMessage(error));
+                }
+              }}
+              disabled={routingFormSaving || preparingApply || (displayedChangeCount === 0 || !hasActiveConfiguration)}
               title={
                 !hasActiveConfiguration
                   ? tr("Сначала примените первую конфигурацию")
@@ -18305,8 +18409,8 @@ function GatewayConsole({
                {tr("Сбросить")} </button>
             <button
               className="button button-primary"
-              onClick={() => setApplyMode("apply")}
-              disabled={revisionState === "loading" || !hasPendingAction}
+              onClick={() => void prepareApply()}
+              disabled={preparingApply || revisionState === "loading" || !hasPendingAction}
               title={
                 runtimeUpdateOnly
                   ? tr("Проверить, затрагивает ли обновление runtime или управляемые правила RouterOS")
@@ -18317,11 +18421,13 @@ function GatewayConsole({
                     : tr("Безопасно применить проверенный черновик")
               }
             >
-              {runtimeUpdateOnly
+              {preparingApply
+                ? tr("Сохраняю…")
+                : runtimeUpdateOnly && !routingFormPending
                 ? tr("Применить обновление")
                 : revisionState === "applied"
                   ? tr("Применено")
-                  : tr("Применить ({value1})", { value1: pendingConfigChangeCount })}
+                  : tr("Применить ({value1})", { value1: displayedChangeCount })}
             </button>
           </div>
         </header>
@@ -18355,6 +18461,7 @@ function GatewayConsole({
           {screen === "routing" ? (
             configurationHydrated ? (
               <Routing
+                key={routingMountVersion}
                 onAddPolicy={() => setPolicyDialog({})}
                 onEditPolicy={(policyId) => setPolicyDialog({ policyId })}
                 config={draftConfig}
@@ -18363,6 +18470,9 @@ function GatewayConsole({
                 revisionState={revisionState}
                 routeros={routerosSummary}
                 onDraftChanged={refreshDraft}
+                onAutosaveChange={registerRoutingAutosave}
+                onPendingChange={setRoutingFormPending}
+                onSavingChange={setRoutingFormSaving}
               />
             ) : (
               <section className="card screen-hydration-state" role="status">
@@ -18487,7 +18597,10 @@ function GatewayConsole({
           onClose={() => setResetDraftOpen(false)}
           onReset={async () => {
             try {
-              return await runDraftOperation("reset");
+              const result = await runDraftOperation("reset");
+              setDraftEnvelope(await getCurrentDraft<DraftEnvelope>());
+              setRoutingMountVersion((current) => current + 1);
+              return result;
             } finally {
               await refreshAll();
             }

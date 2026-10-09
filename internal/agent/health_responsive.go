@@ -9,9 +9,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/applyguard"
 )
 
 var errHealthYield = errors.New("background probe yielded to active path or runtime change")
+var errHealthPlannedApply = errors.New("health proof paused for planned runtime restart")
 
 // The controller remains the sole owner of health state and routing choices.
 // Quality and emergency availability use independent loopback selector lanes.
@@ -25,6 +28,7 @@ type responsiveSelectorRuntime struct {
 	ctx             context.Context
 	check           func() error
 	generationPaths []string
+	applyGuardFile  string
 	enabled         bool
 	parallelEnabled bool
 	interrupted     error
@@ -36,9 +40,13 @@ type responsiveSelectorRuntime struct {
 }
 
 func (runtime *responsiveSelectorRuntime) Reload() (healthPool, bool, error) {
+	if applyguard.Active(runtime.applyGuardFile, time.Now()) {
+		runtime.pendingReset = true
+		return healthPool{}, false, errHealthPlannedApply
+	}
 	stamp := generationStamp(runtime.generationPaths)
 	pool, reset, err := runtime.selectorRuntime.Reload()
-	runtime.pendingReset = runtime.pendingReset || reset
+	runtime.pendingReset = runtime.pendingReset || reset || runtime.generation != "" && runtime.generation != stamp
 	if err == nil && pool.Version < 3 {
 		return pool, reset, errors.New("health pool contract predates the 1.6.15 release baseline")
 	}
@@ -253,6 +261,20 @@ func (runtime *responsiveSelectorRuntime) Probe(candidate string) probeEvidence 
 	}
 	result := runtime.run(func() probeJobResult { return probeJobResult{evidence: runtime.background.Probe(candidate)} })
 	return result.evidence
+}
+
+func (runtime *responsiveSelectorRuntime) ProbeAvailability(candidate string) probeEvidence {
+	stamp := generationStamp(runtime.generationPaths)
+	if stamp != runtime.generation || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+		runtime.interrupted = errHealthYield
+		return probeEvidence{LocalFailure: true}
+	}
+	evidence := runtime.selectorRuntime.ProbeAvailability(candidate)
+	if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+		runtime.interrupted = errHealthYield
+		return probeEvidence{LocalFailure: true}
+	}
+	return evidence
 }
 
 func (runtime *responsiveSelectorRuntime) UnderlayStatus() underlayEvidence {

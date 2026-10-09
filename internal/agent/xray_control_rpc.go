@@ -28,6 +28,7 @@ const xrayControlRPCTimeout = 3 * time.Second
 func newXrayControlClient(address string) (*xrayControlClient, error) {
 	optional, repeated := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL, descriptorpb.FieldDescriptorProto_LABEL_REPEATED
 	stringType, messageType := descriptorpb.FieldDescriptorProto_TYPE_STRING, descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
+	integerType := descriptorpb.FieldDescriptorProto_TYPE_INT64
 	field := func(name string, number int32, nested string, list bool) *descriptorpb.FieldDescriptorProto {
 		f := &descriptorpb.FieldDescriptorProto{Name: proto.String(name), Number: proto.Int32(number), Label: &optional, Type: &stringType}
 		if nested != "" {
@@ -41,6 +42,8 @@ func newXrayControlClient(address string) (*xrayControlClient, error) {
 	message := func(name string, fields ...*descriptorpb.FieldDescriptorProto) *descriptorpb.DescriptorProto {
 		return &descriptorpb.DescriptorProto{Name: proto.String(name), Field: fields}
 	}
+	statValue := field("value", 2, "", false)
+	statValue.Type = &integerType
 	file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
 		Name: proto.String("sb-xray-control.proto"), Package: proto.String("sb.gateway.xray.control"), Syntax: proto.String("proto3"),
 		MessageType: []*descriptorpb.DescriptorProto{
@@ -55,6 +58,9 @@ func newXrayControlClient(address string) (*xrayControlClient, error) {
 			message("ListOutboundsResponse", field("outbounds", 1, "OutboundTag", true)),
 			message("RemoveOutboundRequest", field("tag", 1, "", false)),
 			message("RemoveOutboundResponse"),
+			message("GetStatsRequest", field("name", 1, "", false)),
+			message("Stat", field("name", 1, "", false), statValue),
+			message("GetStatsResponse", field("stat", 1, "Stat", false)),
 		},
 	}, nil)
 	if err != nil {
@@ -152,4 +158,23 @@ func (client *xrayControlClient) remove(parent context.Context, tag string) erro
 	request, response := client.message("RemoveOutboundRequest"), client.message("RemoveOutboundResponse")
 	setControlString(request, "tag", tag)
 	return client.invoke(parent, "rmo", "proxyman", "HandlerService/RemoveOutbound", request, response)
+}
+
+func (client *xrayControlClient) online(parent context.Context, candidate string) (bool, error) {
+	request, response := client.message("GetStatsRequest"), client.message("GetStatsResponse")
+	name := "user>>>" + candidate + ">>>online"
+	setControlString(request, "name", name)
+	if err := client.invoke(parent, "statsonline", "stats", "StatsService/GetStatsOnline", request, response); err != nil {
+		return false, err
+	}
+	field := response.Descriptor().Fields().ByName("stat")
+	if !response.Has(field) {
+		return false, errors.New("Xray online statistic is missing")
+	}
+	stat := response.Get(field).Message()
+	actual := stat.Get(stat.Descriptor().Fields().ByName("name")).String()
+	if actual != name {
+		return false, errors.New("Xray online statistic name differs")
+	}
+	return stat.Get(stat.Descriptor().Fields().ByName("value")).Int() > 0, nil
 }

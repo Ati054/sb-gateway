@@ -174,6 +174,12 @@ func testXrayMassOutageRecovery(t *testing.T, count int, allFailed, fallbackOnly
 				return path
 			}
 			ports := make(map[int]bool)
+			var reservedPorts []net.Listener
+			t.Cleanup(func() {
+				for _, listener := range reservedPorts {
+					_ = listener.Close()
+				}
+			})
 			port := func() int {
 				t.Helper()
 				for {
@@ -182,11 +188,12 @@ func testXrayMassOutageRecovery(t *testing.T, count int, allFailed, fallbackOnly
 						t.Fatal(err)
 					}
 					value := listener.Addr().(*net.TCPAddr).Port
-					_ = listener.Close()
 					if !ports[value] {
 						ports[value] = true
+						reservedPorts = append(reservedPorts, listener)
 						return value
 					}
+					_ = listener.Close()
 				}
 			}
 			apiPort, clientPort := port(), port()
@@ -257,7 +264,17 @@ func testXrayMassOutageRecovery(t *testing.T, count int, allFailed, fallbackOnly
 				return exec.CommandContext(ctx, binary, args...)
 			}
 			process := command("run", "-config", config)
-			process.Stdout, process.Stderr = io.Discard, io.Discard
+			logPath := filepath.Join(root, "xray-startup.log")
+			processLog, err := os.Create(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = processLog.Close() })
+			process.Stdout, process.Stderr = processLog, processLog
+			// Keep core ports reserved until all independent endpoints are bound.
+			for _, listener := range reservedPorts {
+				_ = listener.Close()
+			}
 			if err := process.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -269,7 +286,8 @@ func testXrayMassOutageRecovery(t *testing.T, count int, allFailed, fallbackOnly
 					break
 				}
 				if time.Now().After(deadline) || ctx.Err() != nil {
-					t.Fatal("isolated core API did not start")
+					body, _ := os.ReadFile(logPath)
+					t.Fatalf("isolated core API did not start: %s", body)
 				}
 				time.Sleep(50 * time.Millisecond)
 			}

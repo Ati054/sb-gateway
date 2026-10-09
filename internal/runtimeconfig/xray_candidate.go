@@ -95,6 +95,11 @@ func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandida
 	inbounds = append(inbounds, dnsArtifacts.XrayInbounds...)
 	outbounds := append(outboundSet.Outbounds, dnsArtifacts.XrayOutbounds...)
 	rules = append(dnsArtifacts.XrayRules, rules...)
+	if boolDefault(objectValue(config["dns"])["hijack_managed_clients"], true) {
+		dnsInbound, ingressRules := managedDNSIngress(containerPrefix.Addr().String(), dnsArtifacts.XrayRules)
+		inbounds = append(inbounds, dnsInbound)
+		rules = append(ingressRules, rules...)
+	}
 
 	internalServer := textValue(objectValue(config["dns"])["internal_server"])
 	if address, parseErr := netip.ParseAddr(internalServer); parseErr != nil || !address.IsValid() {

@@ -312,6 +312,9 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 	rememberWorkingSelection(contract, item)
 	// Shutdown-time API errors must not affect the first post-restart TCP path.
 	item.RuntimeSelected, item.RuntimeConfirmed = "", false
+	// One unsuccessful probe is not a confirmed outage, including across Apply.
+	item.AvailabilityOK["nl"] = false
+	item.AvailabilityFailures["nl"] = 1
 	if err := writeJSONAtomic(statePath(root, "selector-health"), healthState{"europe": item}); err != nil {
 		t.Fatal(err)
 	}
@@ -330,5 +333,5 @@ func TestXrayLiveSwitchPreservesEstablishedTCP(t *testing.T) {
 	restarted, reader := open()
 	check(restarted, reader, "127.0.0.3")
 	restarted.Close()
-	t.Log("core process restart with unconfirmed API status: first admitted TCP restores saved nl")
+	t.Log("core restart with unconfirmed API status and pending failure: first admitted TCP restores saved nl")
 }

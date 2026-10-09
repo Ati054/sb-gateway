@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -39,6 +41,8 @@ type tcpUpstream struct {
 }
 
 type dohUpstream struct {
+	poolMu    sync.Mutex
+	closed    bool
 	client    *http.Client
 	transport *http.Transport
 	url       string
@@ -150,8 +154,10 @@ func newDoHUpstream(config serverConfig, timeout time.Duration) (upstream, error
 	}
 	result := &dohUpstream{
 		transport: transport,
-		client:    &http.Client{Transport: transport, Timeout: timeout},
-		url:       "https://" + config.ServerName + path,
+		client: &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("DoH redirect is not allowed")
+		}},
+		url: "https://" + config.ServerName + path,
 	}
 	if config.DoTFallback {
 		fallbackConfig := config
@@ -169,11 +175,18 @@ func newDoHUpstream(config serverConfig, timeout time.Duration) (upstream, error
 func (upstream *udpUpstream) exchange(ctx context.Context, query []byte) ([]byte, error) {
 	var lastError error
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		connection, err := upstream.borrow(ctx)
 		if err != nil {
 			return nil, err
 		}
 		response, err := upstream.exchangeOnConnection(ctx, connection, query)
+		if contextErr := ctx.Err(); contextErr != nil {
+			_ = connection.Close()
+			return nil, contextErr
+		}
 		if err == nil {
 			upstream.release(connection)
 			return response, nil
@@ -202,9 +215,11 @@ func (upstream *udpUpstream) borrow(ctx context.Context) (net.Conn, error) {
 }
 
 func (upstream *udpUpstream) exchangeOnConnection(ctx context.Context, connection net.Conn, query []byte) ([]byte, error) {
-	if err := connection.SetDeadline(time.Now().Add(upstream.timeout)); err != nil {
+	stop, err := bindExchangeContext(ctx, connection, upstream.timeout)
+	if err != nil {
 		return nil, err
 	}
+	defer stop()
 	if _, err := connection.Write(query); err != nil {
 		return nil, err
 	}
@@ -259,11 +274,18 @@ func (upstream *udpUpstream) close() {
 func (upstream *tcpUpstream) exchange(ctx context.Context, query []byte) ([]byte, error) {
 	var lastError error
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		connection, err := upstream.borrow(ctx)
 		if err != nil {
 			return nil, err
 		}
-		response, err := upstream.exchangeOnConnection(connection, query)
+		response, err := upstream.exchangeOnConnection(ctx, connection, query)
+		if contextErr := ctx.Err(); contextErr != nil {
+			_ = connection.Close()
+			return nil, contextErr
+		}
 		if err == nil {
 			upstream.release(connection)
 			return response, nil
@@ -312,12 +334,15 @@ func (upstream *tcpUpstream) borrow(ctx context.Context) (net.Conn, error) {
 }
 
 func (upstream *tcpUpstream) exchangeOnConnection(
+	ctx context.Context,
 	connection net.Conn,
 	query []byte,
 ) ([]byte, error) {
-	if err := connection.SetDeadline(time.Now().Add(upstream.timeout)); err != nil {
+	stop, err := bindExchangeContext(ctx, connection, upstream.timeout)
+	if err != nil {
 		return nil, err
 	}
+	defer stop()
 	frame := make([]byte, 2+len(query))
 	binary.BigEndian.PutUint16(frame[:2], uint16(len(query)))
 	copy(frame[2:], query)
@@ -334,6 +359,34 @@ func (upstream *tcpUpstream) exchangeOnConnection(
 		return nil, err
 	}
 	return response, nil
+}
+
+// Join a running cancellation callback before a connection can return to its
+// pool, so a late callback cannot interrupt the next query on that connection.
+func bindExchangeContext(ctx context.Context, connection net.Conn, timeout time.Duration) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	if ctx.Done() == nil {
+		return func() {}, nil
+	}
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = connection.SetDeadline(time.Now())
+		close(done)
+	})
+	return func() {
+		if !stop() {
+			<-done
+		}
+	}, nil
 }
 
 func writeAll(writer io.Writer, payload []byte) error {
@@ -383,14 +436,104 @@ func (upstream *tcpUpstream) close() {
 }
 
 func (upstream *dohUpstream) exchange(ctx context.Context, query []byte) ([]byte, error) {
-	response, err := upstream.exchangeDoH(ctx, query)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	client, _, closed := upstream.dohSnapshot()
+	if closed {
+		return nil, context.Canceled
+	}
+	timeout := client.Timeout
+	if timeout > 0 {
+		queryCtx, cancelQuery := context.WithTimeout(ctx, timeout)
+		defer cancelQuery()
+		ctx = queryCtx
+	}
+	primaryCtx := ctx
+	cancel := func() {}
+	if upstream.fallback != nil {
+		budget := timeout
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if budget <= 0 || remaining < budget {
+				budget = remaining
+			}
+		}
+		if budget > 0 {
+			// Keep one third of the existing query deadline for encrypted fallback.
+			primaryCtx, cancel = context.WithTimeout(ctx, budget-budget/3)
+		}
+	}
+	response, err := upstream.exchangeDoH(primaryCtx, query)
+	cancel()
 	if err == nil || upstream.fallback == nil {
 		return response, err
 	}
-	return upstream.fallback.exchange(ctx, query)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
+	response, fallbackErr := upstream.fallback.exchange(ctx, query)
+	if fallbackErr != nil {
+		return nil, errors.Join(err, fallbackErr)
+	}
+	return response, nil
 }
 
 func (upstream *dohUpstream) exchangeDoH(ctx context.Context, query []byte) ([]byte, error) {
+	response, err := upstream.exchangeDoHOnce(ctx, query)
+	if err == nil {
+		return response, err
+	}
+	if ctx.Err() != nil || !dohConnectionClosed(err) {
+		return nil, err
+	}
+	// A provider can retire a keep-alive connection between requests. Retry
+	// once within the same deadline; never retry HTTP, DNS or TLS trust errors.
+	return upstream.exchangeDoHOnce(ctx, query)
+}
+
+func dohConnectionClosed(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
+func (upstream *dohUpstream) dohSnapshot() (*http.Client, *http.Transport, bool) {
+	upstream.poolMu.Lock()
+	defer upstream.poolMu.Unlock()
+	return upstream.client, upstream.transport, upstream.closed
+}
+
+func (upstream *dohUpstream) finishDoH(transport *http.Transport, err error) {
+	if transport == nil {
+		return
+	}
+	var networkErr net.Error
+	failed := dohConnectionClosed(err) || errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &networkErr) && networkErr.Timeout())
+	upstream.poolMu.Lock()
+	if failed && !upstream.closed && upstream.transport == transport {
+		// Closing idle connections alone misses a timed-out HTTP/2 stream
+		// whose asynchronous cleanup still marks the channel busy.
+		next := transport.Clone()
+		client := *upstream.client
+		client.Transport = next
+		upstream.transport, upstream.client = next, &client
+	}
+	retired := upstream.closed || upstream.transport != transport
+	upstream.poolMu.Unlock()
+	if retired {
+		// Every finishing request drains its retired generation. Busy requests
+		// remain intact; the last completion closes the remaining idle pool.
+		transport.CloseIdleConnections()
+	}
+}
+
+func (upstream *dohUpstream) exchangeDoHOnce(ctx context.Context, query []byte) (payload []byte, err error) {
+	client, transport, closed := upstream.dohSnapshot()
+	if closed {
+		return nil, context.Canceled
+	}
+	defer func() { upstream.finishDoH(transport, err) }()
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, upstream.url, bytes.NewReader(query),
 	)
@@ -399,7 +542,10 @@ func (upstream *dohUpstream) exchangeDoH(ctx context.Context, query []byte) ([]b
 	}
 	request.Header.Set("Accept", "application/dns-message")
 	request.Header.Set("Content-Type", "application/dns-message")
-	response, err := upstream.client.Do(request)
+	// DNS queries are replayable. Allow Transport to retry a lost reused
+	// connection without transmitting an idempotency header to the resolver.
+	request.Header["Idempotency-Key"] = nil
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -407,21 +553,31 @@ func (upstream *dohUpstream) exchangeDoH(ctx context.Context, query []byte) ([]b
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DoH status %s", response.Status)
 	}
-	if !strings.HasPrefix(response.Header.Get("Content-Type"), "application/dns-message") {
+	contentType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if parseErr != nil || contentType != "application/dns-message" {
 		return nil, errors.New("DoH response has unexpected content type")
 	}
-	payload, err := io.ReadAll(io.LimitReader(response.Body, maxDNSMessage+1))
+	payload, err = io.ReadAll(io.LimitReader(response.Body, maxDNSMessage+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(payload) > maxDNSMessage {
 		return nil, errors.New("DoH response is too large")
 	}
+	if !matchingQuestion(query, payload) {
+		return nil, errors.New("DoH response question mismatch")
+	}
 	return payload, nil
 }
 
 func (upstream *dohUpstream) close() {
-	upstream.transport.CloseIdleConnections()
+	upstream.poolMu.Lock()
+	upstream.closed = true
+	transport := upstream.transport
+	upstream.poolMu.Unlock()
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
 	if upstream.fallback != nil {
 		upstream.fallback.close()
 	}

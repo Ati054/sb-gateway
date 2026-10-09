@@ -2,10 +2,30 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestFileSHA256(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "core")
+	for _, body := range [][]byte{nil, []byte("core"), bytes.Repeat([]byte("bounded hash input"), 100000)} {
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := fileSHA256(path)
+		want := sha256.Sum256(body)
+		if err != nil || got != hex.EncodeToString(want[:]) {
+			t.Fatalf("digest=%q err=%v", got, err)
+		}
+	}
+	if _, err := fileSHA256(path + "-missing"); err == nil {
+		t.Fatal("missing input was accepted")
+	}
+}
 
 func TestEncodeGeoIPWireFormat(t *testing.T) {
 	got, err := encodeGeoIP([]string{"192.0.2.7/24", "2001:db8::1/128"})

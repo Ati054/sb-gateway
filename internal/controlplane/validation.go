@@ -215,7 +215,7 @@ func (result *configValidation) validateSystemSettings(config map[string]any) {
 		result.add("system.management", "type", "Management access settings must be an object.")
 	} else {
 		result.optionalIntegerRange(management, "routeros_panel_port", "system.management", 1024, 65535)
-		if port, ok := jsonInteger(management["routeros_panel_port"]); ok && (port == 9443 || port == 18081) {
+		if port, ok := jsonInteger(management["routeros_panel_port"]); ok && (port == runtimeconfig.ManagedDNSPort || port == 9443 || port == 18081) {
 			result.add("system.management.routeros_panel_port", "reserved", "This port is reserved for an internal gateway service. Choose another panel port.")
 		}
 		sources, sourcesOK := management["allowed_source_cidrs"].([]any)

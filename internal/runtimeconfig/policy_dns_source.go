@@ -150,6 +150,9 @@ func BuildPolicyDNSSource(config map[string]any, available map[string]struct{}) 
 	for _, client := range enabledLocalClientsSpecificFirst(config["local_clients"]) {
 		policy := policies[textValue(client["policy_id"])]
 		identity := PolicyDNSSourceRule{Inbound: localTransparentInbounds, SourceCIDR: stringSlice(client["source_cidrs"])}
+		baseline := identity
+		baseline.Action, baseline.Server = "route", "direct-public-dns"
+		source.Rules = append(source.Rules, baseline)
 		if err := appendEntityDNSRules(&source, client, policy, identity, available, catalog, policyServer, false); err != nil {
 			return PolicyDNSSource{}, err
 		}

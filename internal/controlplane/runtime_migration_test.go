@@ -155,8 +155,9 @@ func TestStartupProbeMigrationReconcilesCommittedRuntime(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server, config, expected := startupProbeMigrationFixture(t, tc.global)
 			envelope, err := server.draftEnvelope(config)
-			if err != nil || envelope["pending_change_count"] != 0 {
-				t.Fatalf("fixture must reproduce pending=0: %v, %v", envelope, err)
+			if err != nil || envelope["pending_config_change_count"] != 0 ||
+				envelope["pending_change_count"] != 1 || envelope["runtime_update_only"] != true {
+				t.Fatalf("unchanged legacy rules must offer a manual runtime update: %v, %v", envelope, err)
 			}
 			makeStartupProbeLegacy(t, server, tc.oldLanes)
 			draft := cloneJSONObject(config)
@@ -183,6 +184,10 @@ func TestStartupProbeMigrationReconcilesCommittedRuntime(t *testing.T) {
 			active, _ := server.repository.metadata()
 			if active["revision"] != beforeActive["revision"] || active["routeros_source"] != "committed-routeros" || active["runtime_revision"] == beforeActive["runtime_revision"] {
 				t.Fatalf("unexpected migration metadata: %v", active)
+			}
+			envelope, err = server.draftEnvelope(config)
+			if err != nil || envelope["runtime_update_only"] != true || envelope["pending_config_change_count"] != 0 {
+				t.Fatalf("startup probe repair must not hide the pending DNS rule update: %v, %v", envelope, err)
 			}
 			if !bytes.Equal(beforeDraft, mustReadFile(t, filepath.Join(server.repository.root, "draft.json"))) ||
 				!bytes.Equal(generation, mustReadFile(t, filepath.Join(server.repository.generations, text(active["revision"])+".json"))) {

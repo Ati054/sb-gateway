@@ -60,6 +60,7 @@ type RouterOSRenderModel struct {
 	RESTPort, SSHPort                         int
 	PanelPort                                 int
 	DNSServers, DNSDoHURL                     string
+	ManagedDNS                                bool
 	WatchdogInterval, WatchdogFailure         int
 	WatchdogRecovery, WatchdogCooldownTicks   int
 	IPv6Mode                                  string
@@ -153,8 +154,8 @@ func BuildRouterOSRenderModel(config map[string]any, nodes []map[string]any) (Ro
 	management := objectValue(system["management"])
 	if management["routeros_panel_port"] != nil {
 		port, err := integerDefault(management["routeros_panel_port"], 0)
-		if err != nil || port < 1024 || port > 65535 || port == 9443 || port == 18081 {
-			return RouterOSRenderModel{}, errors.New("system.management.routeros_panel_port must be an integer from 1024 to 65535, except internal ports 9443 and 18081")
+		if err != nil || port < 1024 || port > 65535 || port == ManagedDNSPort || port == 9443 || port == 18081 {
+			return RouterOSRenderModel{}, errors.New("system.management.routeros_panel_port must be an integer from 1024 to 65535, except internal ports 1053, 9443 and 18081")
 		}
 		model.PanelPort = port
 	}
@@ -271,6 +272,7 @@ func BuildRouterOSRenderModel(config map[string]any, nodes []map[string]any) (Ro
 		return RouterOSRenderModel{}, errors.New("routeros.ssh_port must be between 1 and 65535")
 	}
 	dns := objectValue(config["dns"])
+	model.ManagedDNS = boolDefault(dns["hijack_managed_clients"], true)
 	directResolver := objectValue(dns["direct_resolver"])
 	provider := textDefault(directResolver["provider"], "yandex")
 	if provider == "routeros" {

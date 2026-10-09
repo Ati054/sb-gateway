@@ -216,7 +216,7 @@ func renderRouterOSPublicIngress(model RouterOSRenderModel) []string {
 }
 
 func renderRouterOSCore(model RouterOSRenderModel) []string {
-	return []string{
+	lines := []string{
 		`:local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]`,
 		`:if ([:len $gate] != 1) do={ :error "SB-GATEWAY diversion gate missing or ambiguous" }`,
 		`/ip/firewall/mangle/disable $gate`,
@@ -246,13 +246,16 @@ func renderRouterOSCore(model RouterOSRenderModel) []string {
 		`:local markRouting [/ip/firewall/mangle/find where comment="SB-GATEWAY mark routing"]`,
 		`:if (([:len $endpointBypass] != 1) || ([:len $markConnection] != 1) || ([:len $markRouting] != 1)) do={ :error "SB-GATEWAY diversion rules missing or ambiguous" }`,
 		`/ip/firewall/mangle/unset $gate in-interface-list`,
-		`/ip/firewall/mangle/set $gate chain=prerouting action=jump jump-target="sb-gateway-divert" src-address-list="SB_MANAGED_CLIENTS" dst-address-list="!SB_INTERNAL_NETWORKS" dst-address-type=!local disabled=yes`,
+		`/ip/firewall/mangle/unset $gate dst-address-list`,
+		`/ip/firewall/mangle/unset $gate dst-address-type`,
+		fmt.Sprintf(`/ip/firewall/mangle/set $gate chain=prerouting action=jump jump-target="sb-gateway-divert" src-address-list="SB_MANAGED_CLIENTS" src-address="!%s" disabled=yes`, model.ContainerIP),
 		`/ip/firewall/mangle/set $endpointBypass chain="sb-gateway-divert" action=return dst-address-list="SB_BYPASS_ENDPOINTS" disabled=no`,
 		`/ip/firewall/mangle/set $markConnection chain="sb-gateway-divert" action=mark-connection connection-state=new connection-mark=no-mark new-connection-mark="sb-managed" passthrough=yes disabled=no`,
 		fmt.Sprintf(`/ip/firewall/mangle/set $markRouting chain="sb-gateway-divert" action=mark-routing connection-mark="sb-managed" new-routing-mark="%s" passthrough=no disabled=no`, model.RoutingTable),
 		`/ip/firewall/mangle/move $markConnection destination=$markRouting`,
 		`/ip/firewall/mangle/move $endpointBypass destination=$markConnection`,
 	}
+	return append(lines, renderRouterOSManagedDNS(model)...)
 }
 
 func renderRouterOSFailClosedDrop() []string {
@@ -269,8 +272,7 @@ func renderRouterOSFailClosedDrop() []string {
 
 func renderRouterOSDNS(model RouterOSRenderModel) []string {
 	return []string{
-		fmt.Sprintf(`/ip/dns/set servers="%s" use-doh-server="%s" verify-doh-cert=yes allow-remote-requests=yes`, model.DNSServers, model.DNSDoHURL),
-		`/ip/dns/cache/flush`,
+		fmt.Sprintf(`:if (([:tostr [/ip/dns/get servers]] != [:tostr [:toarray "%s"]]) || ([/ip/dns/get use-doh-server] != "%s") || ([/ip/dns/get verify-doh-cert] != true) || ([/ip/dns/get allow-remote-requests] != true)) do={ /ip/dns/set servers="%s" use-doh-server="%s" verify-doh-cert=yes allow-remote-requests=yes; /ip/dns/cache/flush }`, model.DNSServers, model.DNSDoHURL, model.DNSServers, model.DNSDoHURL),
 	}
 }
 
