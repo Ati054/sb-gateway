@@ -1,6 +1,21 @@
 # Безопасность
 
-Документ соответствует модели безопасности SB Gateway 1.6.21.
+Документ описывает модель безопасности SB Gateway и версии проверенных компонентов.
+
+## Current Build Baseline
+
+Version 1.6.48 pins Go 1.27.2 for both executable roles and release CI,
+golang.org/x/net 0.60.0, and compress 1.18.7 in the shared-core build.
+Go 1.27.1 has newly reported standard-library vulnerabilities and is not
+an acceptable current build baseline. Older audit entries below describe
+their stated artifacts, not the current image. Source and final-binary
+audits must both be repeated; an updated version alone does not prove a
+clean audit. OpenPGP wildcard findings and build-tool npm findings must
+not be suppressed or represented as resolved by unrelated upgrades.
+
+References: [Go 1.27.2](https://go.dev/doc/devel/release#go1.27.2),
+[HTTP/2 advisory](https://pkg.go.dev/vuln/GO-2026-6617),
+[compress advisory](https://pkg.go.dev/vuln/GO-2026-5841).
 
 ## Модель угроз
 

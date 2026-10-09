@@ -9,7 +9,7 @@ The release-hygiene workflow has an independent Go quality job:
 
 Its Go version matches the gateway build toolchain pinned in `Dockerfile`;
 update both pins and the laboratory packaging image together. All three use
-Go 1.27.1; the former gateway Go 1.26.4 image has known standard-library
+Go 1.27.2; earlier Go 1.27.1 and 1.26.4 images have known standard-library
 vulnerabilities that a source scan under a newer host Go cannot detect.
 Ubuntu's C compiler is required only for race
 instrumentation. Production gateway binaries remain `CGO_ENABLED=0`. Analysis

@@ -20,6 +20,7 @@ cp go.mod "$output"
 cp go.sum "$sum"
 go mod edit -modfile="$output" \
  -require=github.com/xtls/xray-core@v0.0.0 \
+ -require=github.com/klauspost/compress@v1.18.7 \
  -replace="github.com/xtls/xray-core=$xray_root" \
  -replace="github.com/xtls/reality=$reality_root"
 go mod tidy -modfile="$output"
