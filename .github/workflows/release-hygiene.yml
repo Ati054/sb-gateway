@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           # Match the gateway build toolchain pinned in Dockerfile.
-          go-version: '1.27.1'
+          go-version: '1.27.2'
       - name: Vet
         run: go vet ./...
       - name: Install pinned analysis tools
@@ -42,7 +42,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.2'
       - uses: actions/setup-node@v4
         with:
           node-version: 22

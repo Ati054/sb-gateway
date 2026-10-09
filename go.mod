@@ -2,11 +2,13 @@ module github.com/sb-gateway/sb-gateway
 
 go 1.26.0
 
+toolchain go1.27.2
+
 require (
 	github.com/go-acme/lego/v5 v5.4.1
 	github.com/miekg/dns v1.1.73
-	golang.org/x/crypto v0.56.0
-	golang.org/x/net v0.58.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.60.0
 )
 
 require (
@@ -24,9 +26,9 @@ require (
 	github.com/yandex-cloud/go-sdk/v2 v2.169.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0
+	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
