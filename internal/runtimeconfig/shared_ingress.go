@@ -137,7 +137,7 @@ func ValidateSharedIngress(config map[string]any) error {
 	// Reserve the configured range even when today's inventory needs fewer lanes.
 	lastHealthPort := 19082 + requestedHealthProbeBatch(config)
 	reserved := func(port int) bool {
-		return port == 8080 || port == 9080 || port == 9443 || port == 18081 || port == RealityCoverPort || (port >= 11001 && port <= 11004) || (port >= 19080 && port <= lastHealthPort)
+		return port == ManagedDNSPort || port == 8080 || port == 9080 || port == 9443 || port == 18081 || port == RealityCoverPort || (port >= 11001 && port <= 11004) || (port >= 19080 && port <= lastHealthPort)
 	}
 	for _, p := range policies {
 		if reserved(p.Port) {
@@ -145,6 +145,9 @@ func ValidateSharedIngress(config map[string]any) error {
 		}
 	}
 	for _, t := range enabledObjects(config["transports"]) {
+		if port, _ := requiredInteger(t["listen_port"]); port == ManagedDNSPort {
+			return fmt.Errorf("port %d is reserved for managed DNS", port)
+		}
 		if RealityBackendPort(textValue(t["kind"])) != 0 {
 			port, _ := requiredInteger(t["listen_port"])
 			if reserved(port) {

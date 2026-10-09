@@ -348,13 +348,17 @@ func subscriptionNodeGroupMatches(group, node map[string]any) bool {
 	if len(protocols) != 0 && !stringInSlice(protocols, strings.ToLower(textValue(node["protocol"]))) {
 		return false
 	}
+	excluded := strings.TrimSpace(textValue(group["name_excludes"]))
+	if len(nameTokens) == 0 && excluded == "" {
+		return true
+	}
 	label := normalizedGroupName(textValue(node["label"]))
 	for _, token := range nameTokens {
 		if !strings.Contains(label, token) {
 			return false
 		}
 	}
-	if excluded := strings.TrimSpace(textValue(group["name_excludes"])); excluded != "" {
+	if excluded != "" {
 		words := strings.FieldsFunc(label, func(r rune) bool {
 			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 		})
@@ -368,8 +372,10 @@ func subscriptionNodeGroupMatches(group, node map[string]any) bool {
 	return true
 }
 
+var groupNameVariationReplacer = strings.NewReplacer("\ufe0e", "", "\ufe0f", "")
+
 func normalizedGroupName(value string) string {
-	return strings.ToLower(strings.TrimSpace(strings.NewReplacer("\ufe0e", "", "\ufe0f", "").Replace(value)))
+	return strings.ToLower(strings.TrimSpace(groupNameVariationReplacer.Replace(value)))
 }
 
 func stringInSlice(values []string, needle string) bool {

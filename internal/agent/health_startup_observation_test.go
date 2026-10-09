@@ -31,6 +31,10 @@ func TestDurableStartupSelectionRespectsCurrentContract(t *testing.T) {
 		{"failed leaf", "best", "best", "de\nnl", "nl", "nl", false, 0, "de"},
 		{"failure threshold", "best", "best", "de\nnl", "nl", "nl", true, 3, "de"},
 		{"single failure", "best", "best", "de\nnl", "nl", "nl", true, 1, "nl"},
+		{"pending URLTest failure", "best", "best", "de\nnl", "nl", "nl", false, 1, "nl"},
+		{"pending priority failure", "priority", "priority", "de\nnl", "nl", "nl", false, 1, "nl"},
+		{"confirmed URLTest failure", "best", "best", "de\nnl", "nl", "nl", false, 3, "de"},
+		{"confirmed priority failure", "priority", "priority", "de\nnl", "nl", "nl", false, 3, "de"},
 		{"block", "best", "best", "de\nnl", "block", "block", true, 0, "de"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

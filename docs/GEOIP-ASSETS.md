@@ -70,3 +70,8 @@ of orphaned assets while preserving active/LKG/Apply/rollback/leased files.
 These regression contracts do not guarantee whole-container memory usage or
 physical-router recovery time. Environment-specific acceptance receipts and
 hardware runners are not included in the public source distribution.
+
+The isolated `tools/geoipbench` managed mode exercises real-core publication,
+activation, corruption rejection, rollback and obsolete-asset cleanup while
+checking established TCP continuity. Executable identity hashing is streamed;
+the measurement tool does not allocate a second full executable buffer.

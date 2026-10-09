@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/applyguard"
 	"github.com/sb-gateway/sb-gateway/internal/runtimeproof"
 )
 
@@ -164,6 +165,7 @@ func Run(ctx context.Context, opts Options) error {
 	failures, successes := 0, 0
 	leasePublished := false
 	var activeFailureClass failureClass
+	var coreRecovery coreRecoveryWindow
 	for {
 		now := time.Now()
 		if err := r.pruneRestarts(now); err != nil {
@@ -220,6 +222,17 @@ func Run(ctx context.Context, opts Options) error {
 		if !regularNonEmpty(opts.XrayConfig) {
 			reasons = append(reasons, "core_config")
 		}
+		generation := runtimeproof.XrayGeneration(opts.XrayReadyFile, opts.XrayConfig, "/proc")
+		if generation == "" {
+			reasons = append(reasons, "core_startup")
+		}
+		if generation != coreRecovery.generation {
+			// A new core cannot reuse an earlier generation's deep readiness.
+			r.clearLease()
+			leasePublished = false
+			r.deepHealthy = false
+			r.nextDeepProbe = time.Time{}
+		}
 		now = time.Now()
 		if !r.deepHealthy || r.nextDeepProbe.IsZero() || !now.Before(r.nextDeepProbe) {
 			r.runDeepProbe(ctx, current, now)
@@ -234,6 +247,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 
 		if len(reasons) == 0 {
+			coreRecovery.verified(generation)
 			failures = 0
 			activeFailureClass = ""
 			successes++
@@ -248,6 +262,12 @@ func Run(ctx context.Context, opts Options) error {
 			} else {
 				r.postState(ctx, current, "recovering", true, 0, "readiness_hysteresis")
 			}
+		} else if coreRecovery.deferFailures(time.Now(), current.startupGrace, generation, reasons) {
+			r.clearLease()
+			leasePublished = false
+			failures, successes = 0, 0
+			activeFailureClass = ""
+			r.postState(ctx, current, "recovering", false, 0, "core_restart_pending")
 		} else {
 			successes = 0
 			activeFailureClass, failures = nextFailureStreak(activeFailureClass, failures, reasons)
@@ -771,30 +791,7 @@ func hasTransparentRules(output, port string) bool {
 }
 
 func (r *runner) applyActive(now time.Time) bool {
-	data, err := os.ReadFile(r.opts.ApplyGuardFile)
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 2 || len(fields) > 3 {
-		_ = os.Remove(r.opts.ApplyGuardFile)
-		return false
-	}
-	pid64, errPID := strconv.ParseInt(fields[0], 10, 32)
-	started, errStarted := strconv.ParseInt(fields[1], 10, 64)
-	refreshed := started
-	var errRefreshed error
-	if len(fields) == 3 {
-		refreshed, errRefreshed = strconv.ParseInt(fields[2], 10, 64)
-	}
-	if errPID != nil || errStarted != nil || errRefreshed != nil {
-		_ = os.Remove(r.opts.ApplyGuardFile)
-		return false
-	}
-	totalAge := now.Unix() - started
-	heartbeatAge := now.Unix() - refreshed
-	pid := int(pid64)
-	if totalAge >= 0 && totalAge <= 1800 && heartbeatAge >= 0 && heartbeatAge <= 90 && processExists(pid) {
+	if applyguard.Active(r.opts.ApplyGuardFile, now) {
 		return true
 	}
 	_ = os.Remove(r.opts.ApplyGuardFile)

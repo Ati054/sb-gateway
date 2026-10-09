@@ -1,0 +1,69 @@
+diff --git a/main/main.go b/main/main.go
+--- a/main/main.go
++++ b/main/main.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"flag"
+@@ -10,7 +10,9 @@ import (
+ 	_ "github.com/xtls/xray-core/main/distro/all"
+ )
+ 
+-func main() {
++// Main runs the upstream CLI in its own process. Its flags, signals and exit
++// handling must not be shared with another command running concurrently.
++func Main() {
+ 	os.Args = getArgsV4Compatible()
+ 
+ 	base.RootCommand.Long = "Xray is a platform for building proxies."
+diff --git a/main/run.go b/main/run.go
+--- a/main/run.go
++++ b/main/run.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"fmt"
+diff --git a/main/version.go b/main/version.go
+--- a/main/version.go
++++ b/main/version.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"fmt"
+diff --git a/main/main_test.go b/main/main_test.go
+--- a/main/main_test.go
++++ b/main/main_test.go
+@@ -1,7 +1,7 @@
+ //go:build coveragemain
+ // +build coveragemain
+ 
+-package main
++package maincmd
+ 
+ import (
+ 	"testing"
+@@ -9,5 +9,5 @@ import (
+ )
+ 
+ func TestRunMainForCoverage(t *testing.T) {
+-	main()
++	Main()
+ }
+diff --git a/cmd/xray/main.go b/cmd/xray/main.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/xray/main.go
+@@ -0,0 +1,7 @@
++package main
++
++import maincmd "github.com/xtls/xray-core/main"
++
++func main() {
++	maincmd.Main()
++}

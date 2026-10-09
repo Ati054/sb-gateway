@@ -174,7 +174,10 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 				saved.Selected != "block" && contains(candidates, saved.Selected) && contains(balancer.Members, saved.Selected) &&
 				contract.Nodes[saved.Selected].Protocol != "xray-reverse" &&
 				item.AvailabilityFailures[saved.Selected] < healthFailureConfirmations {
-				if available, known := item.AvailabilityOK[saved.Selected]; !known || available {
+				// An independent bad probe is pending until the failure streak reaches
+				// the confirmed-outage sentinel. Restart must not turn that pending
+				// evidence into a failover or promote an arbitrary inventory default.
+				if available, known := item.AvailabilityOK[saved.Selected]; !known || available || item.AvailabilityFailures[saved.Selected] > 0 {
 					selected = saved.Selected
 				}
 			}

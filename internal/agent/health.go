@@ -274,6 +274,7 @@ func runHealth(ctx context.Context, opts Options) error {
 	backgroundOptions.ProbeURL = envOr("SB_XRAY_BACKGROUND_PROBE_URL", "http://127.0.0.1:19083")
 	background := newXraySelectorRuntime(backgroundOptions)
 	background.control = control
+	background.poolCache = primary.poolCache
 	background.probeSelector = "outbound-health-background"
 	controller.runtime = &responsiveSelectorRuntime{
 		selectorRuntime: primary, background: background, backgrounds: []*xraySelectorRuntime{background}, ctx: ctx,
@@ -282,10 +283,12 @@ func runHealth(ctx context.Context, opts Options) error {
 			laneOptions.ProbeURL = fmt.Sprintf("http://127.0.0.1:%d", 19082+index)
 			lane := newXraySelectorRuntime(laneOptions)
 			lane.control = control
+			lane.poolCache = primary.poolCache
 			lane.probeSelector = fmt.Sprintf("outbound-health-background-%d", index)
 			return lane
 		},
-		generationPaths: []string{opts.HealthPoolFile, opts.XrayReadyFile},
+		generationPaths: []string{opts.HealthPoolFile, opts.XrayReadyFile, opts.PolicyDNSFile, opts.ApplyGuardFile},
+		applyGuardFile:  opts.ApplyGuardFile,
 		check:           func() error { return controller.checkDuringProbe(time.Now(), primary.pool) },
 		signals:         signals,
 		acceptSignal: func(signal xrayFailureSignal) bool {
@@ -297,6 +300,12 @@ func runHealth(ctx context.Context, opts Options) error {
 	}
 	for {
 		if err := controller.Tick(time.Now()); err != nil {
+			if errors.Is(err, errHealthPlannedApply) {
+				if !wait(ctx, 500*time.Millisecond) {
+					return nil
+				}
+				continue
+			}
 			if errors.Is(err, errHealthYield) {
 				continue
 			}
@@ -304,7 +313,7 @@ func runHealth(ctx context.Context, opts Options) error {
 		} else if err := controller.publishHotRuntimeReady(); err != nil {
 			log.Printf("agent: publish hot runtime readiness: %v", err)
 		}
-		if !waitForHealthWake(ctx, controller.nextInterval(), []string{opts.HealthPoolFile, opts.XrayReadyFile}, 500*time.Millisecond, signals,
+		if !waitForHealthWake(ctx, controller.nextInterval(), []string{opts.HealthPoolFile, opts.XrayReadyFile, opts.PolicyDNSFile, opts.ApplyGuardFile}, 500*time.Millisecond, signals,
 			func(signal xrayFailureSignal) bool {
 				return controller.acceptXrayFailureSignal(time.Now(), signal, primary)
 			}) {
@@ -484,9 +493,19 @@ func (controller *healthController) Tick(now time.Time) error {
 		controller.stateLoaded = true
 	}
 	if runtimeReset {
-		for _, item := range controller.state {
+		for policyID, item := range controller.state {
 			if item != nil {
 				clearOptimizationCandidate(item)
+				failures := item.AvailabilityFailures[item.Selected]
+				if failures > 0 && failures < healthFailureConfirmations {
+					// Independent confirmation must not straddle a planned core or
+					// contract replacement. Keep already confirmed outages intact.
+					controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-suppressed", Policy: policyID,
+						Node: item.Selected, Reason: "runtime-changed", Count: failures})
+					item.AvailabilityFailures[item.Selected] = 0
+					delete(item.FailureClass, item.Selected)
+					delete(item.AvailabilityOK, item.Selected)
+				}
 			}
 		}
 	}

@@ -58,12 +58,18 @@ test("ARM64 image builds pinned Xray and static UI", async () => {
   assert.match(dockerfile, /go test \.\/app\/router -run '\^TestSB'/);
   assert.match(dockerfile, /server can use the current validated core/);
   assert.match(dockerfile, /xray run -test -config \/tmp\/xray-build-validation\.json/);
+  assert.match(dockerfile, /FROM --platform=\$BUILDPLATFORM alpine:3\.23 AS multicall-check/);
+  assert.match(dockerfile, /apk add --no-cache qemu-aarch64/);
+  assert.match(dockerfile, /arm \/out\/xray run -test -config/);
+  assert.doesNotMatch(dockerfile.slice(dockerfile.indexOf(" AS runtime")), /qemu-aarch64/);
   assert.doesNotMatch(dockerfile, /xray\.smoke\.json/);
   assert.match(dockerfile, /npm run build:static/);
   assert.doesNotMatch(dockerfile, /COPY tests |\.test\.mjs|_test\.go/);
   assert.match(dockerfile, /npm run lint/);
   assert.match(dockerfile, /COPY rulesets \.\/rulesets/);
-  assert.match(dockerfile, /SB_RULESET_DIR=\/opt\/sb-gateway\/rulesets-seed/);
+  assert.match(dockerfile, /SB_RULESET_DIR=\/out\/rulesets-seed go run/);
+  assert.match(dockerfile, /COPY --from=sb-gateway-build \/out\/rulesets-seed \/opt\/sb-gateway\/rulesets-seed/);
+  assert.doesNotMatch(dockerfile.slice(dockerfile.indexOf(" AS runtime")), /rulesets --prepare/);
   assert.match(
     dockerfile,
     /HEALTHCHECK --interval=10s --timeout=10s --start-period=60s --retries=3/,
@@ -92,12 +98,26 @@ test("Policy DNS ships as a native Go component", async () => {
   assert.match(imageTool, /return \[\]string\{"\.\/cmd\/\.\.\.", "\.\/internal\/\.\.\.", "\.\/tests\/tools"\}/);
   assert.match(
     dockerfile,
-    /COPY --from=sb-gateway-build \/out\/sb-gateway \/usr\/local\/bin\/sb-gateway/,
+    /COPY --from=multicall-check \/out\/sb-gateway \/usr\/local\/bin\/sb-gateway/,
   );
   assert.match(appliance, /Name: "dns"/);
   assert.match(appliance, /policydns\.Serve/);
   assert.doesNotMatch(dockerfile, /run-policy-dns\.sh/);
   assert.match(makefile, /go-test:/);
+});
+
+test("shared executable retains separate gateway and full Xray CLI identities", async () => {
+  const [dockerfile, patch, dispatch] = await Promise.all([
+    text("Dockerfile"), text("patches/xray-library-main.patch"),
+    text("cmd/sb-gateway/xray_dispatch.go"),
+  ]);
+  assert.match(dockerfile, /ln -s sb-gateway \/usr\/local\/bin\/xray/);
+  assert.doesNotMatch(dockerfile, /COPY[^\n]*\/out\/xray \/usr\/local\/bin\/xray/);
+  assert.match(dockerfile, /-tags=xray_multicall/);
+  assert.match(dockerfile, /\/out\/xray help api/);
+  assert.match(patch, /\+func Main\(\)/);
+  assert.match(dispatch, /filepath\.Base\(executable\)/);
+  assert.match(dispatch, /name == "xray"/);
 });
 
 test("Xray image applies and exercises graceful outbound transport retirement", async () => {

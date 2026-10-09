@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -375,6 +376,15 @@ func collectPolicyDNSIdentities(rules []PolicyDNSSourceRule) []policyDNSIdentity
 		result = append(result, identity)
 	}
 	sort.Slice(result, func(i, j int) bool {
+		if (len(result[i].SourceCIDR) != 0) != (len(result[j].SourceCIDR) != 0) {
+			return len(result[i].SourceCIDR) != 0
+		}
+		if len(result[i].SourceCIDR) != 0 && len(result[j].SourceCIDR) != 0 {
+			left, right := policyDNSPrefixSpecificity(result[i].SourceCIDR), policyDNSPrefixSpecificity(result[j].SourceCIDR)
+			if left != right {
+				return left > right
+			}
+		}
 		if result[i].size() != result[j].size() {
 			return result[i].size() > result[j].size()
 		}
@@ -386,6 +396,21 @@ func collectPolicyDNSIdentities(rules []PolicyDNSSourceRule) []policyDNSIdentity
 		return bytes.Compare(left, right) < 0
 	})
 	return append(result, policyDNSIdentity{})
+}
+
+// A source list matches any prefix, so its broadest prefix determines whether
+// it may shadow a more specific client, independently of the list's length.
+func policyDNSPrefixSpecificity(cidrs []string) int {
+	bits := 129
+	for _, cidr := range cidrs {
+		if prefix, err := netip.ParsePrefix(cidr); err == nil && prefix.Bits() < bits {
+			bits = prefix.Bits()
+		}
+	}
+	if bits == 129 {
+		return -1
+	}
+	return bits
 }
 
 func ruleIdentity(rule PolicyDNSSourceRule) policyDNSIdentity {

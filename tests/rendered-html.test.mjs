@@ -780,11 +780,13 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(css, /\.routing-master-toggle \.toggle-control \{\s*display: block;/);
   assert.match(page, /WAN DNS \(локальные запросы\)/);
   assert.match(page, /VPN DNS \(запросы через туннель\)/);
-  assert.ok(
-    page.indexOf('className="routing-save-bar"') >
-      page.indexOf('className="card settings-card dns-path-settings"'),
-    "кнопка сохранения маршрутизации должна находиться после последнего сохраняемого блока",
-  );
+  assert.doesNotMatch(page, /className="routing-save-bar"/);
+  assert.match(page, /onChangeCapture=\{\(\) => autosaveRef\.current\?\.update\(\)\}/);
+  assert.match(page, /async function prepareApply\(\)[\s\S]*await routingAutosave\.current\?\.flush\(\);[\s\S]*setApplyMode\("apply"\)/);
+  assert.match(page, /navigateToScreen = useCallback\(async[\s\S]*await routingAutosave\.current\?\.flush\(\)/);
+  assert.match(page, /if \(request !== navigationRequest\.current\) return;/);
+  assert.match(page, /await beforeMutation\(\);\s*await createCollectionItem\("reverse-vless-exits"/);
+  assert.match(page, /await beforeMutation\(\);\s*await deleteCollectionItem\("reverse-vless-exits"/);
   assert.doesNotMatch(page, /Контейнер контролирует MikroTik/);
   assert.doesNotMatch(page, /Сохранять выбранный узел/);
   assert.doesNotMatch(page, /Первый доступный с резервом/);

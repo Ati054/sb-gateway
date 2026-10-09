@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestRenderRouterOSDNSOnlyChangesLiveSettingsWhenNeeded(t *testing.T) {
+	model := RouterOSRenderModel{DNSServers: "1.1.1.1,1.0.0.1", DNSDoHURL: "https://cloudflare-dns.com/dns-query"}
+	lines := renderRouterOSDNS(model)
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], ":if (") || !strings.HasSuffix(lines[0], "/ip/dns/cache/flush }") {
+		t.Fatalf("DNS mutation is not guarded: %q", lines)
+	}
+	for _, field := range []string{"servers", "use-doh-server", "verify-doh-cert", "allow-remote-requests"} {
+		if !strings.Contains(lines[0], "/ip/dns/get "+field) {
+			t.Fatalf("missing live comparison for %s", field)
+		}
+	}
+	if !strings.Contains(lines[0], `[:tostr [:toarray "1.1.1.1,1.0.0.1"]]`) {
+		t.Fatal("server array is not normalized for RouterOS comparison")
+	}
+}
+
 func TestRenderRouterOSTrafficCandidateConnectsManagedTrafficToContainerAndWireGuard(t *testing.T) {
 	config := routerOSModelConfig()
 	first, err := RenderRouterOSTrafficCandidate(config, []map[string]any{{"server": "203.0.113.7"}})
