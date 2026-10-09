@@ -53,7 +53,7 @@ test("ARM64 image builds pinned Xray and static UI", async () => {
   const dockerfile = await text("Dockerfile");
   assert.match(dockerfile, /ARG XRAY_VERSION=26\.9\.30/);
   assert.match(dockerfile, /b26a91de4f3294e26a0ad0a970b81a386a41f789/);
-  assert.match(dockerfile, /XRAY_GO_IMAGE=golang:1\.27\.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125/);
+  assert.match(dockerfile, /XRAY_GO_IMAGE=golang:1\.27\.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673/);
   assert.match(dockerfile, /FROM --platform=\$BUILDPLATFORM \$\{XRAY_GO_IMAGE\} AS xray-build/);
   assert.match(dockerfile, /go test \.\/app\/router -run '\^TestSB'/);
   assert.match(dockerfile, /server can use the current validated core/);
