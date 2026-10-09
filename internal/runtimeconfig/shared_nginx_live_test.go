@@ -20,8 +20,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // Run in an isolated Linux container (ports 443/9443/11001/16443-16448).
@@ -204,13 +202,15 @@ func TestSharedIngressLiveNginx(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("missing PROXY header")
 	}
-	h2Transport := &http2.Transport{
-		TLSClientConfig: &tls.Config{ServerName: "reality.example.test", RootCAs: roots},
-		DialTLSContext: func(ctx context.Context, network, _ string, cfg *tls.Config) (net.Conn, error) {
+	h2Transport := &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig:   &tls.Config{ServerName: "reality.example.test", RootCAs: roots},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			dialer := &net.Dialer{Timeout: 3 * time.Second}
-			return tls.DialWithDialer(dialer, network, "127.0.0.1:16448", cfg)
+			return dialer.DialContext(ctx, network, "127.0.0.1:16448")
 		},
 	}
+	defer h2Transport.CloseIdleConnections()
 	h2Client := &http.Client{Transport: h2Transport, Timeout: 3 * time.Second}
 	h2Response, err := h2Client.Get("https://reality.example.test/")
 	if err != nil {
