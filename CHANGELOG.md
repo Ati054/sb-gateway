@@ -2,6 +2,8 @@
 
 ## 1.6.48
 
+- Go 1.27.2, golang.org/x/net 0.60.0 and shared-core compress 1.18.7 security updates.
+
 - Apply restores an eligible saved node instead of treating an unconfirmed probe error as a confirmed outage. Health evidence cannot cross core, pool or DNS generations, and planned runtime restarts pause probes only while a bounded live guard is valid.
 - Gateway and patched Xray share one executable while retaining independent processes and recovery. Health workers share immutable catalogs; reverse status uses the existing local API connection.
 - Encrypted DNS reconnects within bounded deadlines and cancels work before restart. Unchanged RouterOS DNS settings retain their cache and connections.
