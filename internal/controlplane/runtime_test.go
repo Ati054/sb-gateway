@@ -420,14 +420,14 @@ func TestHotRuntimeMarkerRejectsEarlierPublicationOfSamePoolContent(t *testing.T
 }
 
 func TestNativeRuntimePreservesConfiguredSubscriptionRelaySource(t *testing.T) {
-	t.Setenv("SB_GATEWAY_SUBSCRIPTION_RELAY_SOURCE", "172.30.78.1/32")
+	t.Setenv("SB_GATEWAY_SUBSCRIPTION_RELAY_SOURCE", "192.0.2.1/32")
 	options := RuntimeOptionsFromEnvironment()
-	if options.SubscriptionRelaySource != "172.30.78.1/32" {
+	if options.SubscriptionRelaySource != "192.0.2.1/32" {
 		t.Fatalf("subscription relay source = %q", options.SubscriptionRelaySource)
 	}
 	runtime := &nativeRuntime{options: options}
 	render := runtime.nginxRenderOptions("nginx-template")
-	if render.Template != "nginx-template" || render.SubscriptionRelaySource != "172.30.78.1/32" {
+	if render.Template != "nginx-template" || render.SubscriptionRelaySource != "192.0.2.1/32" {
 		t.Fatalf("nginx render options = %#v", render)
 	}
 }

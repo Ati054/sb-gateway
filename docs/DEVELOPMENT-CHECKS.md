@@ -38,6 +38,8 @@ For a binary audit, extract the gateway, ACME worker and Xray executables from
 the exact candidate image without starting it. Record their hashes and embedded
 build metadata, then run `govulncheck -mode=binary` on each executable. Private
 hardware runners and environment-specific receipts are not published.
+Public network fixtures use documentation or benchmark address spaces rather
+than identifying a deployment.
 References: [Staticcheck](https://staticcheck.dev/docs/getting-started/) and
 [Go vulnerability management](https://go.dev/doc/security/vuln/).
 
