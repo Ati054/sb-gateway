@@ -33,8 +33,8 @@ func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
 	if strings.Contains(source, `connection-mark=no-mark`) {
 		t.Fatal("unmarked conntrack entries have an empty mark, not a literal no-mark value")
 	}
-	if cleanup < strings.Index(source, `:if ($healthy = true)`) || cleanup > strings.Index(source, `/ip/firewall/mangle/enable $gate`) {
-		t.Fatal("DNS conntrack cleanup must follow fresh readiness and precede gate admission")
+	if cleanup < strings.Index(source, `/ip/firewall/mangle/enable $gate`) {
+		t.Fatal("DNS conntrack cleanup must follow gate admission so concurrent queries cannot recreate the outage path")
 	}
 	for _, fragment := range []string{
 		`:if ([:len $dnsNat] != 1) do={ :return false }`,
