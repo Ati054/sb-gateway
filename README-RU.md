@@ -346,6 +346,7 @@ maintainer bundle файл `.sha256` в форму обновления не з�
 - [Визуальная система интерфейса](DESIGN.md)
 - [Архитектура и порядок маршрутизации](docs/ARCHITECTURE.md)
 - [Все экраны и рабочие процессы Web UI](docs/WEB-UI.md)
+- [Карточки облаков умного дома: WAN и VLESS](docs/SMART-HOME-CARDS.md)
 - [Расширенная эксплуатация и восстановление](docs/OPERATIONS.md)
 - [Интеграция RouterOS](docs/ROUTEROS.md)
 - [CDN-развёртывания и Cloudflare](docs/CLOUDFLARE.md)

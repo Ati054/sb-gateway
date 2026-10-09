@@ -449,13 +449,46 @@ func (server *Server) draftEnvelope(config map[string]any) (map[string]any, erro
 		pending = 1
 	}
 	validation := server.validationFor(config, revision).payload()
+	metadata, err := server.repository.metadata()
+	if err != nil {
+		return nil, err
+	}
+	runtimeUpdate := managedDNSRulesNeedUpdate(active, metadata)
+	configurationPending := pending
+	if runtimeUpdate {
+		pending = 1
+	}
 	return map[string]any{
 		"config": redactValue(config, "", false), "revision": revision, "validation": validation,
-		"pending_change_count": pending, "pending_config_change_count": pending,
-		"pending_config_path_count": pending, "pending_config_changes": []any{},
-		"runtime_update_required": false, "runtime_update_only": false,
+		"pending_change_count": pending, "pending_config_change_count": configurationPending,
+		"pending_config_path_count": configurationPending, "pending_config_changes": []any{},
+		"runtime_update_required": runtimeUpdate, "runtime_update_only": runtimeUpdate && configurationPending == 0,
 		"has_active_configuration": active != "",
 	}, nil
+}
+
+// Check the committed traffic script, not a newly rendered copy: an image
+// upgrade does not itself apply new RouterOS rules to an unchanged draft.
+func managedDNSRulesNeedUpdate(active string, metadata map[string]any) bool {
+	source, _ := metadata["routeros_source"].(string)
+	if active == "" || source == "" {
+		return false
+	}
+	if strings.Contains(source, "connection-mark=no-mark and dst-address") {
+		return true
+	}
+	if strings.Contains(source, ":local clearRecoveredDNS do={") && !strings.Contains(source, "find where dst-port=53") {
+		return true
+	}
+	for _, comment := range []string{
+		"SB-GATEWAY managed DNS mark UDP", "SB-GATEWAY managed DNS mark TCP",
+		"SB-GATEWAY managed DNS UDP", "SB-GATEWAY managed DNS TCP",
+	} {
+		if !strings.Contains(source, `comment="`+comment+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func (server *Server) checkDraft(response http.ResponseWriter, request *http.Request) {
@@ -827,6 +860,11 @@ func (server *Server) overviewPayload(config map[string]any) (map[string]any, er
 	if activeRevision != draftRevision {
 		pending = 1
 	}
+	configurationPending := pending
+	runtimeUpdate := managedDNSRulesNeedUpdate(activeRevision, metadata)
+	if runtimeUpdate {
+		pending = 1
+	}
 	routerOS := cloneJSONValue(objectAt(config, "routeros")).(map[string]any)
 	routerOS["last_tested_baseline"] = "7.21.5"
 	routerOS["summary_source"] = "import"
@@ -850,9 +888,9 @@ func (server *Server) overviewPayload(config map[string]any) (map[string]any, er
 			"active_revision": nullableString(activeRevision), "last_apply": metadata,
 		},
 		"counts": counts, "active_revision": nullableString(activeRevision), "draft_revision": draftRevision,
-		"pending_change_count": pending, "pending_config_change_count": pending,
-		"pending_config_path_count": pending, "pending_config_changes": []any{},
-		"runtime_update_required": false, "runtime_update_only": false,
+		"pending_change_count": pending, "pending_config_change_count": configurationPending,
+		"pending_config_path_count": configurationPending, "pending_config_changes": []any{},
+		"runtime_update_required": runtimeUpdate, "runtime_update_only": runtimeUpdate && configurationPending == 0,
 		"routeros": redactValue(routerOS, "", false), "build": runtimeBuildInfo(),
 		"connection_address": server.connectionAddress(config),
 		"outage_policy":      outagePolicy(config), "rule_order": compiledOrder,

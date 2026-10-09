@@ -38,6 +38,7 @@ func controlRPCFixture(t *testing.T, handler func(context.Context, string, []byt
 			"/xray.app.router.command.RoutingService/OverrideBalancerTarget": {"OverrideBalancerTargetRequest", "OverrideBalancerTargetResponse"},
 			"/xray.app.proxyman.command.HandlerService/ListOutbounds":        {"ListOutboundsRequest", "ListOutboundsResponse"},
 			"/xray.app.proxyman.command.HandlerService/RemoveOutbound":       {"RemoveOutboundRequest", "RemoveOutboundResponse"},
+			"/xray.app.stats.command.StatsService/GetStatsOnline":            {"GetStatsRequest", "GetStatsResponse"},
 		}
 		name, exists := names[method]
 		if !exists {
@@ -63,6 +64,43 @@ func controlRPCFixture(t *testing.T, handler func(context.Context, string, []byt
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { client.close(); server.Stop(); _ = listener.Close() })
 	return client
+}
+
+func TestXrayControlRPCOnlineUsesSharedConnection(t *testing.T) {
+	name := "user>>>reverse-fixture>>>online"
+	var mu sync.Mutex
+	actual, count := name, uint64(1)
+	client := controlRPCFixture(t, func(_ context.Context, method string, body []byte) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if method != "/xray.app.stats.command.StatsService/GetStatsOnline" || !bytes.Equal(body, controlWireField(1, []byte(name))) {
+			return nil, errors.New("incorrect online-statistic request")
+		}
+		stat := controlWireField(1, []byte(actual))
+		stat = protowire.AppendVarint(protowire.AppendTag(stat, 2, protowire.VarintType), count)
+		return controlWireField(1, stat), nil
+	})
+	runtime := newXraySelectorRuntime(Options{})
+	runtime.control = client
+	runtime.command = func(context.Context, time.Duration, string, ...string) ([]byte, error) {
+		t.Error("reverse-online started an API subprocess")
+		return nil, errors.New("unexpected subprocess")
+	}
+	if !runtime.reverseOnline("reverse-fixture") {
+		t.Fatal("online reverse peer not recognized")
+	}
+	mu.Lock()
+	count = 0
+	mu.Unlock()
+	if runtime.reverseOnline("reverse-fixture") {
+		t.Fatal("zero online count accepted")
+	}
+	mu.Lock()
+	count, actual = 1, "user>>>other>>>online"
+	mu.Unlock()
+	if runtime.reverseOnline("reverse-fixture") {
+		t.Fatal("wrong statistic accepted")
+	}
 }
 
 func TestXrayControlRPCWireContractAndReadback(t *testing.T) {

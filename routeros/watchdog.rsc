@@ -97,6 +97,57 @@
     :log error "SB-GATEWAY: diversion gate missing or ambiguous; all exact project gates forced fail-open"
   } else={
   :local gate $exactGates
+  # NAT is selected only on the first packet. Expire just managed-client DNS
+  # flows to local router addresses when recovering from direct RouterOS DNS;
+  # otherwise a repeatedly reused UDP tuple can retain the outage path.
+  :local clearRecoveredDNS do={
+    :local dnsNat [/ip/firewall/nat/find where comment="SB-GATEWAY managed DNS UDP" and disabled=no]
+    :if ([:len $dnsNat] != 1) do={ :return false }
+    :local containerIP [/ip/firewall/nat/get $dnsNat to-addresses]
+    # Conntrack exposes an absent mark as empty, not the rule keyword no-mark.
+    :local dnsFlows [/ip/firewall/connection/find where dst-address~":53\$"]
+    # Newer RouterOS exposes endpoint ports separately; support both forms.
+    :do { :set dnsFlows ($dnsFlows, [/ip/firewall/connection/find where dst-port=53]) } on-error={}
+    :foreach flow in=$dnsFlows do={
+      :do {
+      :local connectionMark [/ip/firewall/connection/get $flow connection-mark]
+      :if ([:len [:tostr $connectionMark]] = 0) do={
+      :local protocol [/ip/firewall/connection/get $flow protocol]
+      :if (($protocol = "udp") || ($protocol = "tcp")) do={
+        :local source [:tostr [/ip/firewall/connection/get $flow src-address]]
+        :local destinationIP [:tostr [/ip/firewall/connection/get $flow dst-address]]
+        :local sourceColon [:find $source ":"]
+        :local destinationColon [:find $destinationIP ":"]
+        :if ([:typeof $sourceColon] = "num") do={ :set source [:pick $source 0 $sourceColon] }
+        :if ([:typeof $destinationColon] = "num") do={ :set destinationIP [:pick $destinationIP 0 $destinationColon] }
+        :local sourceIP [:toip $source]
+        :local localDestination false
+        :foreach address in=[/ip/address/find] do={
+          :local prefix [/ip/address/get $address address]
+          :if ([:pick $prefix 0 [:find $prefix "/"]] = $destinationIP) do={ :set localDestination true }
+        }
+        :if (($localDestination = true) && ([:tostr $sourceIP] != [:tostr $containerIP])) do={
+          :local managed false
+          :foreach entry in=[/ip/firewall/address-list/find where list="SB_MANAGED_CLIENTS"] do={
+            :local prefix [:tostr [/ip/firewall/address-list/get $entry address]]
+            :local slash [:find $prefix "/"]
+            :local bits 32
+            :local network $prefix
+            :if ([:typeof $slash] != "nil") do={ :set network [:pick $prefix 0 $slash]; :set bits [:tonum [:pick $prefix ($slash + 1) [:len $prefix]]] }
+            :local networkIP [:toip $network]
+            :if (([:typeof $networkIP] = "ip") && ([:typeof $sourceIP] = "ip") && ([:typeof $bits] = "num") && ($bits >= 0) && ($bits <= 32)) do={
+              :if ($bits = 0) do={ :set managed true } else={
+                :if (($sourceIP >> (32 - $bits)) = ($networkIP >> (32 - $bits))) do={ :set managed true }
+              }
+            }
+          }
+          :if ($managed = true) do={ /ip/firewall/connection/remove $flow }
+        }
+      }
+      }
+      } on-error={}
+    }
+  }
   :if ($stateMissing = true) do={
     /ip/firewall/mangle/disable $gate
     /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
@@ -125,6 +176,7 @@
     # boot/update start, admit it on the first successful poll. Later recovery
     # from a live outage keeps the configured hysteresis.
     :if (($gateDisabled = true) && (($sbStartupSafety = true) || ($sbFailOpen = false) || (($sbHealthSuccesses >= $"SB_HEALTH_RECOVERY_THRESHOLD") && ($sbRecoveryTicks >= $"SB_HEALTH_COOLDOWN_TICKS")))) do={
+      $clearRecoveredDNS
       /ip/firewall/mangle/enable $gate
       :set sbFailOpen false
       :set sbStartupSafety false

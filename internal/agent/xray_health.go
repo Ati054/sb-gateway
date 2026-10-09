@@ -29,6 +29,7 @@ type xraySelectorRuntime struct {
 	opts              Options
 	command           xrayCommandRunner
 	pool              healthPool
+	poolCache         *healthPoolCache
 	poolSignature     string
 	poolFileSignature string
 	poolMTimeUnixNano int64
@@ -93,6 +94,7 @@ func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
 	return &xraySelectorRuntime{
 		opts:            opts,
 		command:         runXrayCommand,
+		poolCache:       &healthPoolCache{},
 		loadedDynamic:   make(map[string]bool),
 		verifiedDynamic: make(map[string]time.Time),
 		activeByPolicy:  make(map[string]string),
@@ -105,22 +107,14 @@ func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
 }
 
 func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
-	info, err := os.Stat(runtime.opts.HealthPoolFile)
+	if runtime.poolCache == nil {
+		runtime.poolCache = &healthPoolCache{}
+	}
+	snapshot, err := runtime.poolCache.load(runtime.opts.HealthPoolFile)
 	if err != nil {
 		return healthPool{}, false, err
 	}
-	fileSignature := fmt.Sprintf("%d|%d", info.ModTime().UnixNano(), info.Size())
-	signature := runtime.poolSignature
-	changed := runtime.poolSignature == "" || fileSignature != runtime.poolFileSignature
-	var body []byte
-	if changed {
-		body, err = os.ReadFile(runtime.opts.HealthPoolFile)
-		if err != nil {
-			return healthPool{}, false, err
-		}
-		sum := sha256.Sum256(body)
-		signature = hex.EncodeToString(sum[:])
-	}
+	signature := snapshot.signature
 	pid := readyProcessPID(runtime.opts.XrayReadyFile, "xray")
 	if runtime.opts.XrayReadyFile != "" && (pid != runtime.xrayPID || runtime.poolSignature == "") {
 		// Only once per core start, not per probe: the startup helper must pin
@@ -134,25 +128,12 @@ func (runtime *xraySelectorRuntime) Reload() (healthPool, bool, error) {
 	// Inventory can fail after the cached generation advances. Deliver its
 	// reset only with a successful pool, including on a later retry.
 	runtime.pendingReset = runtime.pendingReset || pidChanged || contractChanged
-	if changed && signature != runtime.poolSignature {
-		var pool healthPool
-		if err := json.Unmarshal(body, &pool); err != nil {
-			return healthPool{}, false, err
-		}
-		if pool.Version < 3 {
-			return healthPool{}, false, fmt.Errorf("health pool contract predates the 1.6.15 release baseline")
-		}
-		runtime.pool = pool
-		for id, contract := range runtime.pool.HealthPolicies {
-			contract.Policy.LatencyMeasurement = "gstatic-head-v1"
-			runtime.pool.HealthPolicies[id] = contract
-		}
+	if contractChanged {
+		runtime.pool = snapshot.pool
 		runtime.poolSignature = signature
 	}
-	if changed {
-		runtime.poolFileSignature = fileSignature
-		runtime.poolMTimeUnixNano = info.ModTime().UnixNano()
-	}
+	runtime.poolFileSignature = snapshot.fileSignature
+	runtime.poolMTimeUnixNano = snapshot.mtime
 	if pidChanged {
 		runtime.xrayPID = pid
 		runtime.loadedDynamic = make(map[string]bool)
@@ -1132,6 +1113,10 @@ func (runtime *xraySelectorRuntime) isReverse(candidate string) bool {
 }
 
 func (runtime *xraySelectorRuntime) reverseOnline(candidate string) bool {
+	if runtime.control != nil {
+		online, err := runtime.control.online(runtime.requestContext(), candidate)
+		return err == nil && online
+	}
 	body, err := runtime.command(runtime.requestContext(), 3*time.Second, runtime.opts.XrayBinary,
 		"api", "statsonline", "--server="+runtime.opts.XrayAPIServer, "-email", candidate)
 	if err != nil {

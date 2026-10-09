@@ -34,6 +34,9 @@ var (
 )
 
 func main() {
+	if dispatchXrayAlias() {
+		return
+	}
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
 	if len(os.Args) < 2 {
 		usage()

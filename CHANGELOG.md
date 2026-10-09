@@ -1,8 +1,10 @@
 # Changelog
 
-## 1.6.45
+## 1.6.48
 
-- Managed GeoIP uses immutable content-addressed binary Xray assets instead of repeated inline CIDRs. Check, Apply, startup migration and hot refresh share the same asset directory; portable IPv4/IPv6 packs remain available to DNS and RouterOS.
-- A failed hot update rolls back to the last confirmed GeoIP version. Obsolete databases are cleaned after confirmation, retaining active/LKG/Apply/rollback references and short-lived publication leases. Recovery archives include the required country sources and binary files.
-- Both native RouterOS memory limits are editable with explicit restart confirmation and actual readback. Ordinary Apply and image commit do not silently reset limits or mutate a running container's boot policy.
-- Includes startup/readiness, upload-cache, selector-history and exchange-card corrections. Known dependency audit findings and extended memory/recovery verification remain open; see the release notes.
+- Apply restores an eligible saved node instead of treating an unconfirmed probe error as a confirmed outage. Health evidence cannot cross core, pool or DNS generations, and planned runtime restarts pause probes only while a bounded live guard is valid.
+- Gateway and patched Xray share one executable while retaining independent processes and recovery. Health workers share immutable catalogs; reverse status uses the existing local API connection.
+- Encrypted DNS reconnects within bounded deadlines and cancels work before restart. Unchanged RouterOS DNS settings retain their cache and connections.
+- Managed IPv4 client queries to RouterOS-local TCP/UDP DNS follow each client's policy, internal zones and WAN exceptions. Recovery expires only affected managed DNS flows, supporting separate port fields and legacy endpoints.
+- Smart-home service cards remain separate by ecosystem. Routing drafts persist across navigation and global Apply; an image upgrade offers a single manual Apply Update when required.
+- Structural Xray restarts still interrupt established connections. Memory limits, connection buffers, policy modes and atomic GeoIP publication are unchanged.

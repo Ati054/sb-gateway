@@ -177,15 +177,34 @@ SHA256 архива сверяется на компьютере до загру
 
 В registry-режиме OCI resolver контейнера — фактический RouterOS gateway, чтобы
 pull/start не зависели от ещё не запущенного Xray. DNS управляемого трафика
-перехватывается внутри Xray/TUN; отдельного
-DNS-listener на примерном container IP нет.
+к публичным DNS-серверам перехватывается внутри Xray/TPROXY. Запросы TCP/UDP
+на порт 53 собственного IPv4-адреса RouterOS перенаправляются на фактический
+container IP, порт 1053, с сохранением исходного адреса клиента. Этот внутренний
+listener использует те же клиентские policy-DNS lanes: WAN-исключения идут через
+WAN DNS, остальные запросы через назначенный VPN DNS. Внутренние зоны остаются
+на RouterOS DNS; запросы самого контейнера исключены из перехвата.
+
+DNS DNAT требует connection-mark `sb-managed`, который выдаёт только общий
+readiness gate. При его отключении новые запросы вновь обслуживает RouterOS,
+а project-marked conntrack очищается штатным watchdog. При восстановлении
+очищаются также немаркированные DNS-потоки управляемых клиентов к локальным
+адресам роутера: повторно используемый UDP-поток не остаётся на аварийном пути.
+Остальные соединения не сбрасываются. Неуправляемые источники не получают доступ
+к внутреннему resolver listener; `dns.hijack_managed_clients=false` отключает
+и его, и соответствующие DNS mark/DNAT rules. WAN ingress не получает DNS mark.
+Порт 1053 зарезервирован и не может использоваться панелью или публичным транспортом.
+При совпадении персональной подсети и общего LAN-правила DNS выбирает более
+узкий source CIDR, независимо от числа подсетей в общем правиле.
+Воспроизводимый сетевой regression test запускается с `XRAY_TEST_BINARY`,
+указывающим на закреплённый Xray: он проверяет оба протокола, отдельные
+source-specific DNS lanes и отказ источнику вне allowlist на loopback fixtures.
 
 ## Policy routing
 
 Таблица `to-sb-gateway` содержит default через фактический container IP. Порядок mangle:
 
-1. return для `SB_INTERNAL_NETWORKS`;
-2. return для адреса RouterOS;
+1. connection-mark для управляемого TCP/UDP DNS к локальному адресу RouterOS;
+2. return для адреса RouterOS и `SB_INTERNAL_NETWORKS`;
 3. return для container/TUN networks;
 4. return для нормализованных outbound endpoints;
 5. mark-connection `sb-managed` только new от `SB_MANAGED_CLIENTS`;

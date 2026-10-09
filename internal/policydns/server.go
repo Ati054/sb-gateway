@@ -51,6 +51,7 @@ func boundedEnvironmentInt(name string, fallback, minimum, maximum int) int {
 }
 
 type service struct {
+	ctx        context.Context
 	runtimeMu  sync.RWMutex
 	runtime    *runtime
 	limit      chan struct{}
@@ -65,18 +66,23 @@ func Serve(ctx context.Context, path string, options Options) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	service := &service{
+		ctx:      ctx,
 		runtime:  current,
 		limit:    make(chan struct{}, options.Workers),
 		tcpLimit: make(chan struct{}, options.TCPSessions),
 	}
 	service.udpBuffers.New = func() any { return new([maxDNSMessage]byte) }
 	if err := service.listen(current); err != nil {
-		current.close()
+		cancel()
 		service.close()
+		service.closeRuntime()
 		return err
 	}
 	defer func() {
+		cancel()
 		service.close()
 		service.closeRuntime()
 	}()
@@ -168,9 +174,16 @@ func (service *service) releaseTCP() {
 func (service *service) resolve(laneID string, query []byte) ([]byte, error) {
 	service.runtimeMu.RLock()
 	defer service.runtimeMu.RUnlock()
-	ctx, cancel := context.WithTimeout(context.Background(), service.runtime.timeout)
+	ctx, cancel := context.WithTimeout(service.context(), service.runtime.timeout)
 	defer cancel()
 	return service.runtime.resolve(ctx, laneID, query)
+}
+
+func (service *service) context() context.Context {
+	if service.ctx != nil {
+		return service.ctx
+	}
+	return context.Background()
 }
 
 func (service *service) closeRuntime() {
@@ -194,7 +207,9 @@ func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 			service.udpBuffers.Put(buffer)
 			continue
 		}
+		service.wait.Add(1)
 		go func(query []byte, buffer *[maxDNSMessage]byte, address net.Addr) {
+			defer service.wait.Done()
 			defer service.release()
 			defer service.udpBuffers.Put(buffer)
 			response, resolveErr := service.resolve(laneID, query)
@@ -216,7 +231,11 @@ func (service *service) serveTCP(laneID string, listener net.Listener) {
 			_ = connection.Close()
 			continue
 		}
+		service.wait.Add(1)
 		go func() {
+			defer service.wait.Done()
+			stop := context.AfterFunc(service.context(), func() { _ = connection.Close() })
+			defer stop()
 			defer service.releaseTCP()
 			defer connection.Close()
 			header := make([]byte, 2)

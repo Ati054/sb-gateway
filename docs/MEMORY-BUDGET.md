@@ -27,6 +27,19 @@ Reopening Settings resumes reconciliation. Changing limits is not optimization.
 
 ## Allocation Optimizations
 
+- The shared-executable candidate retains separate gateway/core processes while
+  deduplicating their compiled dependencies. See [Shared Executable](XRAY-MULTICALL.md)
+  for dispatch, build requirements and verification status; binary size alone is
+  not a full-container RAM measurement.
+- Parallel probe lanes share one immutable parsed health-pool inventory per
+  controller generation. Dynamic-handler ownership and probe state stay local
+  to each lane. Atomic replacements invalidate the cache even when size and
+  timestamp match; invalid input cannot replace the last parsed snapshot.
+- Subscription name filters reuse one concurrency-safe variation-selector
+  replacer and skip label normalization when neither name filter is present.
+- Reverse-peer availability uses the controller's shared local gRPC connection
+  and the existing Xray online-statistic method instead of an API subprocess.
+  Missing, mismatched or failed responses do not establish peer availability.
 - Readiness and compact selector polling retain only their requested current
   fields, not complete daily samples or 30-day history.
 - Daily histories compact in place and clear expired references. Existing

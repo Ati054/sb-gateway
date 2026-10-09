@@ -82,13 +82,11 @@ func benchmark(root, binary string, repeat int, r *result) error {
 	}
 	inputHash := sha256.Sum256(body)
 	r.InputSHA = hex.EncodeToString(inputHash[:])
-	core, err := os.ReadFile(binary)
+	coreHash, err := fileSHA256(binary)
 	if err != nil {
 		return err
 	}
-	coreHash := sha256.Sum256(core)
-	r.CoreSHA = hex.EncodeToString(coreHash[:])
-	core = nil
+	r.CoreSHA = coreHash
 	var pack struct {
 		Rules []struct {
 			CIDRs []string `json:"ip_cidr"`
@@ -204,6 +202,23 @@ func benchmark(root, binary string, repeat int, r *result) error {
 		}
 	}
 	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 type managedRun struct {

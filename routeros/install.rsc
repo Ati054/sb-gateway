@@ -247,7 +247,9 @@
 :local diversionGate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]
 :if ([:len $diversionGate] != 1) do={ :error "SB-GATEWAY: diversion gate is missing or ambiguous" }
 /ip/firewall/mangle/unset $diversionGate in-interface-list
-/ip/firewall/mangle/set $diversionGate chain=prerouting action=jump jump-target="sb-gateway-divert" src-address-list="SB_MANAGED_CLIENTS" dst-address-list="!SB_INTERNAL_NETWORKS" dst-address-type=!local disabled=yes
+/ip/firewall/mangle/unset $diversionGate dst-address-list
+/ip/firewall/mangle/unset $diversionGate dst-address-type
+/ip/firewall/mangle/set $diversionGate chain=prerouting action=jump jump-target="sb-gateway-divert" src-address-list="SB_MANAGED_CLIENTS" src-address=("!" . $"SB_CONTAINER_IP") disabled=yes
 :if ([:len [/ip/firewall/mangle/find where comment="SB-GATEWAY endpoint bypass"]] = 0) do={
   /ip/firewall/mangle/add chain="sb-gateway-divert" action=return dst-address-list="SB_BYPASS_ENDPOINTS" comment="SB-GATEWAY endpoint bypass"
 }
@@ -268,6 +270,38 @@
 :if (([:len $firstMangleRules] > 0) && ([:pick $firstMangleRules 0 1] != $diversionGate)) do={ /ip/firewall/mangle/move $diversionGate destination=[:pick $firstMangleRules 0 1] }
 /ip/firewall/mangle/move $markConnection destination=$markRouting
 /ip/firewall/mangle/move $endpointBypass destination=$markConnection
+
+# Local DNS uses the same readiness gate as public traffic. The local/internal
+# returns keep all other router and LAN traffic outside policy routing.
+:foreach dnsProtocol in={"udp";"tcp"} do={
+  :local dnsSuffix "UDP"
+  :if ($dnsProtocol = "tcp") do={ :set dnsSuffix "TCP" }
+  :local markComment ("SB-GATEWAY managed DNS mark " . $dnsSuffix)
+  :if ([:len [/ip/firewall/mangle/find where comment=$markComment]] = 0) do={ /ip/firewall/mangle/add chain="sb-gateway-divert" action=mark-connection new-connection-mark="sb-managed" passthrough=yes comment=$markComment disabled=yes }
+  :local dnsMark [/ip/firewall/mangle/find where comment=$markComment]
+  :if ([:len $dnsMark] != 1) do={ :error "SB-GATEWAY managed DNS mark missing or ambiguous" }
+  /ip/firewall/mangle/set $dnsMark chain="sb-gateway-divert" action=mark-connection connection-state=new connection-mark=no-mark in-interface-list=!WAN dst-address-type=local protocol=$dnsProtocol dst-port=53 new-connection-mark="sb-managed" passthrough=yes disabled=no
+  :local natComment ("SB-GATEWAY managed DNS " . $dnsSuffix)
+  :if ([:len [/ip/firewall/nat/find where comment=$natComment]] = 0) do={ /ip/firewall/nat/add chain=dstnat action=dst-nat to-addresses=$"SB_CONTAINER_IP" comment=$natComment disabled=yes }
+  :local dnsNat [/ip/firewall/nat/find where comment=$natComment]
+  :if ([:len $dnsNat] != 1) do={ :error "SB-GATEWAY managed DNS NAT missing or ambiguous" }
+  /ip/firewall/nat/set $dnsNat chain=dstnat action=dst-nat src-address-list="SB_MANAGED_CLIENTS" connection-mark="sb-managed" dst-address-type=local protocol=$dnsProtocol dst-port=53 to-addresses=$"SB_CONTAINER_IP" to-ports=1053 disabled=no
+  :local firstDNSNat [/ip/firewall/nat/find]
+  :if (([:len $firstDNSNat] > 0) && ([:pick $firstDNSNat 0 1] != $dnsNat)) do={ /ip/firewall/nat/move $dnsNat destination=[:pick $firstDNSNat 0 1] }
+}
+:foreach bypassKind in={"local";"internal"} do={
+  :local bypassComment ("SB-GATEWAY diversion " . $bypassKind . " bypass")
+  :if ([:len [/ip/firewall/mangle/find where comment=$bypassComment]] = 0) do={ /ip/firewall/mangle/add chain="sb-gateway-divert" action=return comment=$bypassComment }
+  :local dnsBypass [/ip/firewall/mangle/find where comment=$bypassComment]
+  :if ([:len $dnsBypass] != 1) do={ :error "SB-GATEWAY diversion bypass missing or ambiguous" }
+  :if ($bypassKind = "local") do={ /ip/firewall/mangle/set $dnsBypass chain="sb-gateway-divert" action=return dst-address-type=local disabled=no } else={ /ip/firewall/mangle/set $dnsBypass chain="sb-gateway-divert" action=return dst-address-list="SB_INTERNAL_NETWORKS" disabled=no }
+}
+:local dnsBefore $endpointBypass
+:foreach dnsComment in={"SB-GATEWAY diversion internal bypass";"SB-GATEWAY diversion local bypass";"SB-GATEWAY managed DNS mark TCP";"SB-GATEWAY managed DNS mark UDP"} do={
+  :local dnsRule [/ip/firewall/mangle/find where comment=$dnsComment]
+  /ip/firewall/mangle/move $dnsRule destination=$dnsBefore
+  :set dnsBefore $dnsRule
+}
 
 :if ([:len [/ip/firewall/nat/find where comment="SB-GATEWAY container WAN masquerade"]] = 0) do={
   /ip/firewall/nat/add chain=srcnat action=masquerade src-address=$"SB_CONTAINER_NETWORK" out-interface-list=WAN comment="SB-GATEWAY container WAN masquerade"
