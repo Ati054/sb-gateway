@@ -299,7 +299,7 @@ func TestTransparentRulesRequireTCPUDPAndTransitGuard(t *testing.T) {
 	complete := `{"nftables":[
  {"chain":{"family":"inet","table":"sb_gateway_transparent","name":"prerouting","type":"filter","hook":"prerouting"}},
  {"chain":{"family":"inet","table":"sb_gateway_transparent","name":"forward","type":"filter","hook":"forward"}},
- {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"set":[{"prefix":{"addr":"172.30.79.0","len":24}}]}}},{"return":null}]}},
+ {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"set":[{"prefix":{"addr":"198.51.100.0","len":24}}]}}},{"return":null}]}},
  {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"tcp"}},{"tproxy":{"port":12345}},{"accept":null}]}},
  {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"prerouting","expr":[{"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"udp"}},{"tproxy":{"port":12345}},{"accept":null}]}},
  {"rule":{"family":"inet","table":"sb_gateway_transparent","chain":"forward","comment":"sb-public-transit-reject","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"veth-sb"}},{"counter":{"packets":3,"bytes":252}},{"reject":{"type":"icmpx","expr":"admin-prohibited"}}]}}
