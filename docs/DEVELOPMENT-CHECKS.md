@@ -47,7 +47,8 @@ do not report them as a passing symbol scan. Resolve them against the exact
 patched Xray build stage and the publisher's advisory before release. In
 particular, the gRPC publisher lists 1.84.0 as fixed for
 [GHSA-2v4p-qf9q-27wj](https://github.com/grpc/grpc-go/security/advisories/GHSA-2v4p-qf9q-27wj),
-although the Go vulnerability database currently still flags that version.
+Database results may change; compare every returned finding against the
+publisher's fixed-version ranges and the exact binary metadata.
 The opt-in `TestXrayAPIRejectsMissingAuthority` sends three HTTP/2 requests
 without both authority/Host headers to an isolated real core. Each must return
 HTTP 400/gRPC 13 and a subsequent ordinary selector command must succeed.
