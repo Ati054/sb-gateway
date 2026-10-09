@@ -98,8 +98,8 @@
   } else={
   :local gate $exactGates
   # NAT is selected only on the first packet. Expire just managed-client DNS
-  # flows to local router addresses when recovering from direct RouterOS DNS;
-  # otherwise a repeatedly reused UDP tuple can retain the outage path.
+  # flows to local router addresses after admitting managed DNS marking.
+  # Clearing before admission lets a concurrent query recreate the outage path.
   :local clearRecoveredDNS do={
     :local dnsNat [/ip/firewall/nat/find where comment="SB-GATEWAY managed DNS UDP" and disabled=no]
     :if ([:len $dnsNat] != 1) do={ :return false }
@@ -176,8 +176,8 @@
     # boot/update start, admit it on the first successful poll. Later recovery
     # from a live outage keeps the configured hysteresis.
     :if (($gateDisabled = true) && (($sbStartupSafety = true) || ($sbFailOpen = false) || (($sbHealthSuccesses >= $"SB_HEALTH_RECOVERY_THRESHOLD") && ($sbRecoveryTicks >= $"SB_HEALTH_COOLDOWN_TICKS")))) do={
-      $clearRecoveredDNS
       /ip/firewall/mangle/enable $gate
+      $clearRecoveredDNS
       :set sbFailOpen false
       :set sbStartupSafety false
       :set sbRecoveryTicks 0
