@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
+
+var ErrShutdownTimeout = errors.New("appliance shutdown deadline exceeded")
+
+const defaultShutdownTimeout = 30 * time.Second
 
 type Program struct {
 	Name  string
@@ -29,10 +34,11 @@ type restartRequest struct {
 }
 
 type Supervisor struct {
-	mu       sync.RWMutex
-	programs map[string]*programState
-	started  bool
-	ready    chan struct{}
+	mu              sync.RWMutex
+	programs        map[string]*programState
+	started         bool
+	ready           chan struct{}
+	shutdownTimeout time.Duration
 }
 
 type Status struct {
@@ -59,7 +65,7 @@ func NewSupervisor(programs []Program) (*Supervisor, error) {
 	if len(states) == 0 {
 		return nil, errors.New("appliance supervisor requires at least one program")
 	}
-	return &Supervisor{programs: states, ready: make(chan struct{})}, nil
+	return &Supervisor{programs: states, ready: make(chan struct{}), shutdownTimeout: defaultShutdownTimeout}, nil
 }
 
 // Run owns all supervised programs until ctx is cancelled. Each program uses
@@ -84,8 +90,25 @@ func (supervisor *Supervisor) Run(ctx context.Context) error {
 	}
 	close(supervisor.ready)
 	<-ctx.Done()
-	wait.Wait()
-	return nil
+	stopped := make(chan struct{})
+	go func() {
+		wait.Wait()
+		close(stopped)
+	}()
+	timer := time.NewTimer(supervisor.shutdownTimeout)
+	defer timer.Stop()
+	select {
+	case <-stopped:
+		return nil
+	case <-timer.C:
+		var pending []string
+		for _, state := range supervisor.Status() {
+			if state.Running {
+				pending = append(pending, state.Name)
+			}
+		}
+		return fmt.Errorf("%w after %s; unresponsive programs: %s", ErrShutdownTimeout, supervisor.shutdownTimeout, strings.Join(pending, ","))
+	}
 }
 
 func (supervisor *Supervisor) runProgram(ctx context.Context, state *programState) {

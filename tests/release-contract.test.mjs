@@ -2,6 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+test("installation guides match the release and include storage-aware startup", async () => {
+  const { version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  for (const file of ["INSTALL.md", "INSTALL-RU.md"]) {
+    const source = await readFile(new URL("../docs/" + file, import.meta.url), "utf8");
+    assert.ok(source.includes("sb-gateway-" + version + "-routeros-bundle.zip"), file);
+    assert.ok(source.includes("sb-gateway-" + version + "-linux-arm64.tar"), file);
+    for (const referenced of source.matchAll(/sb-gateway-([0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?)-(?:routeros-bundle|linux-arm64)/g)) {
+      assert.equal(referenced[1], version, file + ": stale release reference");
+    }
+    assert.match(source, /  bootstrap\.rsc\r?\n  container-startup\.rsc/);
+  }
+});
+
 test("release toolchains agree and shared-core compression is pinned", async () => {
   const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
   const workflow = await readFile(new URL("../.github/workflows/release-hygiene.yml", import.meta.url), "utf8");
@@ -60,4 +73,12 @@ test("public source excludes internal CHR verification receipts", async () => {
     assert.ok(exporter.includes("'" + file + "'"), file);
     assert.ok(verifier.includes(file), file);
   }
+});
+
+test("public security documentation excludes private acceptance reports", async () => {
+  const source = await readFile(new URL("../docs/SECURITY.md", import.meta.url), "utf8");
+  const verifier = await readFile(new URL("../scripts/verify-public-tree.sh", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /внутренних отч[её]тах при[её]мки|фактическая при[её]мка|Windows \/ Node [0-9]/);
+  assert.ok(verifier.includes('"$revision" -- docs'));
+  assert.ok(verifier.includes("private acceptance report exists in public documentation history"));
 });

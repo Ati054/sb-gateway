@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	routerosassets "github.com/sb-gateway/sb-gateway/routeros"
 )
 
 const (
@@ -141,9 +143,13 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		if spec.StoppedPredecessor {
 			return `/container/set ` + id + ` start-on-boot=no; :do { /container/set ` + id + ` restart-policy=no } on-error={ /container/set ` + id + ` auto-restart-interval=0s }`
 		}
-		return `:local previousBoot true; :if ([:len $transfer] = 1) do={ :set previousBoot ($receipt->"previous-start-on-boot") }; /container/set ` + id + ` start-on-boot=$previousBoot; /container/start ` + id
+		return `/container/set ` + id + ` start-on-boot=no; :if ([$storageReady ` + id + `] != true) do={ :error "SB-GATEWAY rollback storage is not ready" }; /container/start ` + id
 	}
 	retainPrevious := "false"
+	startupDisabled := "false"
+	if spec.StoppedPredecessor {
+		startupDisabled = "true"
+	}
 	if spec.KeepPrevious {
 		retainPrevious = "true"
 	}
@@ -171,6 +177,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 	lines := []string{
 		"# SB-GATEWAY autonomous one-image switch",
 		`:local jobs [/system/script/job/find where script="` + imageUpdateWorker + `"]`,
+		`:if ([:len [/system/script/job/find where script="SB-GATEWAY-container-startup"]] > 0) do={ :return true }`,
 		`:if ([:len $jobs] > 1) do={ :return true }`,
 		`:local current [/container/find where comment="SB-GATEWAY container"]`,
 		`:local candidate [/container/find where comment="SB-GATEWAY container candidate"]`,
@@ -194,6 +201,16 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`:if (([:len $failed] > 1) || ([:len $transfer] > 1)) do={ :error "SB-GATEWAY image transfer state is ambiguous" }`,
 		`:if ([:len $hold] = 1) do={ :if ([/interface/veth/get $hold name] != "veth-sb-update") do={ :error "SB-GATEWAY hold interface does not match" } }`,
 		`:if ([:len $swap] = 1) do={ :if ([/interface/veth/get $swap name] != "veth-sb-swap") do={ :error "SB-GATEWAY swap interface does not match" } }`,
+		`:local startupProbe [/system/script/find where name="SB-GATEWAY-storage-ready"]`,
+		`:local startupBoot [/system/script/find where name="SB-GATEWAY-container-startup"]`,
+		`:local startupSchedule [/system/scheduler/find where name="SB-GATEWAY-container-startup"]`,
+		`:local installStartup true`,
+		`:if (([:len $startupProbe] = 1) && ([:len $startupBoot] = 1) && ([:len $startupSchedule] = 1)) do={`,
+		`  :if (([/system/script/get $startupProbe comment] = "SB-GATEWAY storage readiness") && ([/system/script/get $startupBoot comment] = "SB-GATEWAY storage-aware startup") && ([/system/scheduler/get $startupSchedule comment] = "SB-GATEWAY storage-aware startup scheduler") && ([/system/script/get $startupProbe source] = ` + quote(routerosassets.ContainerStorageReadySource()) + `) && ([/system/script/get $startupBoot source] = ` + quote(routerosassets.ContainerBootSource()) + `) && ([/system/scheduler/get $startupSchedule interval] = 0s) && ([/system/scheduler/get $startupSchedule start-time] = "startup") && ([/system/scheduler/get $startupSchedule on-event] = "/system/script/run SB-GATEWAY-container-startup")) do={ :set installStartup false }`,
+		`}`,
+		`:if ($installStartup = true) do={ :local setup [:parse ` + quote(routerosassets.ContainerStartupInstallSource()) + `]; $setup ` + startupDisabled + ` }`,
+		`:if (` + startupDisabled + ` = true) do={ /system/scheduler/disable [find where name="SB-GATEWAY-container-startup" and comment="SB-GATEWAY storage-aware startup scheduler"] }`,
+		`:local storageReady [:parse [/system/script/get [find where name="SB-GATEWAY-storage-ready" and comment="SB-GATEWAY storage readiness"] source]]`,
 		// The inert JSON receipt survives interrupted detach/attach and role swaps.
 		// An interrupted forward transfer restores the predecessor rather than
 		// guessing whether the candidate was started before the job disappeared.
@@ -263,6 +280,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		// Completed cleanup: the candidate already owns the canonical role.
 		`:if (([:len $current] = 1) && ([:len $candidate] = 0) && ([:len $rollback] = 0)) do={`,
 		`  :if ([/container/get $current root-dir] = $candidateRoot) do={`,
+		`    /system/scheduler/enable [find where name="SB-GATEWAY-container-startup" and comment="SB-GATEWAY storage-aware startup scheduler"]`,
 		`    :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
 		`    :if ([:len $swap] = 1) do={ /interface/veth/remove $swap }`,
 		`    :if ([:len $transfer] = 1) do={ /system/script/remove $transfer }`,
@@ -313,7 +331,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :if (($healthy = true) && ($restartCount = 0)) do={ :set sbGatewayImageProbation ($sbGatewayImageProbation + 1); :set sbGatewayImageMisses 0 } else={ :set sbGatewayImageProbation 0; :set sbGatewayImageMisses ($sbGatewayImageMisses + 1) }`,
 		`  :if ($sbGatewayImageProbation >= 3) do={`,
 		`    :if ([:len $transfer] = 1) do={ :set ($receipt->"phase") "commit"; /system/script/set $transfer source=[:serialize to=json value=$receipt] }`,
-		`    :if ([/container/get $current start-on-boot] != true) do={ :error "SB-GATEWAY candidate boot policy changed during probation" }`,
+		`    :if ([/container/get $current start-on-boot] != false) do={ :error "SB-GATEWAY candidate boot policy changed during probation" }`,
 		previousGuard,
 		`    :if ([:len $previous] = 1) do={ /container/remove $previous }`,
 		`    :if ($retainPrevious = true) do={`,
@@ -326,6 +344,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`    }`,
 		`    :if ([:len $hold] = 1) do={ /interface/veth/remove $hold }`,
 		`    :if ([:len $swap] = 1) do={ /interface/veth/remove $swap }`,
+		`    /system/scheduler/enable [find where name="SB-GATEWAY-container-startup" and comment="SB-GATEWAY storage-aware startup scheduler"]`,
 		`    :if ([:len $transfer] = 1) do={ /system/script/remove $transfer }`,
 		`    :if ([:len $scheduler] = 1) do={ /system/scheduler/remove $scheduler }`,
 		`    :set sbGatewayImageProbation`,
@@ -432,7 +451,8 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`/interface/veth/remove $swap`,
 		// RouterOS 7.24.2 restarts a running container when start-on-boot changes.
 		// Set it while stopped, after the canonical mounts/interface transfer.
-		`/container/set $candidate start-on-boot=yes`,
+		`/container/set $candidate start-on-boot=no`,
+		`:if ([$storageReady $candidate] != true) do={ :error "SB-GATEWAY candidate storage is not ready" }`,
 		`/container/start $candidate`,
 		`:set ($receipt->"phase") "probation"`,
 		`/system/script/set $transfer source=[:serialize to=json value=$receipt]`,

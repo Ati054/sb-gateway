@@ -43,3 +43,25 @@ func TestSubscriptionActivationWaitsForPersistedApplyRecovery(t *testing.T) {
 		t.Fatalf("worked=%t err=%v runtime=%#v", worked, err, runtime)
 	}
 }
+
+func TestStartupMigrationBlocksAllRuntimeMutationsButNotReconciliation(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.repository.saveAuxiliary(containerStartupOperation, map[string]any{"pending": true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, allowed := range []string{mutationApply, mutationLifecycle, mutationRecovery, mutationSubscription, ""} {
+		if conflict, err := server.stateMutationConflict(allowed); err != nil || conflict != "container-startup" {
+			t.Fatalf("allowed=%q conflict=%q err=%v", allowed, conflict, err)
+		}
+	}
+	if conflict, err := server.stateMutationConflict(containerStartupOperation); err != nil || conflict != "" {
+		t.Fatalf("reconciliation blocked: %q %v", conflict, err)
+	}
+	runtime := &fakeRuntimeApplier{revision: strings.Repeat("f", 64)}
+	server.runtime = runtime
+	cookie, csrf := bootstrapSession(t, server)
+	response := performRequest(t, server, http.MethodPost, apiPrefix+"/drafts/apply", map[string]any{"config": routerOSReadyConfig(t)}, map[string]string{csrfHeader: csrf}, cookie)
+	if response.Code != http.StatusConflict || runtime.prepareCalls != 0 {
+		t.Fatalf("Apply overlapped startup: %d %#v", response.Code, runtime)
+	}
+}

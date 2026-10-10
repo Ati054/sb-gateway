@@ -109,6 +109,12 @@ fi
 
 for revision in $(git rev-list --all); do
   if git grep -Il -E -- \
+    'внутренних отч[её]тах при[её]мки|фактическая при[её]мка|Windows / Node [0-9]' \
+    "$revision" -- docs | grep -q .; then
+    printf '%s\n' "private acceptance report exists in public documentation history" >&2
+    exit 1
+  fi
+  if git grep -Il -E -- \
     '-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}' \
     "$revision" -- | grep -q .; then
     printf '%s\n' "credential signature exists in public Git history" >&2
