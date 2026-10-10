@@ -6,8 +6,27 @@ import (
 	"strings"
 )
 
-//go:embed watchdog.rsc cloudflare-update.rsc
+//go:embed watchdog.rsc cloudflare-update.rsc container-startup.rsc
 var scripts embed.FS
+
+// ContainerStartupInstallSource installs the same storage gate as fresh installs.
+func ContainerStartupInstallSource() string {
+	source, err := scripts.ReadFile("container-startup.rsc")
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(source), "\r\n", "\n"))
+}
+
+// ContainerStorageReadySource preserves whitespace for RouterOS source readback.
+func ContainerStorageReadySource() string {
+	return rawScriptBody("container-startup.rsc", `/system/script/set $readyId source={`, "}\n:if ([:len $bootId]")
+}
+
+// ContainerBootSource preserves whitespace for RouterOS source readback.
+func ContainerBootSource() string {
+	return rawScriptBody("container-startup.rsc", `/system/script/set $bootId source={`, "}\n:if ([:len $scheduleId]")
+}
 
 // HealthWatchdogSource returns the same script body used by fresh installs.
 func HealthWatchdogSource() string {
@@ -28,6 +47,10 @@ func CloudflareUpdateSource() string {
 }
 
 func scriptBody(filename, start, end string) string {
+	return strings.TrimSpace(rawScriptBody(filename, start, end))
+}
+
+func rawScriptBody(filename, start, end string) string {
 	source, err := scripts.ReadFile(filename)
 	if err != nil {
 		panic(err)
@@ -41,5 +64,5 @@ func scriptBody(filename, start, end string) string {
 	if !ok {
 		panic(filename + " script end marker missing")
 	}
-	return strings.TrimSpace(body)
+	return body
 }

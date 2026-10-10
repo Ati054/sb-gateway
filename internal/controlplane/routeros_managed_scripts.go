@@ -12,8 +12,11 @@ import (
 
 var errRouterOSScriptSyncDeferred = errors.New("RouterOS script sync deferred until active configuration is available")
 
+const containerStartupOperation = "container-startup-operation"
+
 // Installed RouterOS script bodies are reconciled after container probation,
-// then infrequently for retries. No import or script execution is involved.
+// then infrequently for retries. Legacy storage startup migration is handed
+// to a RouterOS-owned one-shot; ordinary script refresh only changes bodies.
 func (server *Server) runRouterOSManagedScriptsScheduler(ctx context.Context) {
 	timer := time.NewTimer(time.Minute)
 	defer timer.Stop()
@@ -46,6 +49,10 @@ func (server *Server) wakeRouterOSManagedScripts() {
 }
 
 func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
+	if !server.mutationMu.TryLock() {
+		return errRouterOSScriptSyncDeferred
+	}
+	defer server.mutationMu.Unlock()
 	if !server.configMu.TryLock() {
 		return errRouterOSScriptSyncDeferred
 	}
@@ -62,6 +69,17 @@ func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
 		return err
 	}
 	if !routerOSCredentialsConfigured(config, server.secrets) {
+		return errRouterOSScriptSyncDeferred
+	}
+	operation, err := server.repository.auxiliary("lifecycle-operation")
+	if err != nil {
+		return err
+	}
+	// Finish the durable update journal even if the browser never reconnects.
+	server.reconcileLifecycleOperation(ctx, config, operation)
+	if conflict, err := server.stateMutationConflict(containerStartupOperation); err != nil {
+		return err
+	} else if conflict != "" {
 		return errRouterOSScriptSyncDeferred
 	}
 	required, err := runtimeconfig.RequiresRouterOSCloudflareUpdater(config)
@@ -90,8 +108,30 @@ func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
 			return err
 		}
 	}
+	// Record ownership before any request that may arm the host scheduler.
+	// A lost reply must not allow Apply to overlap the controlled restart.
+	if err := server.repository.saveAuxiliary(containerStartupOperation, map[string]any{"pending": true}); err != nil {
+		return err
+	}
+	startupScheduled, migrationErr := client.ReconcileContainerStartup(ctx)
+	pending, readbackErr := client.StartupMigrationPending(ctx)
+	if readbackErr != nil {
+		return errors.Join(migrationErr, readbackErr)
+	}
+	if err := server.repository.saveAuxiliary(containerStartupOperation, map[string]any{"pending": pending}); err != nil {
+		return err
+	}
+	if migrationErr != nil {
+		return migrationErr
+	}
+	if startupScheduled {
+		log.Printf("routeros-scripts: storage startup migration scheduled; one controlled container restart may be required")
+	}
 	if updated > 0 || changed {
 		log.Printf("routeros-scripts: updated=%d cloudflare-required=%t scheduler-changed=%t", updated, required, changed)
+	}
+	if pending {
+		return errRouterOSScriptSyncDeferred
 	}
 	return nil
 }

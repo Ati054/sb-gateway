@@ -28,6 +28,8 @@ func validFixedManagedScript(name, source string) bool {
 		prefix = "# SB-GATEWAY autonomous one-image switch\n"
 	case containerMemoryWorker:
 		prefix = "# SB-GATEWAY one-shot container memory update\n"
+	case containerStartupWorker:
+		prefix = "# SB-GATEWAY one-shot storage startup migration\n"
 	default:
 		return false
 	}

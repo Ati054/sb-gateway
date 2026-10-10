@@ -18,7 +18,7 @@
 :if ([:len $variablesPath] = 0) do={ :error "SB-GATEWAY: place a private variables.rsc in the uploaded sb-gateway directory" }
 
 :local bundleRoot [:pick $variablesPath 0 ([:len $variablesPath] - [:len $variablesSuffix])]
-:foreach requiredFile in={"preflight.rsc";"webfig-bootstrap.rsc";"fasttrack-patch.rsc";"install.rsc";"watchdog.rsc"} do={
+:foreach requiredFile in={"preflight.rsc";"webfig-bootstrap.rsc";"fasttrack-patch.rsc";"container-startup.rsc";"install.rsc";"watchdog.rsc"} do={
   :local requiredPath ($bundleRoot . "/" . $requiredFile)
   :if ([:len [/file/find where name=$requiredPath]] != 1) do={ :error ("SB-GATEWAY: release bundle is incomplete: " . $requiredPath) }
 }
@@ -35,6 +35,7 @@
 :log info "SB-GATEWAY: bootstrap 3/5 FastTrack compatibility"
 /import file-name=($bundleRoot . "/fasttrack-patch.rsc")
 :log info "SB-GATEWAY: bootstrap 4/5 container and owned network objects"
+/import file-name=($bundleRoot . "/container-startup.rsc")
 /import file-name=($bundleRoot . "/install.rsc")
 :log info "SB-GATEWAY: bootstrap 5/5 fail-open watchdog"
 /import file-name=($bundleRoot . "/watchdog.rsc")
@@ -42,7 +43,7 @@
   :local imageFile [/file/find where name=$"SB_IMAGE_FILE"]
   :if ([:len $imageFile] = 1) do={ :do { /file/remove $imageFile } on-error={ :log warning "SB-GATEWAY: extracted image archive cleanup is pending" } }
 }
-:foreach transientFile in={"bootstrap.rsc";"fasttrack-patch.rsc";"install.rsc";"preflight.rsc";"variables.rsc";"watchdog.rsc";"webfig-bootstrap.rsc"} do={
+:foreach transientFile in={"bootstrap.rsc";"fasttrack-patch.rsc";"container-startup.rsc";"install.rsc";"preflight.rsc";"variables.rsc";"watchdog.rsc";"webfig-bootstrap.rsc"} do={
   :local transientPath ($bundleRoot . "/" . $transientFile)
   :local transientId [/file/find where name=$transientPath]
   :if ([:len $transientId] = 1) do={ :do { /file/remove $transientId } on-error={ :log warning ("SB-GATEWAY: one-shot installer cleanup is pending: " . $transientPath) } }

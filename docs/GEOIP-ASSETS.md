@@ -75,3 +75,6 @@ The isolated `tools/geoipbench` managed mode exercises real-core publication,
 activation, corruption rejection, rollback and obsolete-asset cleanup while
 checking established TCP continuity. Executable identity hashing is streamed;
 the measurement tool does not allocate a second full executable buffer.
+Cleanup checks compare the exact remaining referenced asset set, including
+missing active assets and unexpected leftovers. They do not assume a fixed
+removal count: a preceding activation may already have pruned an old generation.

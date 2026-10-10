@@ -290,7 +290,10 @@ test("setup mode cannot falsely advertise data-plane readiness", async () => {
   assert.doesNotMatch(runner, /SB_CONTAINER_IP:-172\./);
   assert.match(appliance, /XrayRunner/);
   assert.match(watchdog, /awaiting_configuration/);
-  assert.match(watchdog, /processRunning\("xray"\)/);
+  assert.match(watchdog, /generation, coreRunning := xrayProcessState\(opts, "\/proc"\)/);
+  assert.match(watchdog, /if !coreRunning \{\s*reasons = append\(reasons, "core_process"\)/);
+  assert.match(watchdog, /generation := runtimeproof\.XrayGeneration\(opts\.XrayReadyFile, opts\.XrayConfig, procRoot\)/);
+  assert.match(watchdog, /return "", processRunningAt\(procRoot, "xray"\)/);
   assert.match(watchdog, /local default dev lo/);
   assert.match(watchdog, /tproxy_policy_rule/);
   assert.match(watchdog, /procListeningPorts\("tcp"\)/);

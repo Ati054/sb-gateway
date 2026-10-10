@@ -1,5 +1,12 @@
 # Установка, обновление и восстановление
 
+Watchdog проверяет PID готового ядра вместе с временем запуска и точной командой,
+не перебирая все процессы на каждом успешном цикле. До появления готового PID
+остаётся прежний поиск процесса. Проверки API, сокетов, маршрутизации и конфигурации
+не ослаблены. Проверки: `go test ./internal/watchdog -run TestWatchdogProcess`
+и `node --test tests/runtime-artifacts.test.mjs`;
+сравнение на синтетическом дереве процессов: `go test ./internal/watchdog -run '^$' -bench BenchmarkWatchdogReadyProcess -benchmem`.
+
 Документ соответствует текущей ветке разработки на базе SB Gateway 1.6.21. Установка и обновление проверяют
 владение RouterOS-объектами, состояние контейнера, schema, health и
 traffic-readiness до включения управляемого маршрута.
@@ -372,7 +379,12 @@ auto-restart.
    После обновления образа control plane сверяет исходный код уже установленных
    собственных RouterOS-скриптов watchdog, startup fail-open и Cloudflare с
    версией в образе. Меняется только `source` скрипта с точным именем и меткой
-   SB Gateway; скрипты не запускаются и их расписание не пересоздаётся.
+   SB Gateway; обычное обновление этих тел не запускает скрипты и не
+   пересоздаёт их расписание. Отдельная автоматическая миграция storage-aware
+   startup создаёт недостающие собственные boot-скрипты и расписание без
+   ручного импорта. Для старого `start-on-boot=yes` она выполняет один
+   контролируемый перезапуск после завершения probation. Уже мигрированный
+   контейнер не перезапускается. Подробности: `docs/ROUTEROS.md`.
    Отсутствующий опциональный Cloudflare-скрипт не устанавливается. Его
    существующее расписание автоматически выключается, если активный ingress
    не использует `SB_CLOUDFLARE_V4`, и включается снова при необходимости.
@@ -382,7 +394,8 @@ auto-restart.
 8. Installer асинхронно импортирует Docker archive, ждёт `status=stopped`,
    проверяет `os=linux` и `arch=arm64`, затем запускает контейнер. При ошибке
    diversion остаётся выключенным, поэтому обычный WAN продолжает работать.
-9. Убедитесь в WebFig, что контейнер `running`, `start-on-boot=yes`,
+9. Убедитесь в WebFig, что контейнер `running`, `start-on-boot=no`,
+   owned startup scheduler включён с `interval=0s, start-time=startup`,
    `restart-policy=always`/`restart-interval=10s` (или legacy
    `auto-restart-interval=10s`), `memory-high=224M` и `memory-max=256M`.
    Для MikroTik с другим объёмом RAM скорректируйте оба значения в приватном

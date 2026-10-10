@@ -47,9 +47,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "appliance":
-		if err := runAppliance(os.Args[2:]); err != nil {
-			log.Fatalf("appliance: %v", err)
-		}
+		exitApplianceOnError(runAppliance(os.Args[2:]))
 	case "api":
 		if err := runAPI(os.Args[2:]); err != nil {
 			log.Fatalf("control-plane: %v", err)
@@ -135,6 +133,18 @@ func configureDiagnosticLog(command string) func() {
 	}
 	log.SetOutput(io.MultiWriter(diagnosticlog.ConsoleWriter{Output: os.Stderr}, writer))
 	return func() { _ = writer.Close() }
+}
+
+func exitApplianceOnError(err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, appliance.ErrShutdownTimeout) {
+		// A blocked persistent logger must not prevent PID 1 from exiting.
+		go log.Printf("appliance: %v", err)
+		os.Exit(1)
+	}
+	log.Fatalf("appliance: %v", err)
 }
 
 func runAppliance(arguments []string) error {

@@ -18,13 +18,14 @@ var (
 )
 
 var managedBootstrapArtifacts = map[string]bool{
-	"bootstrap.rsc":        true,
-	"fasttrack-patch.rsc":  true,
-	"install.rsc":          true,
-	"preflight.rsc":        true,
-	"variables.rsc":        true,
-	"watchdog.rsc":         true,
-	"webfig-bootstrap.rsc": true,
+	"bootstrap.rsc":         true,
+	"fasttrack-patch.rsc":   true,
+	"install.rsc":           true,
+	"container-startup.rsc": true,
+	"preflight.rsc":         true,
+	"variables.rsc":         true,
+	"watchdog.rsc":          true,
+	"webfig-bootstrap.rsc":  true,
 }
 
 type ManagedFilePruneResult struct {
