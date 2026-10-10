@@ -37,6 +37,27 @@
 :global "SB_HTTPUPGRADE_ENABLED"
 :global "SB_ROUTEROS_REST_PORT"
 
+:local bootScript [/system/script/find where name="SB-GATEWAY-container-startup" and comment="SB-GATEWAY storage-aware startup"]
+:local storageProbe [/system/script/find where name="SB-GATEWAY-storage-ready" and comment="SB-GATEWAY storage readiness"]
+:local bootScheduler [/system/scheduler/find where name="SB-GATEWAY-container-startup" and comment="SB-GATEWAY storage-aware startup scheduler"]
+:if (([:len $bootScript] != 1) || ([:len $storageProbe] != 1) || ([:len $bootScheduler] != 1)) do={ :error "SB-GATEWAY: import container-startup.rsc before install.rsc" }
+
+# Only explicit installation may create missing mount folders, on mounted disks.
+:foreach folder in={$"SB_CONFIG_DIR";$"SB_DATA_DIR";$"SB_LOGS_DIR";$"SB_STATE_DIR"} do={
+  :local path [:tostr $folder]
+  :if ([:pick $path 0 1] = "/") do={ :set path [:pick $path 1 [:len $path]] }
+  :local separator [:find $path "/"]
+  :if (([:typeof $separator] != "num") || ($separator = 0) || ([:typeof [:find $path ".."]] != "nil")) do={ :error "SB-GATEWAY: mount source path is invalid" }
+  :local disk [/file/find where name=[:pick $path 0 $separator]]
+  :if ([:len $disk] != 1) do={ :error "SB-GATEWAY: mount source disk is missing or ambiguous" }
+  :if ([/file/get $disk type] != "disk") do={ :error "SB-GATEWAY: mount source disk is not mounted" }
+  :local entry [/file/find where name=$path]
+  :if ([:len $entry] > 1) do={ :error "SB-GATEWAY: mount source is ambiguous" }
+  :if ([:len $entry] = 0) do={ /file/add name=$path type=directory } else={
+    :if ([/file/get $entry type] != "directory") do={ :error "SB-GATEWAY: mount source is not a directory" }
+  }
+}
+
 :local containerMemoryHigh $"SB_CONTAINER_MEMORY_HIGH"
 :local containerMemoryMax $"SB_CONTAINER_MEMORY_MAX"
 :if ([:len $containerMemoryHigh] = 0) do={ :set containerMemoryHigh "224M" }
@@ -168,9 +189,9 @@
 :if ([:len $containerId] = 0) do={
   :onerror sbContainerError in={
     :if ($"SB_IMAGE_SOURCE" = "file") do={
-      /container/add file=$"SB_IMAGE_FILE" interface=$"SB_VETH" root-dir=$"SB_ROOT_DIR" mountlists="sb-gateway-config,sb-gateway-data,sb-gateway-logs,sb-gateway-state" envlist="sb-gateway-env" dns=$"SB_ROUTER_IP" memory-high=$containerMemoryHigh memory-max=$containerMemoryMax start-on-boot=yes logging=yes comment="SB-GATEWAY container"
+      /container/add file=$"SB_IMAGE_FILE" interface=$"SB_VETH" root-dir=$"SB_ROOT_DIR" mountlists="sb-gateway-config,sb-gateway-data,sb-gateway-logs,sb-gateway-state" envlist="sb-gateway-env" dns=$"SB_ROUTER_IP" memory-high=$containerMemoryHigh memory-max=$containerMemoryMax start-on-boot=no logging=yes comment="SB-GATEWAY container"
     } else={
-      /container/add remote-image=$"SB_IMAGE" interface=$"SB_VETH" root-dir=$"SB_ROOT_DIR" mountlists="sb-gateway-config,sb-gateway-data,sb-gateway-logs,sb-gateway-state" envlist="sb-gateway-env" dns=$"SB_ROUTER_IP" memory-high=$containerMemoryHigh memory-max=$containerMemoryMax start-on-boot=yes logging=yes comment="SB-GATEWAY container"
+      /container/add remote-image=$"SB_IMAGE" interface=$"SB_VETH" root-dir=$"SB_ROOT_DIR" mountlists="sb-gateway-config,sb-gateway-data,sb-gateway-logs,sb-gateway-state" envlist="sb-gateway-env" dns=$"SB_ROUTER_IP" memory-high=$containerMemoryHigh memory-max=$containerMemoryMax start-on-boot=no logging=yes comment="SB-GATEWAY container"
     }
   } do={
     :log error ("SB-GATEWAY: container add/capability check failed; diversion remains disabled: " . $sbContainerError)
@@ -186,7 +207,7 @@
 # Apply lifecycle limits to both a freshly added container and an existing
 # project-owned container. A fresh install must never retain RouterOS defaults
 # restart-policy=no/restart-interval=0s.
-/container/set $containerId memory-high=$containerMemoryHigh memory-max=$containerMemoryMax start-on-boot=yes logging=yes
+/container/set $containerId memory-high=$containerMemoryHigh memory-max=$containerMemoryMax start-on-boot=no logging=yes
 :do { /container/set $containerId restart-policy=always restart-interval=10s } on-error={ /container/set $containerId auto-restart-interval=10s }
 
 :local imageReady false
@@ -473,7 +494,12 @@
     } on-error={ :set shouldStart true }
   }
 }
-:if ($shouldStart = true) do={ /container/start $containerId }
+:if ($shouldStart = true) do={
+  :local storageReady [:parse [/system/script/get $storageProbe source]]
+  :if ([$storageReady $containerId] != true) do={ :error "SB-GATEWAY: container storage is not ready; start refused" }
+  /container/start $containerId
+}
+/system/scheduler/enable $bootScheduler
 /ip/firewall/mangle/disable [find where comment="SB-GATEWAY diversion-gate"]
 /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
 :log warning "SB-GATEWAY: install complete in fail-open state; install the watchdog, then finish the first-launch wizard"

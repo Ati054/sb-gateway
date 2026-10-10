@@ -25,7 +25,8 @@ func TestPruneManagedFilesRetainsThreeBackupGenerationsAndRemovesInstallArtifact
 		{".id":"*13","name":"usb1/sb-gateway/data/lifecycle-uploads/sb-gateway-1.7.0-linux-arm64.tar"},
 		{".id":"*14","name":"usb1/sb-gateway/routeros-ca.crt"},
 		{".id":"*15","name":"autosupout.rif"},
-		{".id":"*16","name":"foreign.backup"}
+		{".id":"*16","name":"foreign.backup"},
+		{".id":"*17","name":"usb1/sb-gateway/container-startup.rsc"}
 	]`
 	deleted := []string{}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -49,11 +50,11 @@ func TestPruneManagedFilesRetainsThreeBackupGenerationsAndRemovesInstallArtifact
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Backups != 4 || result.Install != 4 {
+	if result.Backups != 4 || result.Install != 5 {
 		t.Fatalf("prune result = %#v", result)
 	}
 	sort.Strings(deleted)
-	want := []string{"/rest/file/*1", "/rest/file/*10", "/rest/file/*11", "/rest/file/*2", "/rest/file/*3", "/rest/file/*4", "/rest/file/*8", "/rest/file/*9"}
+	want := []string{"/rest/file/*1", "/rest/file/*10", "/rest/file/*11", "/rest/file/*17", "/rest/file/*2", "/rest/file/*3", "/rest/file/*4", "/rest/file/*8", "/rest/file/*9"}
 	sort.Strings(want)
 	if len(deleted) != len(want) {
 		t.Fatalf("deleted = %#v", deleted)

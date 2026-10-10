@@ -142,6 +142,7 @@ func benchmark(root, binary string, repeat int, r *result) error {
 				return err
 			}
 		}
+		baselineRef := ""
 		config := func(version string, cidrs []string) map[string]any {
 			ips := cidrs
 			if r.Mode == "binary" {
@@ -154,6 +155,9 @@ func benchmark(root, binary string, repeat int, r *result) error {
 					panic(err)
 				}
 				ips = []string{reference}
+				if version == "a" {
+					baselineRef = reference
+				}
 			}
 			inbounds := []any{map[string]any{"tag": "api-in", "listen": "127.0.0.1", "port": api, "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1"}}}
 			routing := []any{map[string]any{"type": "field", "inboundTag": []string{"api-in"}, "outboundTag": "api", "ruleTag": "api"}}
@@ -191,7 +195,7 @@ func benchmark(root, binary string, repeat int, r *result) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 		var managed *managedRun
 		if r.Mode == "managed" {
-			managed = &managedRun{root: root, a: a, b: b}
+			managed = &managedRun{root: root, baselineRef: baselineRef, a: a, b: b}
 		}
 		rows, count, err := runCore(ctx, binary, paths, api, ports[len(ports)-1], managed)
 		cancel()
@@ -222,9 +226,37 @@ func fileSHA256(path string) (string, error) {
 }
 
 type managedRun struct {
-	root  string
-	a, b  []string
-	extra string
+	root, baselineRef string
+	a, b              []string
+	extra             string
+}
+
+func verifyManagedAssets(root string, references ...string) error {
+	keep := make(map[string]bool)
+	for _, reference := range references {
+		name, valid := geoipasset.ReferenceName(reference)
+		if !valid {
+			return fmt.Errorf("invalid retained asset reference")
+		}
+		keep[name] = true
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !geoipasset.IsManagedName(entry.Name()) {
+			continue
+		}
+		if !keep[entry.Name()] || !entry.Type().IsRegular() {
+			return fmt.Errorf("unexpected managed asset remains: %s", entry.Name())
+		}
+		delete(keep, entry.Name())
+	}
+	if len(keep) != 0 {
+		return fmt.Errorf("retained managed assets missing: %d", len(keep))
+	}
+	return nil
 }
 
 func runCore(ctx context.Context, binary string, paths map[string]string, api, socks int, managed *managedRun) ([]metrics, int, error) {
@@ -381,18 +413,8 @@ func runCore(ctx context.Context, binary string, paths map[string]string, api, s
 					if _, err := geoipasset.Prune(managed.root, []string{paths["a"]}, nil, live, time.Now()); err != nil {
 						return err
 					}
-					entries, err = os.ReadDir(managed.root)
-					if err != nil {
+					if err := verifyManagedAssets(managed.root, managed.baselineRef, ref); err != nil {
 						return err
-					}
-					count := 0
-					for _, entry := range entries {
-						if geoipasset.IsManagedName(entry.Name()) {
-							count++
-						}
-					}
-					if count != 2 {
-						return fmt.Errorf("GeoIP assets accumulated: %d", count)
 					}
 				}
 				return nil
@@ -456,11 +478,14 @@ func runCore(ctx context.Context, binary string, paths map[string]string, api, s
 				}
 			}
 			removed, err := geoipasset.Prune(managed.root, []string{paths["a"]}, nil, nil, time.Now())
-			if err != nil || removed < 2 {
+			if err != nil || removed < 1 {
 				return fmt.Errorf("obsolete assets were not removed: %d %v", removed, err)
 			}
 			if _, err := os.Stat(filepath.Join(managed.root, name)); !os.IsNotExist(err) {
 				return fmt.Errorf("orphan asset remains")
+			}
+			if err := verifyManagedAssets(managed.root, managed.baselineRef); err != nil {
+				return err
 			}
 			// Existing streams and new connections still use the compiled IP set.
 			return probe("198.18.0.1", 'M')

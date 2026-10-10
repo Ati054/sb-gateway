@@ -33,6 +33,10 @@ func TestImageRollbackDisablesDiversionEvenAfterReadyRestart(t *testing.T) {
 		spec := recoverySpec()
 		spec.StoppedPredecessor = offline
 		worker := renderImageUpdateWorker(spec)
+		bootGuard := strings.Index(worker, `script="SB-GATEWAY-container-startup"]] > 0`)
+		if bootGuard < 0 || bootGuard > strings.Index(worker, `/system/script/add name=`) {
+			t.Fatal("updater must yield to a live boot job before mutations")
+		}
 		boundary := strings.Index(worker, `:if (($sbGatewayImageMisses < 60) && ($restartCount = 0)) do={ :return true }`)
 		if boundary < 0 {
 			t.Fatal("failed probation boundary is missing")
@@ -59,17 +63,49 @@ func TestImageTransferDoesNotBootBothImagesDuringRouterRestart(t *testing.T) {
 	readback := strings.Index(worker, "metadata readback failed")
 	disable := strings.Index(worker[readback:], `/container/set $current start-on-boot=no`)
 	stop := strings.Index(worker[readback:], `/container/stop $current`)
-	if stop < 0 || disable <= stop || !strings.Contains(worker, `start-on-boot=$previousBoot`) {
-		t.Fatal("previous boot policy must be preserved, then disabled only after stop")
+	if stop < 0 || disable <= stop || !strings.Contains(worker, `"previous-start-on-boot"=[/container/get $current start-on-boot]`) {
+		t.Fatal("previous boot policy must be recorded, then disabled only after stop")
 	}
 	swap := strings.Index(worker, `/container/set $candidate interface=$liveIf comment="SB-GATEWAY container"`)
-	enable := strings.Index(worker, `/container/set $candidate start-on-boot=yes`)
+	enable := strings.LastIndex(worker, `/container/set $candidate start-on-boot=no`)
 	start := strings.Index(worker, `/container/start $candidate`)
 	if swap < 0 || enable <= swap || start <= enable || strings.Contains(worker, `/container/set $current start-on-boot=yes`) {
 		t.Fatal("candidate boot policy must be set after exclusive transfer and before first start, never on live commit")
 	}
 	if !strings.Contains(worker, "candidate boot policy changed during probation") {
 		t.Fatal("commit must reject drift instead of restarting the live candidate")
+	}
+}
+
+func TestImageUpdateMigratesBootOnlyDuringStoppedHandoff(t *testing.T) {
+	for _, offline := range []bool{false, true} {
+		spec := recoverySpec()
+		spec.StoppedPredecessor = offline
+		worker := renderImageUpdateWorker(spec)
+		if strings.Contains(worker, "start-on-boot=yes") || strings.Contains(worker, "start-on-boot=$previousBoot") || strings.Contains(worker, ":trim") {
+			t.Fatal("updater must use the storage gate, including legacy rollback")
+		}
+		for _, fragment := range []string{`$installStartup = true`, `[/system/script/get $startupProbe source]`, `[/system/script/get $startupBoot source]`, `candidate storage is not ready`, `candidate boot policy changed during probation`, `/system/scheduler/enable [find where name="SB-GATEWAY-container-startup"`} {
+			if !strings.Contains(worker, fragment) {
+				t.Fatalf("missing update boot contract: %s", fragment)
+			}
+		}
+		if !offline && !strings.Contains(worker, `[$storageReady $rollback] != true`) {
+			t.Fatal("normal rollback must verify storage before restart")
+		}
+		if offline && !strings.Contains(worker, `:if (true = true) do={ /system/scheduler/disable`) {
+			t.Fatal("offline recovery must not boot the broken predecessor")
+		}
+		commit := worker[strings.Index(worker, `:if ($sbGatewayImageProbation >= 3) do={`):]
+		enable := strings.Index(commit, `/system/scheduler/enable [find where name="SB-GATEWAY-container-startup"`)
+		remove := strings.Index(commit, `/system/script/remove $transfer`)
+		if enable < 0 || remove < 0 || enable > remove {
+			t.Fatal("durable commit must arm boot before removing its receipt")
+		}
+		completed := worker[strings.Index(worker, `:if ([/container/get $current root-dir] = $candidateRoot) do={`):strings.Index(worker, `:local recoveryMountlists`)]
+		if !strings.Contains(completed, `/system/scheduler/enable [find where name="SB-GATEWAY-container-startup"`) {
+			t.Fatal("interrupted committed cleanup must re-arm boot")
+		}
 	}
 }
 
@@ -84,10 +120,10 @@ func TestOfflineRecoveryGuardsPrecedeEveryMutation(t *testing.T) {
 			t.Fatalf("missing pre-mutation guard: %s", guard)
 		}
 	}
-	if mutation < 0 || strings.Count(script, "/system/scheduler/add") != 1 || !strings.Contains(script, `:local retainPrevious true`) {
+	if mutation < 0 || strings.Count(script, `/system/scheduler/add name="SB-GATEWAY-image-update"`) != 1 || !strings.Contains(script, `:local retainPrevious true`) {
 		t.Fatal("scheduler-last or retained-predecessor contract missing")
 	}
-	if strings.Index(script, "/system/scheduler/add") < strings.LastIndex(script, "/container/set $current restart-policy=no") {
+	if strings.Index(script, `/system/scheduler/add name="SB-GATEWAY-image-update"`) < strings.LastIndex(script, "/container/set $current restart-policy=no") {
 		t.Fatal("scheduler is armed before stopping predecessor restart policy")
 	}
 }

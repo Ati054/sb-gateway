@@ -116,6 +116,81 @@ func TestSupervisorRestartsUnexpectedExitWithBoundedBackoff(t *testing.T) {
 	}
 }
 
+func TestSupervisorBoundsShutdownOfUnresponsiveWorker(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+	supervisor, err := NewSupervisor([]Program{{
+		Name: "stalled",
+		Run: func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor.shutdownTimeout = 25 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx) }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrShutdownTimeout) {
+			t.Fatalf("shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown waited indefinitely for the worker")
+	}
+	if state := supervisor.Status()[0]; state.Generation != 1 {
+		t.Fatalf("unresponsive worker was duplicated: %#v", state)
+	}
+}
+
+func TestSupervisorBoundsShutdownDuringStalledPlannedRestart(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+	supervisor, err := NewSupervisor([]Program{{
+		Name: "stalled",
+		Run: func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor.shutdownTimeout = 25 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx) }()
+	<-started
+	restartCtx, restartCancel := context.WithTimeout(ctx, 25*time.Millisecond)
+	defer restartCancel()
+	if err := supervisor.Restart(restartCtx, []string{"stalled"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("restart error = %v", err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrShutdownTimeout) {
+			t.Fatalf("shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stalled planned restart prevented shutdown")
+	}
+	if state := supervisor.Status()[0]; state.Generation != 1 {
+		t.Fatalf("replacement started while old worker was alive: %#v", state)
+	}
+}
+
 func blockingProgram(name string, runs *atomic.Int32) Program {
 	return Program{
 		Name: name,

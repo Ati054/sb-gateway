@@ -18,6 +18,15 @@ const (
 // the in-process owner; these records extend the same exclusion across an API
 // restart while RouterOS or runtime work may still be in flight.
 func (server *Server) stateMutationConflict(allowed string) (string, error) {
+	if allowed != containerStartupOperation {
+		startup, err := server.repository.auxiliary(containerStartupOperation)
+		if err != nil {
+			return "", err
+		}
+		if startup["pending"] == true {
+			return "container-startup", nil
+		}
+	}
 	memory, err := server.repository.auxiliary(containerMemoryOperation)
 	if err != nil {
 		return "", err

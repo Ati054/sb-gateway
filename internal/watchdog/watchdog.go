@@ -216,13 +216,13 @@ func Run(ctx context.Context, opts Options) error {
 		if err != nil || !ready.Ready {
 			reasons = append(reasons, "api_ready")
 		}
-		if !processRunning("xray") {
+		generation, coreRunning := xrayProcessState(opts, "/proc")
+		if !coreRunning {
 			reasons = append(reasons, "core_process")
 		}
 		if !regularNonEmpty(opts.XrayConfig) {
 			reasons = append(reasons, "core_config")
 		}
-		generation := runtimeproof.XrayGeneration(opts.XrayReadyFile, opts.XrayConfig, "/proc")
 		if generation == "" {
 			reasons = append(reasons, "core_startup")
 		}
@@ -798,8 +798,17 @@ func (r *runner) applyActive(now time.Time) bool {
 	return false
 }
 
-func processRunning(name string) bool {
-	paths, _ := filepath.Glob("/proc/[0-9]*/comm")
+func xrayProcessState(opts Options, procRoot string) (string, bool) {
+	generation := runtimeproof.XrayGeneration(opts.XrayReadyFile, opts.XrayConfig, procRoot)
+	if generation != "" {
+		return generation, true
+	}
+	// Startup has no ready PID yet; preserve the ordinary discovery fallback.
+	return "", processRunningAt(procRoot, "xray")
+}
+
+func processRunningAt(procRoot, name string) bool {
+	paths, _ := filepath.Glob(filepath.Join(procRoot, "[0-9]*", "comm"))
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err == nil && strings.TrimSpace(string(data)) == name {

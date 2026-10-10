@@ -54,7 +54,7 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
 ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
-ARG SB_GATEWAY_VERSION=1.6.48
+ARG SB_GATEWAY_VERSION=1.6.49
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY --from=xray-build /src /opt/xray-source
@@ -90,7 +90,7 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
 ARG XRAY_VERSION=26.9.30
-ARG SB_GATEWAY_VERSION=1.6.48
+ARG SB_GATEWAY_VERSION=1.6.49
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -130,7 +130,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.9.30
 ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.48
+ARG SB_GATEWAY_VERSION=1.6.49
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \
@@ -152,6 +152,7 @@ LABEL org.opencontainers.image.title="sb-gateway" \
 ENV SB_GATEWAY_VERSION=${SB_GATEWAY_VERSION} \
     SB_GATEWAY_REVISION=${SB_GATEWAY_REVISION} \
     SB_XRAY_VERSION=${XRAY_VERSION} \
+    GODEBUG=disablethp=1 \
     GOGC=150 \
     GOMEMLIMIT=128MiB \
     SB_XRAY_GOMEMLIMIT=192MiB \

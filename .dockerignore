@@ -42,6 +42,7 @@ routeros/*
 !routeros/variables.example.rsc
 !routeros/preflight.rsc
 !routeros/install.rsc
+!routeros/container-startup.rsc
 !routeros/*.go
 !routeros/watchdog.rsc
 !routeros/cloudflare-update.rsc
