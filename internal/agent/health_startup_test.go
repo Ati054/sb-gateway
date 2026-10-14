@@ -381,6 +381,7 @@ func TestHealthRestartConfirmsTransientFatalNetworkBeforeFailover(t *testing.T) 
 	activeDelay, reserveDelay := 100, 90
 	item.MedianDelayMS = map[string]*int{"de": &activeDelay, "nl": &reserveDelay}
 	item.LastProbeAt = map[string]float64{"de": 940, "nl": 1000}
+	item.Samples["nl"] = []healthSample{{At: 1000, OK: true, DelayMS: &reserveDelay}}
 	if err := writeJSONAtomic(statePath(root, "selector-health"), healthState{"europe": item}); err != nil {
 		t.Fatal(err)
 	}
@@ -427,6 +428,7 @@ func TestHealthRestartStillFailsOverImmediatelyOnTLSFailure(t *testing.T) {
 	item.Recoveries = map[string]int{"de": 3, "nl": 3}
 	item.MedianDelayMS = map[string]*int{"nl": &reserveDelay}
 	item.LastProbeAt = map[string]float64{"de": 940, "nl": 1000}
+	item.Samples["nl"] = []healthSample{{At: 1000, OK: true, DelayMS: &reserveDelay}}
 	if err := writeJSONAtomic(statePath(root, "selector-health"), healthState{"europe": item}); err != nil {
 		t.Fatal(err)
 	}

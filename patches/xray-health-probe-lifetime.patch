@@ -1,0 +1,138 @@
+diff --git a/proxy/http/server.go b/proxy/http/server.go
+--- a/proxy/http/server.go
++++ b/proxy/http/server.go
+@@ -99,6 +99,17 @@ func (s *Server) ProcessWithFirstbyte(ctx context.Context, network net.Network, con
+ 	if !proxy.IsRAWTransportWithoutSecurity(conn) {
+ 		inbound.CanSpliceCopy = 3
+ 	}
++	if strings.HasPrefix(inbound.Tag, "outbound-health-") {
++		// Probe EOF must not acquire Vision's long-lived raw splice timer.
++		inbound.CanSpliceCopy = 3
++		// CONNECT responds before dialing upstream; the controller's timeout
++		// cannot interrupt a silent REALITY peer on its own.
++		var cancel context.CancelFunc
++		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
++		defer cancel()
++		stopClose := context.AfterFunc(ctx, func() { conn.Close() })
++		defer stopClose()
++	}
+ 	var reader *bufio.Reader
+ 	if len(firstbyte) > 0 {
+ 		readerWithoutFirstbyte := bufio.NewReaderSize(readerOnly{conn}, buf.Size)
+diff --git a/transport/internet/reality/reality.go b/transport/internet/reality/reality.go
+--- a/transport/internet/reality/reality.go
++++ b/transport/internet/reality/reality.go
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/xtls/xray-core/common/crypto"
+ 	"github.com/xtls/xray-core/common/errors"
+ 	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
+ 	"github.com/xtls/xray-core/common/utils"
+ 	"github.com/xtls/xray-core/core"
+ 	"github.com/xtls/xray-core/transport/internet/tls"
+@@ -141,6 +142,14 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Ce
+ }
+ 
+ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destination) (net.Conn, error) {
++	// Only an authenticated connection or ordinary camouflage takes ownership.
++	keepConn := false
++	defer func() {
++		if !keepConn {
++			c.Close()
++		}
++	}()
++
+ 	localAddr := c.LocalAddr().String()
+ 	uConn := &UConn{
+ 		Config: config,
+@@ -206,6 +215,10 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destination
+ 	}
+ 	if !uConn.Verified {
+ 		errors.LogError(ctx, "REALITY: received real certificate (potential MITM or redirection)")
++		if inbound := session.InboundFromContext(ctx); inbound != nil && strings.HasPrefix(inbound.Tag, "outbound-health-") {
++			return nil, errors.New("REALITY: invalid health probe authentication")
++		}
++		keepConn = true
+ 		go func() {
+ 			client := &http.Client{
+ 				Transport: &http2.Transport{
+@@ -299,6 +312,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destination
+ 		time.Sleep(time.Duration(crypto.RandBetween(config.SpiderY[8], config.SpiderY[9])) * time.Millisecond) // return
+ 		return nil, errors.New("REALITY: processed invalid connection")
+ 	}
++	keepConn = true
+ 	return uConn, nil
+ }
+ 
+
+diff --git a/transport/internet/reality/sb_lifetime_test.go b/transport/internet/reality/sb_lifetime_test.go
+new file mode 100644
+--- /dev/null
++++ b/transport/internet/reality/sb_lifetime_test.go
+@@ -0,0 +1,66 @@
++package reality
++
++import (
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"io"
++	"net"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	xnet "github.com/xtls/xray-core/common/net"
++)
++
++type sbTrackedConn struct {
++	net.Conn
++	closed atomic.Int32
++}
++
++func (c *sbTrackedConn) Close() error {
++	c.closed.Add(1)
++	return c.Conn.Close()
++}
++
++func TestSBRealityFailureClosesOwnedSocket(t *testing.T) {
++	key, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, mode := range []string{"invalid-key", "invalid-fingerprint", "read-timeout", "cancel"} {
++		t.Run(mode, func(t *testing.T) {
++			raw, peer := net.Pipe()
++			conn := &sbTrackedConn{Conn: raw}
++			defer raw.Close()
++			defer peer.Close()
++			config := &Config{ServerName: "example.org", Fingerprint: "chrome", PublicKey: key.PublicKey().Bytes()}
++			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++			defer cancel()
++			switch mode {
++			case "invalid-key":
++				config.PublicKey = nil
++			case "invalid-fingerprint":
++				config.Fingerprint = "unsupported-sb-test"
++			case "read-timeout":
++				conn.SetDeadline(time.Now().Add(100 * time.Millisecond))
++			case "cancel":
++				cancel()
++			}
++			drained := make(chan struct{})
++			go func() { io.Copy(io.Discard, peer); close(drained) }()
++			result, err := UClient(conn, config, ctx, xnet.TCPDestination(xnet.ParseAddress("example.org"), 443))
++			if result != nil || err == nil {
++				t.Fatalf("failed handshake returned %v, %v", result, err)
++			}
++			if conn.closed.Load() == 0 {
++				t.Fatal("failed handshake retained its owned socket")
++			}
++			select {
++			case <-drained:
++			case <-time.After(time.Second):
++				t.Fatal("peer did not observe failed socket closure")
++			}
++		})
++	}
++}

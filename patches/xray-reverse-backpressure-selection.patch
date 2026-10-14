@@ -1,0 +1,436 @@
+diff --git a/app/reverse/portal.go b/app/reverse/portal.go
+index 0e59598..c1af318 100644
+--- a/app/reverse/portal.go
++++ b/app/reverse/portal.go
+@@ -72,7 +72,7 @@ func (p *Portal) HandleConnection(ctx context.Context, link *transport.Link) err
+ 	}
+ 
+ 	if isDomain(ob.Target, p.domain) {
+-		muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{})
++		muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{ObserveDownlinkBackpressure: true})
+ 		if err != nil {
+ 			return errors.New("failed to create mux client worker").Base(err)
+ 		}
+@@ -180,31 +180,27 @@ func (p *StaticMuxPicker) PickAvailable() (*mux.ClientWorker, error) {
+ 		return nil, errors.New("empty worker list")
+ 	}
+ 
+-	var minIdx int = -1
+-	var minConn uint32 = 9999
+-	for i, w := range p.workers {
+-		if w.draining {
+-			continue
+-		}
+-		if w.IsFull() {
+-			continue
+-		}
+-		if w.client.ActiveConnections() < minConn {
+-			minConn = w.client.ActiveConnections()
+-			minIdx = i
+-		}
+-	}
+-
+-	if minIdx == -1 {
++	// Preserve drain priority, then prefer an unblocked tunnel. If all tunnels
++	// are blocked, retain the least-session fallback without closing streams.
++	var minIdx = -1
++	for _, allowDraining := range []bool{false, true} {
++		var minConn uint32 = ^uint32(0)
++		var selectedBlocked bool
+ 		for i, w := range p.workers {
+-			if w.IsFull() {
++			if (!allowDraining && w.draining) || w.IsFull() {
+ 				continue
+ 			}
+-			if w.client.ActiveConnections() < minConn {
+-				minConn = w.client.ActiveConnections()
++			blocked := w.client.DownlinkBlockedFor() >= 2*time.Second
++			connections := w.client.ActiveConnections()
++			if minIdx == -1 || (selectedBlocked && !blocked) || (selectedBlocked == blocked && connections < minConn) {
++				minConn = connections
+ 				minIdx = i
++				selectedBlocked = blocked
+ 			}
+ 		}
++		if minIdx != -1 {
++			break
++		}
+ 	}
+ 
+ 	if minIdx != -1 {
+diff --git a/common/mux/client.go b/common/mux/client.go
+index 0463be5..6d24bd0 100644
+--- a/common/mux/client.go
++++ b/common/mux/client.go
+@@ -5,6 +5,7 @@ import (
+ 	goerrors "errors"
+ 	"io"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/xtls/xray-core/common"
+@@ -169,8 +170,9 @@ func (f *DialingWorkerFactory) Create() (*ClientWorker, error) {
+ }
+ 
+ type ClientStrategy struct {
+-	MaxConcurrency uint32
+-	MaxConnection  uint32
++	MaxConcurrency              uint32
++	MaxConnection               uint32
++	ObserveDownlinkBackpressure bool
+ }
+ 
+ type ClientWorker struct {
+@@ -179,6 +181,32 @@ type ClientWorker struct {
+ 	done           *done.Instance
+ 	timer          *time.Ticker
+ 	strategy       ClientStrategy
++	downlinkOutput *sbDownlinkWriter
++}
++
++var sbDownlinkEpoch = time.Now()
++
++// Only Reverse portals track blocked writes; ordinary Mux is unchanged.
++type sbDownlinkWriter struct {
++	destination buf.Writer
++	started     atomic.Int64
++}
++
++func (w *sbDownlinkWriter) WriteMultiBuffer(data buf.MultiBuffer) error {
++	w.started.Store(time.Since(sbDownlinkEpoch).Nanoseconds())
++	defer w.started.Store(0)
++	return w.destination.WriteMultiBuffer(data)
++}
++
++func (m *ClientWorker) DownlinkBlockedFor() time.Duration {
++	if m.downlinkOutput == nil {
++		return 0
++	}
++	started := m.downlinkOutput.started.Load()
++	if started == 0 {
++		return 0
++	}
++	return time.Since(sbDownlinkEpoch) - time.Duration(started)
+ }
+ 
+ var (
+@@ -196,6 +224,9 @@ func NewClientWorker(stream transport.Link, s ClientStrategy) (*ClientWorker, er
+ 		strategy:       s,
+ 	}
+ 
++	if s.ObserveDownlinkBackpressure {
++		c.downlinkOutput = &sbDownlinkWriter{}
++	}
+ 	go c.fetchOutput()
+ 	go c.monitor()
+ 
+@@ -359,7 +390,15 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
+ 	}
+ 
+ 	rr := s.NewReader(reader, &meta.Target)
+-	err := buf.Copy(rr, s.output)
++	output := s.output
++	if m.downlinkOutput != nil {
++		m.downlinkOutput.destination = output
++		output = m.downlinkOutput
++	}
++	err := buf.Copy(rr, output)
++	if m.downlinkOutput != nil {
++		m.downlinkOutput.destination = nil
++	}
+ 	if err != nil && buf.IsWriteError(err) {
+ 		errors.LogInfoInner(context.Background(), err, "failed to write to downstream. closing session ", s.ID)
+ 		s.Close(false)
+diff --git a/proxy/vless/inbound/inbound.go b/proxy/vless/inbound/inbound.go
+index d6a9d8e..59be870 100644
+--- a/proxy/vless/inbound/inbound.go
++++ b/proxy/vless/inbound/inbound.go
+@@ -652,7 +652,7 @@ func (r *Reverse) Tag() string {
+ }
+ 
+ func (r *Reverse) NewMux(ctx context.Context, link *transport.Link, observer features.Feature) error {
+-	muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{})
++	muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{ObserveDownlinkBackpressure: true})
+ 	if err != nil {
+ 		return errors.New("failed to create mux client worker").Base(err)
+ 	}
+diff --git a/common/mux/sb_backpressure_test.go b/common/mux/sb_backpressure_test.go
+new file mode 100644
+index 0000000..7058129
+--- /dev/null
++++ b/common/mux/sb_backpressure_test.go
+@@ -0,0 +1,45 @@
++package mux
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/xtls/xray-core/common/buf"
++)
++
++type sbFailingOutput struct{}
++
++func (sbFailingOutput) WriteMultiBuffer(data buf.MultiBuffer) error {
++	buf.ReleaseMulti(data)
++	return errors.New("test write failed")
++}
++
++func TestSBReverseTrackingClearsOnWriteFailure(t *testing.T) {
++	writer := &sbDownlinkWriter{destination: sbFailingOutput{}}
++	client := &ClientWorker{downlinkOutput: writer}
++	if err := writer.WriteMultiBuffer(nil); err == nil {
++		t.Fatal("write error lost")
++	}
++	if client.DownlinkBlockedFor() != 0 {
++		t.Fatal("failed write remained blocked")
++	}
++	if (&ClientWorker{}).DownlinkBlockedFor() != 0 {
++		t.Fatal("ordinary Mux reported blocked")
++	}
++}
++
++func BenchmarkSBReverseDownlinkTracking(b *testing.B) {
++	b.Run("untracked", func(b *testing.B) {
++		b.ReportAllocs()
++		for b.Loop() {
++			buf.Discard.WriteMultiBuffer(nil)
++		}
++	})
++	b.Run("tracked", func(b *testing.B) {
++		b.ReportAllocs()
++		writer := sbDownlinkWriter{destination: buf.Discard}
++		for b.Loop() {
++			writer.WriteMultiBuffer(nil)
++		}
++	})
++}
+diff --git a/app/reverse/sb_backpressure_test.go b/app/reverse/sb_backpressure_test.go
+new file mode 100644
+index 0000000..6b34ef3
+--- /dev/null
++++ b/app/reverse/sb_backpressure_test.go
+@@ -0,0 +1,222 @@
++package reverse
++
++import (
++	"context"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/mux"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/pipe"
++)
++
++type sbBlockedWriter struct {
++	entered   chan struct{}
++	release   chan struct{}
++	once      sync.Once
++	closeOnce sync.Once
++}
++
++type sbReceivedWriter struct{ received chan struct{} }
++
++func (w sbReceivedWriter) WriteMultiBuffer(data buf.MultiBuffer) error {
++	buf.ReleaseMulti(data)
++	select {
++	case w.received <- struct{}{}:
++	default:
++	}
++	return nil
++}
++
++func (w *sbBlockedWriter) WriteMultiBuffer(data buf.MultiBuffer) error {
++	w.once.Do(func() { close(w.entered) })
++	<-w.release
++	buf.ReleaseMulti(data)
++	return nil
++}
++
++func (w *sbBlockedWriter) Close() error {
++	w.closeOnce.Do(func() { close(w.release) })
++	return nil
++}
++
++func sbPickerClient(t *testing.T, connections int, output buf.Writer) (*mux.ClientWorker, *pipe.Writer) {
++	t.Helper()
++	reader, writer := pipe.New(pipe.WithSizeLimit(16 * 1024))
++	uplink := make(chan struct{}, 1)
++	client, err := mux.NewClientWorker(transport.Link{Reader: reader, Writer: sbReceivedWriter{received: uplink}}, mux.ClientStrategy{ObserveDownlinkBackpressure: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { client.Close(); writer.Close() })
++	for range connections {
++		input, inputWriter := pipe.New(pipe.WithSizeLimit(4 * 1024))
++		t.Cleanup(func() { inputWriter.Close() })
++		ctx := session.ContextWithOutbounds(context.Background(), []*session.Outbound{{Target: net.TCPDestination(net.DomainAddress("example.test"), 443)}})
++		if !client.Dispatch(ctx, &transport.Link{Reader: input, Writer: output}) {
++			t.Fatal("dispatch failed")
++		}
++		// A real peer cannot reply before the request frame initializes the session.
++		if err := inputWriter.WriteMultiBuffer(buf.MergeBytes(nil, []byte("request"))); err != nil {
++			t.Fatal(err)
++		}
++		select {
++		case <-uplink:
++		case <-time.After(time.Second):
++			t.Fatal("request frame not transmitted")
++		}
++	}
++	return client, writer
++}
++
++func TestSBReversePickerSkipsBlockedDownlink(t *testing.T) {
++	blocked := &sbBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
++	t.Cleanup(func() { blocked.Close() })
++	slow, frames := sbPickerClient(t, 1, blocked)
++	received := make(chan struct{}, 1)
++	healthy, healthyFrames := sbPickerClient(t, 2, sbReceivedWriter{received: received})
++	response := mux.NewResponseWriter(1, frames, protocol.TransferTypeStream)
++	if err := response.WriteMultiBuffer(buf.MergeBytes(nil, []byte("blocked response"))); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-blocked.entered:
++	case <-time.After(time.Second):
++		t.Fatal("response never reached downstream writer")
++	}
++	healthyResponse := mux.NewResponseWriter(1, healthyFrames, protocol.TransferTypeStream)
++	if err := healthyResponse.WriteMultiBuffer(buf.MergeBytes(nil, []byte("independent response"))); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-received:
++	case <-time.After(time.Second):
++		t.Fatal("independent tunnel stopped with blocked sibling")
++	}
++	time.Sleep(2100 * time.Millisecond)
++	picker := &StaticMuxPicker{workers: []*PortalWorker{{client: slow}, {client: healthy}}}
++	selected, err := picker.PickAvailable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if selected != healthy {
++		t.Fatal("new request selected blocked tunnel because it has fewer sessions")
++	}
++	if slow.Closed() {
++		t.Fatal("existing tunnel was closed")
++	}
++	blocked.Close()
++	deadline := time.Now().Add(time.Second)
++	for slow.DownlinkBlockedFor() != 0 && time.Now().Before(deadline) {
++		time.Sleep(time.Millisecond)
++	}
++	selected, err = picker.PickAvailable()
++	if err != nil || selected != slow {
++		t.Fatalf("recovered worker not selectable: %v", err)
++	}
++}
++
++func TestSBReversePickerPreservesDrainAndLeastSessionOrder(t *testing.T) {
++	fewer, _ := sbPickerClient(t, 1, buf.Discard)
++	more, _ := sbPickerClient(t, 2, buf.Discard)
++	picker := &StaticMuxPicker{workers: []*PortalWorker{{client: fewer}, {client: more}}}
++	selected, err := picker.PickAvailable()
++	if err != nil || selected != fewer {
++		t.Fatalf("least-session order changed: %v", err)
++	}
++	picker.workers[0].draining = true
++	selected, err = picker.PickAvailable()
++	if err != nil || selected != more {
++		t.Fatalf("draining worker preferred: %v", err)
++	}
++	picker.workers[1].draining = true
++	selected, err = picker.PickAvailable()
++	if err != nil || selected != fewer {
++		t.Fatalf("draining fallback changed: %v", err)
++	}
++	fewer.Close()
++	selected, err = picker.PickAvailable()
++	if err != nil || selected != more {
++		t.Fatalf("closed worker still selected: %v", err)
++	}
++}
++
++func TestSBReversePickerRetainsSoleBlockedTunnel(t *testing.T) {
++	blocked := &sbBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
++	t.Cleanup(func() { blocked.Close() })
++	client, frames := sbPickerClient(t, 1, blocked)
++	response := mux.NewResponseWriter(1, frames, protocol.TransferTypeStream)
++	if err := response.WriteMultiBuffer(buf.MergeBytes(nil, []byte("blocked response"))); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-blocked.entered:
++	case <-time.After(time.Second):
++		t.Fatal("response never reached writer")
++	}
++	time.Sleep(2100 * time.Millisecond)
++	picker := &StaticMuxPicker{workers: []*PortalWorker{{client: client}}}
++	selected, err := picker.PickAvailable()
++	if err != nil || selected != client || client.Closed() {
++		t.Fatalf("sole tunnel discarded: %v", err)
++	}
++}
++
++func TestSBReversePickerRetainsAllBlockedFallback(t *testing.T) {
++	var clients []*mux.ClientWorker
++	for count := 1; count <= 2; count++ {
++		blocked := &sbBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
++		t.Cleanup(func() { blocked.Close() })
++		client, frames := sbPickerClient(t, count, blocked)
++		clients = append(clients, client)
++		response := mux.NewResponseWriter(1, frames, protocol.TransferTypeStream)
++		if err := response.WriteMultiBuffer(buf.MergeBytes(nil, []byte("blocked response"))); err != nil {
++			t.Fatal(err)
++		}
++		select {
++		case <-blocked.entered:
++		case <-time.After(time.Second):
++			t.Fatal("response never reached writer")
++		}
++	}
++	time.Sleep(2100 * time.Millisecond)
++	picker := &StaticMuxPicker{workers: []*PortalWorker{{client: clients[0]}, {client: clients[1]}}}
++	selected, err := picker.PickAvailable()
++	if err != nil || selected != clients[0] {
++		t.Fatalf("all-blocked fallback changed: %v", err)
++	}
++	for _, client := range clients {
++		if client.Closed() {
++			t.Fatal("blocked worker closed")
++		}
++	}
++}
++
++func TestSBReversePickerKeepsProfilesIndependent(t *testing.T) {
++	blocked := &sbBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
++	t.Cleanup(func() { blocked.Close() })
++	first, frames := sbPickerClient(t, 1, blocked)
++	second, _ := sbPickerClient(t, 1, buf.Discard)
++	response := mux.NewResponseWriter(1, frames, protocol.TransferTypeStream)
++	if err := response.WriteMultiBuffer(buf.MergeBytes(nil, []byte("blocked response"))); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-blocked.entered:
++	case <-time.After(time.Second):
++		t.Fatal("response never reached writer")
++	}
++	time.Sleep(2100 * time.Millisecond)
++	for _, client := range []*mux.ClientWorker{first, second} {
++		picker := &StaticMuxPicker{workers: []*PortalWorker{{client: client}}}
++		selected, err := picker.PickAvailable()
++		if err != nil || selected != client {
++			t.Fatalf("selection crossed profile boundary: %v", err)
++		}
++	}
++}

@@ -49,6 +49,28 @@ func TestBuildXrayHealthPoolScopesEnabledLocalPolicies(t *testing.T) {
 	}
 }
 
+func TestUnusedReverseIsNotAHealthProbeCandidate(t *testing.T) {
+	config := map[string]any{
+		"reverse_vless_exits": []any{map[string]any{"id": "used", "enabled": true}, map[string]any{"id": "unused", "enabled": true}},
+		"policies":            []any{map[string]any{"id": "route", "mode": "priority", "selection_order": []string{"reverse:used"}}},
+	}
+	body, err := BuildXrayHealthPool(config, nil, map[string]any{"outbounds": []any{map[string]any{"tag": "block"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pool map[string]any
+	if err := json.Unmarshal(body, &pool); err != nil {
+		t.Fatal(err)
+	}
+	contract := objectValue(objectValue(pool["health_policies"])["route"])
+	if got := stringSlice(contract["candidates"]); !reflect.DeepEqual(got, []string{"reverse-vless-used"}) {
+		t.Fatalf("unused profile entered health probes: %v", got)
+	}
+	if _, present := objectValue(contract["nodes"])["reverse-vless-unused"]; present {
+		t.Fatal("unused profile entered health inventory")
+	}
+}
+
 func TestBuildXrayHealthPoolUsesCurrentPriorityOrder(t *testing.T) {
 	config := map[string]any{
 		"reverse_vless_exits": []any{

@@ -228,8 +228,8 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 		}
 		if len(runtime.restartOrder(changed)) > 0 {
 			var guardErr error
-			// Protect publication itself: watchdog must not validate a new
-			// config against the previous core before Restart is called.
+			// Protect publication itself: new listener inventory must not be
+			// compared with the previous core before Restart is called.
 			releaseGuard, guardErr = runtime.beginApplyGuard()
 			if guardErr != nil {
 				releaseGuard = func() {}

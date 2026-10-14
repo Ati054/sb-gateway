@@ -31,8 +31,41 @@ type emergencyAvailabilityRuntime interface {
 	ProbeEmergencyAvailabilityParallel([]string, func(string, probeEvidence) bool) map[string]probeEvidence
 }
 
+type rankedEmergencyAvailabilityRuntime interface {
+	ProbeRankedEmergencyAvailabilityParallel([]string, []string, func(string, probeEvidence) bool) map[string]probeEvidence
+}
+
 type emergencyCandidateRuntime interface {
 	ProbeEmergencyAvailability(string) probeEvidence
+}
+
+const emergencyPreferenceWait = time.Second
+
+type emergencyChoice struct {
+	preferred    []string
+	firstSuccess string
+	expired      bool
+}
+
+func (choice *emergencyChoice) ready(measured map[string]probeEvidence) (string, probeEvidence) {
+	pending := false
+	for _, candidate := range choice.preferred {
+		evidence, checked := measured[candidate]
+		if !checked {
+			pending = true
+			continue
+		}
+		if evidence.OK {
+			if pending && !choice.expired {
+				return "", probeEvidence{}
+			}
+			return candidate, evidence
+		}
+	}
+	if choice.firstSuccess != "" && (!pending || choice.expired) {
+		return choice.firstSuccess, measured[choice.firstSuccess]
+	}
+	return "", probeEvidence{}
 }
 
 func failureConfirmationThreshold(evidence probeEvidence, configured int) int {
@@ -97,20 +130,29 @@ func clearUnderlayFailure(item *policyHealthState) bool {
 }
 
 func knownFreshReserve(now time.Time, selected string, candidates []string, mode string, groups map[string]int, item *policyHealthState, p effectivePolicySettings) string {
+	fresh := knownFreshReserves(now, selected, candidates, mode, groups, item, p)
+	if len(fresh) == 0 {
+		return ""
+	}
+	return fresh[0]
+}
+
+func knownFreshReserves(now time.Time, selected string, candidates []string, mode string, groups map[string]int, item *policyHealthState, p effectivePolicySettings) []string {
 	fresh := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		if candidate == selected || !item.AvailabilityOK[candidate] || !item.QualityOK[candidate] ||
 			item.AvailabilityFailures[candidate] != 0 || item.Recoveries[candidate] < p.recoveryThreshold ||
-			item.MedianDelayMS[candidate] == nil || item.LastProbeAt[candidate] <= 0 ||
-			float64(now.Unix())-item.LastProbeAt[candidate] > float64(p.backup) {
+			candidateDelay(candidate, item.MedianDelayMS) <= 0 {
+			continue
+		}
+		// Availability-only probes must not refresh an old quality ranking.
+		age, recentQuality := qualitySampleAge(now, item, candidate)
+		if !recentQuality || age > float64(p.backup) {
 			continue
 		}
 		fresh = append(fresh, candidate)
 	}
-	if len(fresh) == 0 {
-		return ""
-	}
-	return rankCandidates(fresh, mode, groups, item.DailyStats, item.MedianDelayMS)[0]
+	return rankCandidates(fresh, mode, groups, nil, item.MedianDelayMS)
 }
 
 // A cached reserve gets the first emergency slot, but must pass a current
@@ -132,7 +174,34 @@ func prioritizeEmergencyReserve(targets []string, reserve string, closed map[str
 	return result
 }
 
-func (controller *healthController) probeEmergencyCandidates(policyID string, candidates []string, p effectivePolicySettings) (observations map[string]probeEvidence, chosen string, probeErr error) {
+func emergencyProbePlan(now time.Time, selected string, targets, candidates []string, groups map[string]int, item *policyHealthState, p effectivePolicySettings) ([]string, []string) {
+	if p.mode != "best" {
+		return prioritizeEmergencyReserve(targets, knownFreshReserve(now, selected, withoutClosedCandidates(candidates, item.PreflightClosed), p.mode, groups, item, p), item.PreflightClosed, p.batch), nil
+	}
+	fresh := knownFreshReserves(now, selected, withoutClosedCandidates(candidates, item.PreflightClosed), p.mode, groups, item, p)
+	if len(fresh) == 0 {
+		return targets, nil
+	}
+	// Keep one sweep slot so unknown endpoints still get a current probe.
+	result := append([]string(nil), fresh[:minInt(len(fresh), maxInt(1, p.batch-1))]...)
+	for _, candidate := range targets {
+		if len(result) >= p.batch {
+			break
+		}
+		if !contains(result, candidate) {
+			result = append(result, candidate)
+		}
+	}
+	preferred := []string{}
+	for _, candidate := range fresh {
+		if contains(result, candidate) {
+			preferred = append(preferred, candidate)
+		}
+	}
+	return result, preferred
+}
+
+func (controller *healthController) probeEmergencyCandidates(policyID string, candidates []string, preferred []string) (observations map[string]probeEvidence, chosen string, probeErr error) {
 	trace := beginHealthStage("emergency_batch", "controller", policyID, "")
 	defer func() { trace.finish(probeErr == nil && chosen != "") }()
 	measured := make(map[string]probeEvidence, len(candidates))
@@ -149,7 +218,9 @@ func (controller *healthController) probeEmergencyCandidates(policyID string, ca
 		selected = candidate
 		return true
 	}
-	if urgent, ok := controller.runtime.(emergencyAvailabilityRuntime); ok && len(candidates) > 0 {
+	if ranked, ok := controller.runtime.(rankedEmergencyAvailabilityRuntime); ok && len(preferred) > 0 {
+		measured = ranked.ProbeRankedEmergencyAvailabilityParallel(candidates, preferred, accept)
+	} else if urgent, ok := controller.runtime.(emergencyAvailabilityRuntime); ok && len(candidates) > 0 {
 		measured = urgent.ProbeEmergencyAvailabilityParallel(candidates, accept)
 	} else if parallel, ok := controller.runtime.(parallelAvailabilityRuntime); ok && len(candidates) > 1 {
 		measured = parallel.ProbeAvailabilityParallel(candidates, accept)

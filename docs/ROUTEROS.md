@@ -157,11 +157,20 @@ TUN/gVisor и `/dev/net/tun` ему не требуются. Поле legacy cli
 [рекомендации MikroTik для контейнеров](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container).
 
 Xray/VLESS переносит только TCP/UDP, не ICMP и не произвольный IP-туннель.
-При активном diversion публичный ping управляемого клиента явно отклоняется
-контейнером (`admin-prohibited`), а не зацикливается через RouterOS и не выходит
-на WAN в обход выбранного листа. Даже GeoIP/direct services являются правилами
-TCP/UDP, не исключением для ICMP. Локальные назначения/exclusions остаются
-доступны. Forward guard также останавливает публичный TCP/UDP, если он по ошибке
+По умолчанию публичный ping управляемого клиента идёт через WAN, не VPN.
+Переключатель «Ping через WAN» (`system.networking.allow_wan_ping`, default
+`true`) запрещает только публичный echo request/reply; это осознанное исключение
+для IPv4 и IPv6, в том числе при `container_outage=lan_only`.
+ICMP/ICMPv6-ошибки разрешённых соединений (`related`) проходят независимо от
+переключателя, включая Fragmentation Needed и Packet Too Big для PMTUD.
+Перенаправления ICMP и произвольные ICMP-типы этим не разрешаются.
+Публичные GRE/ESP и прочие протоколы вне TCP/UDP/ICMP управляемых клиентов
+блокируются во всех режимах. Локальные назначения остаются вне этого запрета.
+Multicast `224.0.0.0/4`, `ff00::/8` и broadcast не зависят от редактируемого
+списка исключений. ND/RA и DHCP к самому RouterOS не перехватываются.
+Политика IPv6 TCP/UDP `block_managed` не изменена: IPv6-проксирование LAN
+этим не включается. Правила устанавливаются при Apply, ручной импорт не нужен.
+Forward guard также останавливает публичный TCP/UDP, если он по ошибке
 не попал в TPROXY; watchdog требует guard для readiness. При отказе контейнера
 по-прежнему действует выбранный `container_outage` (direct либо block).
 
@@ -169,7 +178,7 @@ Watchdog проверяет таблицу через `nft -j`: реальные
 с нужным портом и ingress-scoped ICMP reject. Текстовый формат `nft list`
 может отличаться от исходной записи правил и не используется как контракт
 готовности; один comment без reject не считается защитой.
-Успешный ping публичного адреса не является проверкой VLESS: проверяйте DNS
+Успешный ping публичного адреса проверяет WAN, не VLESS: проверяйте DNS
 и TCP/UDP-запросы. См. [ограничение ядра Xray](https://xtls.github.io/en/config/routing.html).
 
 Для устройства с 1 ГБ RAM installer по умолчанию задаёт контейнеру

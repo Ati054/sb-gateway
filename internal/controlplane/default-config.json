@@ -129,6 +129,7 @@
       "container_address": "",
       "container_dns": "",
       "ipv6_mode": "block_managed",
+      "allow_wan_ping": true,
       "remote_ipv6_mode": "proxy_only",
       "routeros_gateway": "",
       "routing_table": "to-sb-gateway",

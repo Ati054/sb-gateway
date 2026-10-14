@@ -132,6 +132,9 @@ table inet $nft_table {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
     iifname "$uplink_dev" fib daddr type local return
+    iifname "$uplink_dev" fib daddr type broadcast return
+    iifname "$uplink_dev" ip daddr 224.0.0.0/4 return
+    iifname "$uplink_dev" ip6 daddr ff00::/8 return
     $exclude_rule
     iifname "$uplink_dev" meta l4proto tcp tproxy to :$tproxy_port meta mark set $tproxy_mark accept
     iifname "$uplink_dev" meta l4proto udp tproxy to :$tproxy_port meta mark set $tproxy_mark accept
@@ -143,6 +146,11 @@ table inet $nft_table {
   }
   chain forward {
     type filter hook forward priority filter; policy accept;
+    iifname "$uplink_dev" meta l4proto icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } ct state related accept
+    iifname "$uplink_dev" meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } ct state related accept
+    iifname "$uplink_dev" fib daddr type broadcast return
+    iifname "$uplink_dev" ip daddr 224.0.0.0/4 return
+    iifname "$uplink_dev" ip6 daddr ff00::/8 return
     $exclude_rule
     iifname "$uplink_dev" counter reject with icmpx type admin-prohibited comment "sb-public-transit-reject"
   }

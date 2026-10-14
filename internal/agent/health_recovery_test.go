@@ -169,6 +169,7 @@ func TestClosedCachedReserveDoesNotHideNextWorkingReserve(t *testing.T) {
 		item.Recoveries[id] = 3
 		item.LastProbeAt[id] = 1000
 		item.MedianDelayMS[id] = &reserveDelay
+		item.Samples[id] = []healthSample{{At: 1000, OK: true, DelayMS: &reserveDelay}}
 	}
 	runtime.probes["de"] = probeEvidence{Failure: probeFailureTimeout}
 	runtime.probes["es"] = probeEvidence{Failure: probeFailureTimeout}
@@ -228,7 +229,7 @@ func TestEmergencyParallelChoosesFirstFreshSuccess(t *testing.T) {
 		"preferred": successfulEvidence(100), "fast-response": successfulEvidence(150),
 	}}
 	controller := &healthController{runtime: &reverseParallelRuntime{base}}
-	measured, selected, err := controller.probeEmergencyCandidates("route", []string{"preferred", "fast-response"}, effectivePolicySettings{})
+	measured, selected, err := controller.probeEmergencyCandidates("route", []string{"preferred", "fast-response"}, nil)
 	if err != nil || selected != "fast-response" || !measured["fast-response"].OK ||
 		len(base.selections) != 1 || base.selections[0][1] != "fast-response" {
 		t.Fatalf("first confirmed response was not selected once: selected=%s switches=%v measured=%v err=%v", selected, base.selections, measured, err)
@@ -388,6 +389,7 @@ func TestRecoveredUnderlayRequiresFreshQualityLoopFailureBeforeSwitching(t *test
 			item.LastProbeAt["nl"] = 999
 			reserveDelay := 90
 			item.MedianDelayMS["nl"] = &reserveDelay
+			item.Samples["nl"] = []healthSample{{At: 999, OK: true, DelayMS: &reserveDelay}}
 			runtime := &fakeSelectorRuntime{
 				pool: pool, current: map[string]string{"europe": "de"},
 				probes:   map[string]probeEvidence{"de": {Failure: failure}, "nl": successfulEvidence(reserveDelay)},
