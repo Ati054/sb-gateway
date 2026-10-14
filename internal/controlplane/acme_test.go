@@ -1157,8 +1157,10 @@ func TestACMEInFlightAttemptKeepsAutomaticBackoffAfterSave(t *testing.T) {
 			t.Fatalf("worker did not replace previous failure outcome: %#v", running)
 		}
 		now = now.Add(manualACMERetryCooldown + time.Second)
+		changedSettings := acmeTestSettings()
+		changedSettings.Email = "changed@example.com"
 		saved := performRequest(t, s, http.MethodPost, apiPrefix+"/tls-profiles/cdn-default/acme", map[string]any{
-			"settings": acmeTestSettings(),
+			"settings": changedSettings,
 		}, map[string]string{csrfHeader: csrf}, cookie)
 		if saved.Code != http.StatusAccepted {
 			t.Fatalf("save during worker: %d %s", saved.Code, saved.Body.String())

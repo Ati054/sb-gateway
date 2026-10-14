@@ -212,6 +212,7 @@ type probeEvidence struct {
 	// TargetFailures contains only fixed health-target labels and failure classes,
 	// never endpoint URLs or response bodies.
 	TargetFailures map[string]probeFailureClass
+	TargetStages   map[string]string
 	Failure        probeFailureClass
 }
 
@@ -221,6 +222,10 @@ type selectorRuntime interface {
 	Select(string, string) error
 	Probe(string) probeEvidence
 	ProbeAvailability(string) probeEvidence
+}
+
+type confirmationAvailabilityRuntime interface {
+	ProbeConfirmationAvailability(string) probeEvidence
 }
 
 type policyReconciliation struct {
@@ -824,6 +829,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	emergencySwitched := false
 	emergencyAttempted := false
 	emergencyReason := ""
+	var emergencyPreferred []string
 	var emergencyBatchStartedAt time.Time
 	outage := selected == "block" || item.AvailabilityFailures[selected] >= p.failureThreshold
 	if outage && selected != "block" {
@@ -853,8 +859,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			emergency.backup = minInt(p.backup, p.failureRetry)
 		}
 		probeTargets = controller.emergencyTargets(now, candidates, item, emergency)
-		probeTargets = prioritizeEmergencyReserve(probeTargets,
-			knownFreshReserve(now, selected, withoutClosedCandidates(candidates, item.PreflightClosed), contract.Mode, groupIndex, item, p), item.PreflightClosed, p.batch)
+		probeTargets, emergencyPreferred = emergencyProbePlan(now, selected, probeTargets, candidates, groupIndex, item, p)
 	} else if !emergencySwitched {
 		if warm {
 			probeTargets = append(probeTargets, selected)
@@ -880,7 +885,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if len(probeTargets) > 0 {
 			emergencyBatchStartedAt = time.Now()
 		}
-		measured, emergencySelected, probeErr = controller.probeEmergencyCandidates(policyID, probeTargets, p)
+		measured, emergencySelected, probeErr = controller.probeEmergencyCandidates(policyID, probeTargets, emergencyPreferred)
 		if probeErr != nil {
 			item.ScanQueue = uniqueCandidates(append(probeTargets, item.ScanQueue...))
 			return probeErr
@@ -950,7 +955,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			}
 			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-failed", Policy: policyID, Node: selected,
 				Failure: measured[candidate].Failure, Count: item.AvailabilityFailures[selected] + 1,
-				Threshold: startupFailureConfirmationThreshold(measured[candidate], p.failureThreshold, warm), Targets: probeTargetResults(measured[candidate])})
+				Threshold: startupFailureConfirmationThreshold(measured[candidate], p.failureThreshold, warm), Targets: probeTargetResults(measured[candidate]), TargetStages: measured[candidate].TargetStages})
 		} else if candidate == selected && measured[candidate].OK && item.AvailabilityFailures[selected] > 0 {
 			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-recovered", Policy: policyID, Node: selected,
 				Targets: probeTargetResults(measured[candidate])})
@@ -975,8 +980,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				eligibleReserves = append(eligibleReserves, reserve)
 			}
 			reserves := controller.emergencyTargets(now, eligibleReserves, item, emergency)
-			reserves = prioritizeEmergencyReserve(reserves,
-				knownFreshReserve(now, selected, withoutClosedCandidates(eligibleReserves, item.PreflightClosed), contract.Mode, groupIndex, item, p), item.PreflightClosed, p.batch)
+			reserves, emergencyPreferred = emergencyProbePlan(now, selected, reserves, eligibleReserves, groupIndex, item, p)
 			probeTargets = append([]string{selected}, reserves...)
 			break
 		}
@@ -990,7 +994,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if len(reserveTargets) > 0 {
 			emergencyBatchStartedAt = time.Now()
 		}
-		measuredReserves, selectedReserve, err := controller.probeEmergencyCandidates(policyID, reserveTargets, p)
+		measuredReserves, selectedReserve, err := controller.probeEmergencyCandidates(policyID, reserveTargets, emergencyPreferred)
 		for candidate, evidence := range measuredReserves {
 			measured[candidate] = evidence
 		}

@@ -1,4 +1,7 @@
 export const englishText: Record<string, string> = {
+  "Подключён": "Connected",
+  "Не подключён": "Disconnected",
+  "Нет актуального статуса подключения": "No current connection status",
   "Мягкий порог, МиБ (memory-high)": "Soft threshold, MiB (memory-high)",
   "Жёсткий лимит, МиБ (memory-max)": "Hard limit, MiB (memory-max)",
   "Лимиты подтверждены RouterOS, панель восстановлена.": "Limits confirmed by RouterOS; the panel is back online.",
@@ -1071,6 +1074,9 @@ export const englishText: Record<string, string> = {
   "Банки, СБП/НСПК и основные платежные кабинеты.": "Banks, SBP/NSPK, and major payment portals.",
   "Маркетплейсы, объявления, доставка и ритейл РФ": "Russian marketplaces, classifieds, delivery, and retail",
   "Россия · покупки": "Russia · shopping",
+  "Ping через WAN": "Ping via WAN",
+  "Ping использует WAN-IP, не VPN.": "Ping uses the WAN IP, not the VPN.",
+  "Публичный ping управляемых клиентов заблокирован.": "Public ping is blocked for managed clients.",
   "Маркетплейсы, объявления, магазины, службы доставки и их CDN.": "Marketplaces, classifieds, stores, delivery services, and their CDNs.",
   "Экосистема Яндекса": "Yandex ecosystem",
   "Россия · сервисы": "Russia · services",

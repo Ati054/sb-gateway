@@ -174,14 +174,20 @@ if [ "$selector_timeout_seconds" -le 0 ]; then
     >/dev/null 2>&1 || true
   exit 78
 fi
-if [ "$selector_timeout_seconds" -gt 5 ]; then
-  selector_timeout_seconds=5
+reverse_wait_seconds=$((selector_timeout_seconds - 30))
+if [ "$reverse_wait_seconds" -lt 0 ]; then
+  reverse_wait_seconds=0
+elif [ "$reverse_wait_seconds" -gt 30 ]; then
+  reverse_wait_seconds=30
+fi
+if [ "$selector_timeout_seconds" -gt 30 ]; then
+  selector_timeout_seconds=30
 fi
 
 # Restore confirmed working leaves before admitting transparent client traffic.
 # Explicit priority reorders retain their configured order. The native helper
 # confirms each actual override and propagates failures without a shell pipe.
-if ! sb-gateway xray-balancers --apply --timeout "${selector_timeout_seconds}s" --config "$config"; then
+if ! sb-gateway xray-balancers --apply --timeout "${selector_timeout_seconds}s" --reverse-wait "${reverse_wait_seconds}s" --config "$config"; then
   printf '%s\n' "Xray startup selection failed" >&2
   kill -TERM "$xray_pid" 2>/dev/null || true
   wait "$xray_pid" 2>/dev/null || true

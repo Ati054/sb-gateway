@@ -21,6 +21,7 @@ func TestHealthJournalRecordsFailureAndConfirmedSwitch(t *testing.T) {
 		TargetFailures: map[string]probeFailureClass{
 			"gstatic-204": probeFailureTimeout, "cloudflare-trace": probeFailureTimeout,
 		},
+		TargetStages: map[string]string{"gstatic-204": "tls-handshake"},
 	}
 	events := []healthEvent{}
 	controller.eventSink = func(event healthEvent) { events = append(events, event) }
@@ -29,7 +30,7 @@ func TestHealthJournalRecordsFailureAndConfirmedSwitch(t *testing.T) {
 	}
 	if item.Selected != "de" || len(events) != 1 || events[0].Event != "probe-failed" ||
 		events[0].Count != 1 || events[0].Threshold != 2 || events[0].Targets["gstatic-204"] != "timeout" ||
-		events[0].Targets["cloudflare-trace"] != "timeout" {
+		events[0].Targets["cloudflare-trace"] != "timeout" || events[0].TargetStages["gstatic-204"] != "tls-handshake" {
 		t.Fatalf("first failed probe/journal = selected %q, events %#v", item.Selected, events)
 	}
 	if err := controller.Tick(time.Unix(1012, 0)); err != nil {

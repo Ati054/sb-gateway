@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -187,7 +188,7 @@ func TestAvailabilityProbeUsesThirdOriginAfterTwoFailures(t *testing.T) {
 	}
 }
 
-func TestAvailabilityProbeAcceptsSlowFallbackWithinThreeSecondBudget(t *testing.T) {
+func TestAvailabilityProbeAcceptsFallbackWithinItsOwnBudget(t *testing.T) {
 	originalTargets, originalTimeout, originalFallback := healthTargets, availabilityProbeTimeout, availabilityFallbackTimeout
 	defer func() {
 		healthTargets, availabilityProbeTimeout, availabilityFallbackTimeout = originalTargets, originalTimeout, originalFallback
@@ -211,7 +212,7 @@ func TestAvailabilityProbeAcceptsSlowFallbackWithinThreeSecondBudget(t *testing.
 	runtime.selectorMembers["outbound-health-probe"] = "direct-wan"
 	evidence := runtime.ProbeAvailability("direct-wan")
 	if !evidence.OK || evidence.TargetFailures["gstatic-204"] != probeFailureTimeout {
-		t.Fatalf("2–3 second path was incorrectly treated as unavailable: %#v", evidence)
+		t.Fatalf("fallback within its deadline was treated as unavailable: %#v", evidence)
 	}
 }
 
@@ -356,12 +357,15 @@ func TestOfflineReverseProbeDoesNotSelectMissingOutbound(t *testing.T) {
 	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
 		commands++
 		if len(args) > 1 && args[1] == "statsonline" {
-			return []byte("user online counter not found"), os.ErrNotExist
+			return []byte(`{"stat":{"name":"user>>>reverse-vless-home>>>online","value":0}}`), nil
+		}
+		if len(args) > 1 && args[1] == "lso" {
+			return []byte(`{"outbounds":[]}`), nil
 		}
 		t.Fatalf("offline reverse probe invoked selector command: %v", args)
 		return nil, nil
 	}
-	if evidence := runtime.Probe("reverse-vless-home"); evidence.OK || commands != 1 {
+	if evidence := runtime.Probe("reverse-vless-home"); evidence.OK || evidence.LocalFailure || evidence.Failure != probeFailureTransient || commands != 2 {
 		t.Fatalf("offline reverse evidence=%#v commands=%d", evidence, commands)
 	}
 }
@@ -389,6 +393,59 @@ func TestOnlineReverseProbeMaySelectBridge(t *testing.T) {
 	runtime.Probe("reverse-vless-home")
 	if selected != "reverse-vless-home" {
 		t.Fatalf("online reverse bridge was not selected: %q", selected)
+	}
+}
+
+func TestReverseOnlineObservationFailureIsLocal(t *testing.T) {
+	for _, body := range []string{"API unavailable", "binary missing", `{}`, `{"stat":{"name":"other","value":1}}`} {
+		t.Run(body, func(t *testing.T) {
+			runtime := newXraySelectorRuntime(Options{})
+			runtime.pool = healthPool{HealthPolicies: map[string]healthPolicyContract{"europe": {Nodes: map[string]healthNode{"reverse-vless-home": {Protocol: "xray-reverse"}}}}}
+			runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+				if args[1] != "statsonline" {
+					t.Fatalf("untrusted online state invoked %v", args)
+				}
+				if body == "API unavailable" {
+					return nil, context.DeadlineExceeded
+				}
+				if body == "binary missing" {
+					return nil, os.ErrNotExist
+				}
+				return []byte(body), nil
+			}
+			if evidence := runtime.ProbeAvailability("reverse-vless-home"); !evidence.LocalFailure || evidence.Failure != probeFailureNone {
+				t.Fatalf("API error became node failure: %+v", evidence)
+			}
+		})
+	}
+}
+
+func TestReverseZeroCounterWithLivePortalUsesPathProof(t *testing.T) {
+	targets := slices.Clone(healthTargets)
+	healthTargets[0].url = "http://reverse-test.invalid/"
+	defer func() { healthTargets = targets }()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer proxy.Close()
+	runtime := newXraySelectorRuntime(Options{ProbeURL: proxy.URL})
+	runtime.pool = healthPool{BaseOutboundTags: []string{"reverse-vless-home"}, HealthPolicies: map[string]healthPolicyContract{"europe": {Nodes: map[string]healthNode{"reverse-vless-home": {Protocol: "xray-reverse"}}}}}
+	selected := ""
+	runtime.command = func(_ context.Context, _ time.Duration, _ string, args ...string) ([]byte, error) {
+		switch args[1] {
+		case "statsonline":
+			return []byte(`{"stat":{"name":"user>>>reverse-vless-home>>>online","value":0}}`), nil
+		case "lso":
+			return []byte(`{"outbounds":[{"tag":"reverse-vless-home"}]}`), nil
+		case "bo":
+			selected = args[len(args)-1]
+			return nil, nil
+		case "bi":
+			return selectorInfo(selected), nil
+		}
+		t.Fatalf("unexpected command %v", args)
+		return nil, nil
+	}
+	if evidence := runtime.ProbeAvailability("reverse-vless-home"); !evidence.OK || selected != "reverse-vless-home" {
+		t.Fatalf("live portal rejected on zero counter: %+v", evidence)
 	}
 }
 
@@ -783,7 +840,7 @@ func TestHealthContractReloadPreservesLiveXraySelectorCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := newXraySelectorRuntime(Options{HealthPoolFile: path})
-	runtime.xrayPID = processPID("xray")
+	runtime.xrayPID = readyProcessPID(runtime.opts.XrayReadyFile, "xray")
 	runtime.poolSignature = "previous-contract"
 	runtime.loadedDynamic["live-dynamic"] = true
 	runtime.selectorMembers["europe"] = "live-dynamic"

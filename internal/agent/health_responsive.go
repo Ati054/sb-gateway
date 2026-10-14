@@ -264,12 +264,25 @@ func (runtime *responsiveSelectorRuntime) Probe(candidate string) probeEvidence 
 }
 
 func (runtime *responsiveSelectorRuntime) ProbeAvailability(candidate string) probeEvidence {
+	return runtime.probeActiveAvailability(candidate, false)
+}
+
+func (runtime *responsiveSelectorRuntime) ProbeConfirmationAvailability(candidate string) probeEvidence {
+	return runtime.probeActiveAvailability(candidate, true)
+}
+
+func (runtime *responsiveSelectorRuntime) probeActiveAvailability(candidate string, confirmation bool) probeEvidence {
 	stamp := generationStamp(runtime.generationPaths)
 	if stamp != runtime.generation || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
 		runtime.interrupted = errHealthYield
 		return probeEvidence{LocalFailure: true}
 	}
-	evidence := runtime.selectorRuntime.ProbeAvailability(candidate)
+	var evidence probeEvidence
+	if probe, ok := runtime.selectorRuntime.(confirmationAvailabilityRuntime); confirmation && ok {
+		evidence = probe.ProbeConfirmationAvailability(candidate)
+	} else {
+		evidence = runtime.selectorRuntime.ProbeAvailability(candidate)
+	}
 	if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
 		runtime.interrupted = errHealthYield
 		return probeEvidence{LocalFailure: true}
@@ -294,15 +307,19 @@ func (runtime *responsiveSelectorRuntime) ProbeEmergencyAvailabilityParallel(can
 	return runtime.probeAvailabilityParallel(candidates, onResult, false)
 }
 
+func (runtime *responsiveSelectorRuntime) ProbeRankedEmergencyAvailabilityParallel(candidates, preferred []string, onResult func(string, probeEvidence) bool) map[string]probeEvidence {
+	return runtime.probeParallel(candidates, onResult, false, false, preferred)
+}
+
 func (runtime *responsiveSelectorRuntime) probeAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies bool) map[string]probeEvidence {
-	return runtime.probeParallel(candidates, onResult, checkOtherPolicies, false)
+	return runtime.probeParallel(candidates, onResult, checkOtherPolicies, false, nil)
 }
 
 func (runtime *responsiveSelectorRuntime) ProbeQualityParallel(candidates []string) map[string]probeEvidence {
-	return runtime.probeParallel(candidates, nil, true, true)
+	return runtime.probeParallel(candidates, nil, true, true, nil)
 }
 
-func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies, quality bool) map[string]probeEvidence {
+func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies, quality bool, preferred []string) map[string]probeEvidence {
 	measured := make(map[string]probeEvidence, len(candidates))
 	lanes := runtime.backgrounds
 	if len(lanes) == 0 && runtime.background != nil {
@@ -408,6 +425,27 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 		signals = runtime.signals
 	}
 	remaining := len(candidates)
+	choice := emergencyChoice{preferred: preferred}
+	var preferenceTimer *time.Timer
+	var preferenceDeadline <-chan time.Time
+	defer func() {
+		if preferenceTimer != nil {
+			preferenceTimer.Stop()
+		}
+	}()
+	publish := func(candidate string, evidence probeEvidence) bool {
+		if onResult == nil || !onResult(candidate, evidence) {
+			return false
+		}
+		cancel()
+		<-done
+		// Select and worker shutdown can overlap Apply publication. Check the
+		// parent context, not the intentionally cancelled worker context.
+		if generationStamp(runtime.generationPaths) != stamp || runtime.ctx.Err() != nil {
+			runtime.interrupted = errHealthYield
+		}
+		return true
+	}
 	for remaining > 0 {
 		select {
 		case value := <-results:
@@ -425,14 +463,30 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 				return measured
 			}
 			measured[value.candidate] = value.evidence
-			if onResult != nil && onResult(value.candidate, value.evidence) {
+			if len(preferred) == 0 {
+				if publish(value.candidate, value.evidence) {
+					return measured
+				}
+				continue
+			}
+			if value.evidence.OK && choice.firstSuccess == "" {
+				choice.firstSuccess = value.candidate
+				preferenceTimer = time.NewTimer(emergencyPreferenceWait)
+				preferenceDeadline = preferenceTimer.C
+			}
+			if candidate, evidence := choice.ready(measured); candidate != "" && publish(candidate, evidence) {
+				return measured
+			}
+		case <-preferenceDeadline:
+			preferenceDeadline = nil
+			if generationStamp(runtime.generationPaths) != stamp || ctx.Err() != nil {
 				cancel()
 				<-done
-				// Select and worker shutdown can overlap Apply publication. The
-				// cancelled batch context is expected; check its parent instead.
-				if generationStamp(runtime.generationPaths) != stamp || runtime.ctx.Err() != nil {
-					runtime.interrupted = errHealthYield
-				}
+				runtime.interrupted = errHealthYield
+				return measured
+			}
+			choice.expired = true
+			if candidate, evidence := choice.ready(measured); candidate != "" && publish(candidate, evidence) {
 				return measured
 			}
 		case <-ticker.C:

@@ -62,6 +62,9 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 	if !containsText(stringSlice(balancers[0]["selector"]), urlTestPolicyPrefix("europe")) {
 		t.Fatalf("URLTest prefix missing: %#v", balancers[0])
 	}
+	if stringSlice(balancers[0]["selector"])[0] != "block" {
+		t.Fatal("converted managed selector must retain the startup block leaf")
+	}
 	if !containsText(stringSlice(balancers[0]["selector"]), "reverse-vless-home") {
 		t.Fatalf("reverse exit is not selectable for internet routing: %#v", balancers[0])
 	}
@@ -82,8 +85,13 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 	}
 	policy := objectValue(artifacts.Config["policy"])
 	levelZero := objectValue(objectValue(policy["levels"])["0"])
-	if levelZero["bufferSize"] != xrayConnectionBufferKiB {
-		t.Fatalf("ARM64 connection buffer is not optimized: %#v", levelZero)
+	if _, overridden := levelZero["bufferSize"]; overridden {
+		t.Fatalf("connection buffer must use the core architecture default: %#v", levelZero)
+	}
+	for _, field := range []string{"statsUserUplink", "statsUserDownlink", "statsUserOnline"} {
+		if levelZero[field] != true {
+			t.Fatalf("removing buffer override changed %s: %#v", field, levelZero)
+		}
 	}
 	body, err := MarshalXrayCandidate(artifacts.Config)
 	if err != nil || !strings.HasSuffix(string(body), "\n") || !strings.Contains(string(body), `"domainMatcher": "hybrid"`) {

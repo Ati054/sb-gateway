@@ -7,29 +7,19 @@ function asRecord(value: unknown): JsonObject {
 }
 
 export function reverseAvailability(runtime: JsonObject | undefined, exitId: string, now: number) {
-  const candidate = `reverse-vless-${exitId}`;
-  let latest = 0;
-  let available: boolean | undefined;
-  for (const raw of Object.values(asRecord(runtime?.selector_health))) {
-    const health = asRecord(raw);
-    const checked = Date.parse(String(health.checked_at ?? ""));
-    const probed = Number(asRecord(health.last_probe_at)[candidate]) * 1000;
-    const limits = asRecord(health.probe_limits);
-    const shortlist = Array.isArray(health.shortlist) ? health.shortlist : [];
-    const interval = health.selected === candidate ? Number(limits.active_seconds ?? 60)
-      : shortlist.includes(candidate) ? Number(limits.backup_seconds ?? 300)
-        : Number(limits.full_scan_seconds ?? 1800);
-    const value = asRecord(health.availability_ok)[candidate];
-    if (health.runtime_error || !Number.isFinite(checked) || !Number.isFinite(probed)
-      || probed <= 0 || now - checked > Math.max(120, Number(limits.active_seconds ?? 60) + 60) * 1000
-      || now - probed > (interval + 120) * 1000 || probed > now + 60_000
-      || typeof value !== "boolean" || probed <= latest) continue;
-    latest = probed;
-    available = value;
+  const telemetry = asRecord(runtime?.reverse_telemetry);
+  const sampled = Date.parse(String(telemetry.sampled_at ?? ""));
+  const connected = asRecord(telemetry.reverse_connections)[exitId];
+  const sources = asRecord(telemetry.sources);
+  const onlineSource = sources.xray_online ?? sources.xray;
+  if (onlineSource !== "available"
+    || !Number.isFinite(sampled) || !Number.isFinite(now)
+    || now - sampled > 75_000 || sampled > now + 5_000
+    || typeof connected !== "boolean") {
+    return { state: "unknown", label: "Нет актуального статуса подключения" };
   }
-  return available === true ? { state: "available", label: "Доступен" }
-    : available === false ? { state: "unavailable", label: "Недоступен" }
-      : { state: "unknown", label: "Нет актуальной проверки" };
+  return connected ? { state: "available", label: "Подключён" }
+    : { state: "unavailable", label: "Не подключён" };
 }
 
 export function mergeRuntimeStatus(

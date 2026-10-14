@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +68,38 @@ func controlRPCFixture(t *testing.T, handler func(context.Context, string, []byt
 	return client
 }
 
+func TestRestoreXraySelectorsUsesRPCWithoutReverse(t *testing.T) {
+	var mu sync.Mutex
+	reads, overrides := 0, 0
+	client := controlRPCFixture(t, func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasSuffix(method, "/OverrideBalancerTarget"):
+			overrides++
+			return nil, nil
+		case strings.HasSuffix(method, "/GetBalancerInfo"):
+			reads++
+			return controlWireField(1, controlWireField(5, controlWireField(2, []byte("de")))), nil
+		}
+		return nil, errors.New("unexpected startup RPC")
+	})
+	config := filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(config, []byte(`{"routing":{"balancers":[{"tag":"one","selector":["de"]},{"tag":"two","selector":["de"]}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := RestoreXraySelectors(ctx, config, Options{XrayAPIServer: client.conn.Target(), XrayBinary: filepath.Join(t.TempDir(), "absent")}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if reads != 2 || overrides != 2 {
+		t.Fatalf("startup did not confirm every selector: reads=%d overrides=%d", reads, overrides)
+	}
+}
+
 func TestXrayControlRPCOnlineUsesSharedConnection(t *testing.T) {
 	name := "user>>>reverse-fixture>>>online"
 	var mu sync.Mutex
@@ -100,6 +134,30 @@ func TestXrayControlRPCOnlineUsesSharedConnection(t *testing.T) {
 	mu.Unlock()
 	if runtime.reverseOnline("reverse-fixture") {
 		t.Fatal("wrong statistic accepted")
+	}
+}
+
+func TestReverseOnlineRPCFailureDoesNotBecomeRemoteFailure(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.Internal, codes.NotFound} {
+		t.Run(code.String(), func(t *testing.T) {
+			client := controlRPCFixture(t, func(_ context.Context, method string, _ []byte) ([]byte, error) {
+				if strings.HasSuffix(method, "/ListOutbounds") {
+					return nil, nil
+				}
+				return nil, status.Error(code, "fixture observation failure")
+			})
+			runtime := newXraySelectorRuntime(Options{})
+			runtime.control = client
+			runtime.pool = healthPool{HealthPolicies: map[string]healthPolicyContract{"europe": {Nodes: map[string]healthNode{"reverse-vless-home": {Protocol: "xray-reverse"}}}}}
+			evidence := runtime.ProbeAvailability("reverse-vless-home")
+			if code == codes.NotFound {
+				if evidence.LocalFailure || evidence.Failure != probeFailureTransient {
+					t.Fatalf("absent portal evidence=%+v", evidence)
+				}
+			} else if !evidence.LocalFailure || evidence.Failure != probeFailureNone {
+				t.Fatalf("local RPC error became a remote failure: %+v", evidence)
+			}
+		})
 	}
 }
 

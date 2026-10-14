@@ -35,23 +35,21 @@ const (
 )
 
 type Options struct {
-	TokenFile         string
-	ReadyURL          string
-	StatusURL         string
-	XrayConfig        string
-	XrayReadyFile     string
-	XrayValidatedFile string
-	PolicyDNSConfig   string
-	RouteTable        string
-	RulePriority      string
-	TProxyMark        string
-	TProxyPort        string
-	SettingsFile      string
-	MarkerFile        string
-	ApplyGuardFile    string
-	RestartFile       string
-	RestartEvidence   string
-	XrayBinary        string
+	TokenFile       string
+	ReadyURL        string
+	StatusURL       string
+	XrayConfig      string
+	XrayReadyFile   string
+	PolicyDNSConfig string
+	RouteTable      string
+	RulePriority    string
+	TProxyMark      string
+	TProxyPort      string
+	SettingsFile    string
+	MarkerFile      string
+	ApplyGuardFile  string
+	RestartFile     string
+	RestartEvidence string
 }
 
 type settings struct {
@@ -67,19 +65,18 @@ type runner struct {
 	opts Options
 	http *http.Client
 
-	restarts               int
-	lastPostSignature      string
-	lastPostAt             time.Time
-	deepHealthy            bool
-	deepReasons            []string
-	nextDeepProbe          time.Time
-	checkedConfigSignature string
-	configFileSignature    string
-	listenerSignature      string
-	dnsFileSignature       string
-	dnsSignature           string
-	listeners              []listener
-	dnsPorts               []int
+	restarts            int
+	lastPostSignature   string
+	lastPostAt          time.Time
+	deepHealthy         bool
+	deepReasons         []string
+	nextDeepProbe       time.Time
+	configFileSignature string
+	listenerSignature   string
+	dnsFileSignature    string
+	dnsSignature        string
+	listeners           []listener
+	dnsPorts            []int
 }
 
 type listener struct {
@@ -122,23 +119,21 @@ func OptionsFromEnvironment() Options {
 	port := envOr("SB_GATEWAY_API_PORT", "8080")
 	base := "http://" + host + ":" + port
 	return Options{
-		TokenFile:         filepath.Join(secrets, "management-api-token"),
-		ReadyURL:          base + "/api/health/ready",
-		StatusURL:         base + "/api/v1/runtime/watchdog",
-		XrayConfig:        envOr("SB_XRAY_CONFIG", "/config/generated/xray.json"),
-		XrayReadyFile:     envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
-		XrayValidatedFile: envOr("SB_XRAY_VALIDATED_FILE", "/run/sb-gateway/xray-validated"),
-		PolicyDNSConfig:   envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
-		RouteTable:        envOr("SB_TRANSPARENT_ROUTE_TABLE", "1002"),
-		RulePriority:      envOr("SB_TRANSPARENT_RULE_PRIORITY", "1100"),
-		TProxyMark:        envOr("SB_TPROXY_MARK", "1"),
-		TProxyPort:        envOr("SB_TPROXY_PORT", "12345"),
-		SettingsFile:      envOr("SB_WATCHDOG_CONFIG", "/config/generated/watchdog.env"),
-		MarkerFile:        envOr("SB_WATCHDOG_MARKER", "/run/sb-gateway/router-ready"),
-		ApplyGuardFile:    envOr("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
-		RestartFile:       envOr("SB_WATCHDOG_RESTART_FILE", "/state/watchdog-restarts"),
-		RestartEvidence:   envOr("SB_WATCHDOG_RESTART_EVIDENCE", "/state/watchdog-last-restart.json"),
-		XrayBinary:        envOr("SB_XRAY_BIN", "xray"),
+		TokenFile:       filepath.Join(secrets, "management-api-token"),
+		ReadyURL:        base + "/api/health/ready",
+		StatusURL:       base + "/api/v1/runtime/watchdog",
+		XrayConfig:      envOr("SB_XRAY_CONFIG", "/config/generated/xray.json"),
+		XrayReadyFile:   envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
+		PolicyDNSConfig: envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
+		RouteTable:      envOr("SB_TRANSPARENT_ROUTE_TABLE", "1002"),
+		RulePriority:    envOr("SB_TRANSPARENT_RULE_PRIORITY", "1100"),
+		TProxyMark:      envOr("SB_TPROXY_MARK", "1"),
+		TProxyPort:      envOr("SB_TPROXY_PORT", "12345"),
+		SettingsFile:    envOr("SB_WATCHDOG_CONFIG", "/config/generated/watchdog.env"),
+		MarkerFile:      envOr("SB_WATCHDOG_MARKER", "/run/sb-gateway/router-ready"),
+		ApplyGuardFile:  envOr("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
+		RestartFile:     envOr("SB_WATCHDOG_RESTART_FILE", "/state/watchdog-restarts"),
+		RestartEvidence: envOr("SB_WATCHDOG_RESTART_EVIDENCE", "/state/watchdog-last-restart.json"),
 	}
 }
 
@@ -569,19 +564,6 @@ func (r *runner) runDeepProbe(ctx context.Context, current settings, now time.Ti
 		mark("transparent_nft")
 	}
 
-	if configSignature != "" && configSignature != r.checkedConfigSignature {
-		started := time.Now()
-		if runtimeproof.XrayValidated(r.opts.XrayValidatedFile, r.opts.XrayReadyFile, r.opts.XrayConfig, "/proc", configSignature) {
-			log.Print("watchdog: Xray config validation reused from current startup")
-			r.checkedConfigSignature = configSignature
-		} else if _, err := commandOutput(ctx, 60*time.Second, r.opts.XrayBinary, "run", "-test", "-config", r.opts.XrayConfig); err != nil {
-			log.Printf("watchdog: Xray config validation failed elapsed=%s: %v", time.Since(started).Round(time.Millisecond), err)
-			mark("config_validation")
-		} else {
-			log.Printf("watchdog: Xray config validation completed elapsed=%s", time.Since(started).Round(time.Millisecond))
-			r.checkedConfigSignature = configSignature
-		}
-	}
 	r.deepReasons = reasons
 	r.deepHealthy = len(reasons) == 0
 	r.nextDeepProbe = now.Add(current.deepInterval)

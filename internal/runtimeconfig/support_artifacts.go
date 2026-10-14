@@ -121,9 +121,15 @@ func RenderClientTelemetryNFT(config map[string]any) ([]byte, error) {
 	return []byte(strings.Join(lines, "\n")), nil
 }
 
+var controlPlaneMulticastCIDRs = []string{"224.0.0.0/4", "255.255.255.255/32", "ff00::/8"}
+
 func RenderTransparentExclusions(config map[string]any) ([]byte, error) {
 	values := make([]string, 0)
 	seen := make(map[string]struct{})
+	for _, cidr := range controlPlaneMulticastCIDRs {
+		seen[cidr] = struct{}{}
+		values = append(values, cidr)
+	}
 	for _, network := range enabledObjects(config["networks"]) {
 		kind := textValue(network["kind"])
 		if kind == "" {

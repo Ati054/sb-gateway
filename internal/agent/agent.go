@@ -27,6 +27,7 @@ type Options struct {
 	HealthPoolFile      string
 	HotRuntimeReadyFile string
 	ProbeURL            string
+	StartupReverseWait  time.Duration
 }
 
 func OptionsFromEnvironment() Options {

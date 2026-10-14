@@ -51,7 +51,7 @@ func TestCoreRecoveryDeadlineCannotBeRenewedByCrashLoop(t *testing.T) {
 
 func TestCoreRecoveryDoesNotHideUnrelatedOrInvalidState(t *testing.T) {
 	for _, reason := range []string{"dns_lane_udp", "dns_lane_tcp", "dns_lane_config", "api_ready", "api_configured",
-		"core_config", "config_validation", "listener_inventory", "tcp_listener_inventory", "unknown"} {
+		"core_config", "listener_inventory", "tcp_listener_inventory", "unknown"} {
 		t.Run(reason, func(t *testing.T) {
 			var window coreRecoveryWindow
 			window.verified("101 1")

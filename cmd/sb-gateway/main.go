@@ -240,15 +240,30 @@ func runXrayBalancers(arguments []string) error {
 	flags, config := runtimeConfigFlags("xray-balancers")
 	apply := flags.Bool("apply", false, "restore and confirm startup selectors through Xray API")
 	timeout := flags.Duration("timeout", 5*time.Second, "overall selector restoration deadline")
+	reverseWait := flags.Duration("reverse-wait", 0, "additional startup reconnect window for a selected Reverse, up to 30s")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *timeout <= 0 || *timeout > 30*time.Second {
 		return fmt.Errorf("xray-balancers accepts no positional arguments and requires a timeout up to 30s")
 	}
+	if *reverseWait < 0 || *reverseWait > 30*time.Second {
+		return fmt.Errorf("reverse-wait must be from 0 to 30s")
+	}
 	opts := agent.OptionsFromEnvironment()
 	if *apply {
-		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		deadline := *timeout
+		if *reverseWait > 0 {
+			needed, err := agent.XrayStartupNeedsReverseWait(*config, opts)
+			if err != nil {
+				return err
+			}
+			if needed {
+				deadline += *reverseWait
+				opts.StartupReverseWait = *reverseWait
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		return agent.RestoreXraySelectors(ctx, *config, opts)
 	}

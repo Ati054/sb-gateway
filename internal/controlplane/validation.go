@@ -209,6 +209,7 @@ func (result *configValidation) validateSystemSettings(config map[string]any) {
 			"proxy_only": true, "disabled": true,
 		})
 		result.optionalBoolean(networking, "wireguard_egress_enabled", "system.networking")
+		result.optionalBoolean(networking, "allow_wan_ping", "system.networking")
 	}
 	management, ok := system["management"].(map[string]any)
 	if !ok {

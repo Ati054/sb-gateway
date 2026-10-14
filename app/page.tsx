@@ -5469,6 +5469,7 @@ function RoutingInfrastructureSettings({
   const [remoteIpv6Enabled, setRemoteIpv6Enabled] = useState(
     configuredRemoteIpv6Enabled,
   );
+  const [allowWanPing, setAllowWanPing] = useState(networking.allow_wan_ping !== false);
   const [forceTcpForProxyServices, setForceTcpForProxyServices] = useState(
     dns.force_tcp_for_proxy_services === true,
   );
@@ -5601,6 +5602,7 @@ function RoutingInfrastructureSettings({
     setVpnDnsProvider(asText(vpnResolver.provider, "cloudflare"));
     setVpnDnsProtocol(asText(vpnResolver.protocol, "doh"));
     setRemoteIpv6Enabled(configuredRemoteIpv6Enabled);
+    setAllowWanPing(networking.allow_wan_ping !== false);
     setForceTcpForProxyServices(dns.force_tcp_for_proxy_services === true);
     setRoutingMonitor(routingMonitorValues(config));
     setRoutingResetVersion((current) => current + 1);
@@ -5645,6 +5647,7 @@ function RoutingInfrastructureSettings({
                 wireguard_egress_enabled: wireguardEnabled,
                 wireguard_egress_exits: wireguardExits,
                 remote_ipv6_mode: remoteIpv6Enabled ? "proxy_only" : "disabled",
+                allow_wan_ping: allowWanPing,
               },
             },
             dns: {
@@ -5699,7 +5702,7 @@ function RoutingInfrastructureSettings({
   ] as const;
 
   return (
-    <section className="routing-infrastructure" inert={saveBusy}
+    <section className="routing-infrastructure"
       onChangeCapture={() => autosaveRef.current?.update()}>
       <div className="routing-infrastructure-grid">
         <ReverseVlessSettings
@@ -5803,6 +5806,12 @@ function RoutingInfrastructureSettings({
             </div>
           </div>
           <div className="settings-card-body routing-behavior-body">
+            <Toggle
+              checked={allowWanPing}
+              onChange={setAllowWanPing}
+              label={tr("Ping через WAN")}
+              description={allowWanPing ? tr("Ping использует WAN-IP, не VPN.") : tr("Публичный ping управляемых клиентов заблокирован.")}
+            />
             <Toggle
               checked={remoteIpv6Enabled}
               onChange={setRemoteIpv6Enabled}
@@ -5937,12 +5946,13 @@ function ReverseVlessSettings({
   const { tr } = useLanguage();
   const xraySelected = true;
   const [statusNow, setStatusNow] = useState(0);
+  const reverseSampledAt = asText(asObject(runtime?.reverse_telemetry).sampled_at, "");
   useEffect(() => {
     const refresh = () => setStatusNow(Date.now());
     const initial = window.setTimeout(refresh, 0);
     const timer = window.setInterval(refresh, 30_000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  }, []);
+  }, [reverseSampledAt]);
   const connectionHostname = useConnectionHostname();
   const supportedKinds = new Set([
     "reality",
@@ -6104,7 +6114,7 @@ function ReverseVlessSettings({
            {tr("Включите хотя бы один совместимый VLESS-вход.")} </div>
       ) : null}
       {exits.length ? (
-        <form ref={formRef} onSubmit={(event) => event.preventDefault()}>
+        <form ref={formRef} onChange={() => setMessage("")} onSubmit={(event) => event.preventDefault()}>
           <div className="reverse-vless-exit-list">
             {exits.map((exit) => {
               const id = asText(exit.id, "");
@@ -6118,8 +6128,8 @@ function ReverseVlessSettings({
                   <span
                     className={`reverse-vless-availability is-${availability.state}`}
                     role="img"
-                    aria-label={availability.label}
-                    title={availability.label}
+                    aria-label={tr(availability.label)}
+                    title={tr(availability.label)}
                     tabIndex={0}
                   >
                     <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -17805,6 +17815,8 @@ function GatewayConsole({
     ? { ...overviewData, routeros: routerosSummary }
     : undefined;
   const draftConfig = asObject(draftEnvelope?.config);
+  const reverseTelemetryNeeded = screen === "routing"
+    && asObjectList(draftConfig.reverse_vless_exits).some(exit => exit.enabled !== false);
   const draftRevision = asText(draftEnvelope?.revision, "");
   const activeRevision = asText(overviewData?.active_revision, "");
   // A periodic overview for an older draft must not hide a just-saved change.
@@ -18127,7 +18139,7 @@ function GatewayConsole({
   }, [overviewData, refreshDetailedStatus, screen]);
 
   useEffect(() => {
-    if (screen !== "overview" || !overviewData) return;
+    if ((screen !== "overview" && !reverseTelemetryNeeded) || !overviewData) return;
     const refreshVisible = () => {
       if (document.visibilityState === "visible") void refreshClientTelemetry();
     };
@@ -18141,7 +18153,7 @@ function GatewayConsole({
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshVisible);
     };
-  }, [overviewData, refreshClientTelemetry, screen]);
+  }, [overviewData, refreshClientTelemetry, screen, reverseTelemetryNeeded]);
 
   useEffect(() => {
     if (screen !== "overview" || !overviewData) return;
@@ -18465,7 +18477,7 @@ function GatewayConsole({
                 onAddPolicy={() => setPolicyDialog({})}
                 onEditPolicy={(policyId) => setPolicyDialog({ policyId })}
                 config={draftConfig}
-                runtime={runtimeStatus}
+                runtime={{ ...runtimeStatus, reverse_telemetry: clientTelemetry }}
                 runtimeDetailsReady={runtimeDetailsReady}
                 revisionState={revisionState}
                 routeros={routerosSummary}

@@ -78,15 +78,52 @@ func rememberWorkingSelection(contract healthPolicyContract, item *policyHealthS
 func RestoreXraySelectors(ctx context.Context, configPath string, opts Options) error {
 	runtime := newXraySelectorRuntime(opts)
 	runtime.probeContext = ctx
+	control, err := newXrayControlClient(opts.XrayAPIServer)
+	if err != nil {
+		return err
+	}
+	defer control.close()
+	runtime.control = control
 	return restoreXraySelectors(configPath, opts, runtime)
 }
 
 func restoreXraySelectors(configPath string, opts Options, runtime *xraySelectorRuntime) error {
-	balancers, err := XrayStartupSelections(configPath, opts)
+	plan, err := xrayStartupPlan(configPath, opts)
 	if err != nil {
 		return err
 	}
-	for _, balancer := range balancers {
+	if len(plan.Balancers) > 0 && plan.PoolAvailable {
+		// Materialize pruned subscription leaves before restoring the override.
+		if err := readJSON(opts.HealthPoolFile, &runtime.pool); err != nil {
+			return fmt.Errorf("load startup outbound contract: %w", err)
+		}
+	}
+	if len(plan.Reverse) > 0 && opts.StartupReverseWait > 0 {
+		// Reverse handlers belong to live sessions, not dynamic subscriptions.
+		for _, choice := range plan.Reverse {
+			if !contains(runtime.pool.BaseOutboundTags, choice.Outbound) {
+				runtime.pool.BaseOutboundTags = append(runtime.pool.BaseOutboundTags, choice.Outbound)
+			}
+		}
+		parent := runtime.requestContext()
+		restored := awaitStartupReverse(parent, opts.StartupReverseWait, plan.Reverse, func(ctx context.Context, node string) probeEvidence {
+			runtime.probeContext = ctx
+			defer func() { runtime.probeContext = parent }()
+			if present, err := runtime.outboundPresent(node); err != nil || !present {
+				return probeEvidence{LocalFailure: err != nil}
+			}
+			return runtime.ProbeAvailability(node)
+		})
+		if err := parent.Err(); err != nil {
+			return err
+		}
+		for index := range plan.Balancers {
+			if target := restored[plan.Balancers[index].Tag]; target != "" {
+				plan.Balancers[index].Outbound = target
+			}
+		}
+	}
+	for _, balancer := range plan.Balancers {
 		if err := runtime.Select(balancer.Tag, balancer.Outbound); err != nil {
 			return fmt.Errorf("restore selector %s: %w", balancer.Tag, err)
 		}
@@ -99,15 +136,23 @@ func restoreXraySelectors(configPath string, opts Options, runtime *xraySelector
 // Missing/corrupt history is optional: it must not prevent a clean startup.
 // Explicit priority reorders remain authoritative, unlike unrelated Applies.
 func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Balancer, error) {
+	plan, err := xrayStartupPlan(configPath, opts)
+	return plan.Balancers, err
+}
+
+func xrayStartupPlan(configPath string, opts Options) (startupSelectionPlan, error) {
 	balancers, _, err := runtimeconfig.ReadXray(configPath)
 	if err != nil {
-		return nil, err
+		return startupSelectionPlan{}, err
 	}
 	// Decode only startup fields, not the multi-day sample history or node
 	// inventory. Reboot restoration does not need a second telemetry cache.
 	var pool struct {
-		Version        int `json:"version"`
-		HealthPolicies map[string]struct {
+		Version          int                 `json:"version"`
+		Policies         map[string][]string `json:"policies"`
+		PolicyPrefixes   map[string]string   `json:"policy_prefixes"`
+		BaseOutboundTags []string            `json:"base_outbound_tags"`
+		HealthPolicies   map[string]struct {
 			Mode       string                `json:"mode"`
 			Candidates []string              `json:"candidates"`
 			Groups     []healthGroup         `json:"groups"`
@@ -121,12 +166,13 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 	}
 	var state map[string]*startupHealthStateItem
 	if readJSON(opts.HealthPoolFile, &pool) != nil || pool.Version < 2 {
-		return balancers, nil
+		return startupSelectionPlan{Balancers: balancers}, nil
 	}
 	if readJSON(statePath(opts.StateRoot, "selector-health"), &state) != nil || state == nil {
 		state = make(map[string]*startupHealthStateItem)
 	}
 	managed := make(map[string]bool)
+	reverse := make(map[string]startupReverseChoice)
 	for index := range balancers {
 		balancer := &balancers[index]
 		contract, exists := pool.HealthPolicies[balancer.Tag]
@@ -135,15 +181,23 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 			continue
 		}
 		candidates := uniqueCandidates(contract.Candidates)
+		memberAllowed := func(candidate string) bool {
+			if contains(balancer.Members, candidate) {
+				return true
+			}
+			prefix := pool.PolicyPrefixes[balancer.Tag]
+			return prefix != "" && contains(balancer.Members, prefix) &&
+				contract.Nodes[candidate].Protocol != "xray-reverse" && contains(pool.Policies[balancer.Tag], candidate)
+		}
 		fallback := ""
 		for _, candidate := range candidates {
-			if contract.Nodes[candidate].Protocol != "xray-reverse" && contains(balancer.Members, candidate) {
+			if contract.Nodes[candidate].Protocol != "xray-reverse" && memberAllowed(candidate) {
 				fallback = candidate
 				break
 			}
 		}
 		if fallback == "" {
-			if contains(balancer.Members, "block") {
+			if contains(balancer.Members, "block") || contains(pool.BaseOutboundTags, "block") {
 				fallback = "block"
 			} else {
 				continue
@@ -155,6 +209,7 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 		// candidate, or with a measured reserve when history proves one.
 		balancer.Outbound = fallback
 		selected := ""
+		preferred := ""
 		if item != nil {
 			// RuntimeSelected is the newest persisted readback from the selector and
 			// therefore wins over an older durable fallback. This matters during an
@@ -171,14 +226,16 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 			}
 			if saved != nil && saved.Mode == contract.Mode &&
 				(contract.Mode != "priority" || !priorityOrderChanged(saved.CandidateSignature, candidates)) &&
-				saved.Selected != "block" && contains(candidates, saved.Selected) && contains(balancer.Members, saved.Selected) &&
-				contract.Nodes[saved.Selected].Protocol != "xray-reverse" &&
+				saved.Selected != "block" && contains(candidates, saved.Selected) && memberAllowed(saved.Selected) &&
 				item.AvailabilityFailures[saved.Selected] < healthFailureConfirmations {
 				// An independent bad probe is pending until the failure streak reaches
 				// the confirmed-outage sentinel. Restart must not turn that pending
 				// evidence into a failover or promote an arbitrary inventory default.
 				if available, known := item.AvailabilityOK[saved.Selected]; !known || available || item.AvailabilityFailures[saved.Selected] > 0 {
-					selected = saved.Selected
+					preferred = saved.Selected
+					if contract.Nodes[preferred].Protocol != "xray-reverse" {
+						selected = preferred
+					}
 				}
 			}
 			if selected == "" {
@@ -188,7 +245,7 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 				}
 				threshold := healthFailureConfirmations
 				for _, candidate := range ordered {
-					if contains(candidates, candidate) && contains(balancer.Members, candidate) &&
+					if contains(candidates, candidate) && memberAllowed(candidate) &&
 						contract.Nodes[candidate].Protocol != "xray-reverse" &&
 						item.AvailabilityOK[candidate] && item.AvailabilityFailures[candidate] < threshold && item.Recoveries[candidate] > 0 {
 						selected = candidate
@@ -201,6 +258,16 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 			selected = fallback
 		}
 		balancer.Outbound = selected
+		if preferred == "" && len(candidates) > 0 {
+			preferred = candidates[0]
+		}
+		// URLTest keeps ordinary qualification; only a priority-selected
+		// Reverse or a Reverse-only route waits for a startup reconnection.
+		if (contract.Mode == "priority" || len(candidates) == 1) &&
+			contract.Nodes[preferred].Protocol == "xray-reverse" && memberAllowed(preferred) &&
+			(item == nil || item.AvailabilityFailures[preferred] < healthFailureConfirmations) {
+			reverse[balancer.Tag] = startupReverseChoice{Outbound: preferred, Services: make(map[string]string)}
+		}
 		// Restore service selectors consistently without widening permissions.
 		_, groups, _ := candidateGroups(contract.Groups, contract.Candidates, contract.Mode)
 		for _, serviceID := range contract.Policy.CandidateServiceIDs {
@@ -210,9 +277,18 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 			}
 			for serviceIndex := range balancers {
 				service := &balancers[serviceIndex]
-				if service.Tag == serviceSelectorTag(balancer.Tag, serviceID) && contains(service.Members, target) {
+				prefix := pool.PolicyPrefixes[service.Tag]
+				serviceAllowed := contains(service.Members, target) || (prefix != "" && contains(service.Members, prefix) && contains(pool.Policies[service.Tag], target))
+				if service.Tag == serviceSelectorTag(balancer.Tag, serviceID) && serviceAllowed {
 					service.Outbound = target
 					managed[service.Tag] = true
+					if choice, waiting := reverse[balancer.Tag]; waiting {
+						reverseTarget := serviceBlockTag(balancer.Tag)
+						if contains(contract.Policy.CandidateServiceAccess[groups[preferred]], serviceID) && contains(service.Members, preferred) {
+							reverseTarget = preferred
+						}
+						choice.Services[service.Tag] = reverseTarget
+					}
 				}
 			}
 		}
@@ -223,5 +299,5 @@ func XrayStartupSelections(configPath string, opts Options) ([]runtimeconfig.Bal
 			startup = append(startup, balancer)
 		}
 	}
-	return startup, nil
+	return startupSelectionPlan{Balancers: startup, Reverse: reverse, PoolAvailable: true}, nil
 }

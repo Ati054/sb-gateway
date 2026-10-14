@@ -22,6 +22,8 @@ COPY patches/xray-outbound-transport-retirement.patch /tmp/xray-outbound-transpo
 COPY patches/xray-routing-reload-preserve-selection.patch /tmp/xray-routing-reload-preserve-selection.patch
 COPY patches/xray-concurrency-safety.patch /tmp/xray-concurrency-safety.patch
 COPY patches/xray-library-main.patch /tmp/xray-library-main.patch
+COPY patches/xray-health-probe-lifetime.patch /tmp/xray-health-probe-lifetime.patch
+COPY patches/xray-reverse-backpressure-selection.patch /tmp/xray-reverse-backpressure-selection.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -38,11 +40,17 @@ RUN git init \
     && git apply /tmp/xray-concurrency-safety.patch \
     && git apply --check /tmp/xray-library-main.patch \
     && git apply /tmp/xray-library-main.patch \
+    && git apply --check /tmp/xray-health-probe-lifetime.patch \
+    && git apply /tmp/xray-health-probe-lifetime.patch \
+    && git apply --check /tmp/xray-reverse-backpressure-selection.patch \
+    && git apply /tmp/xray-reverse-backpressure-selection.patch \
     && go test ./app/router -run '^TestSB' \
+    && go test ./common/mux ./app/reverse ./proxy/vless/inbound \
     && go test ./proxy ./proxy/vless/outbound ./app/proxyman/outbound \
       ./transport/internet ./transport/internet/grpc \
       ./transport/internet/hysteria ./transport/internet/splithttp \
-      ./transport/internet/tls ./transport/internet/httpupgrade
+      ./transport/internet/tls ./transport/internet/httpupgrade \
+      ./proxy/http ./transport/internet/reality
 RUN set -eux; \
     git clone --filter=blob:none --no-checkout https://github.com/XTLS/REALITY.git /src/reality; \
     git -C /src/reality fetch --depth=1 origin "${XRAY_REALITY_COMMIT}"; \
@@ -54,7 +62,7 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
 ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
-ARG SB_GATEWAY_VERSION=1.6.49
+ARG SB_GATEWAY_VERSION=1.6.58
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY --from=xray-build /src /opt/xray-source
@@ -68,7 +76,10 @@ RUN set -eux; \
     sh scripts/prepare-xray-multicall.sh /opt/xray-source /opt/xray-source/reality /src/multicall.mod; \
     go test -modfile=/src/multicall.mod -tags=xray_multicall ./cmd/sb-gateway; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/app/router -run '^TestSB'; \
-    go test -modfile=/src/multicall.mod github.com/xtls/xray-core/proxy \
+    go test -modfile=/src/multicall.mod github.com/xtls/xray-core/common/mux \
+      github.com/xtls/xray-core/app/reverse \
+      github.com/xtls/xray-core/proxy/vless/inbound \
+      github.com/xtls/xray-core/proxy \
       github.com/xtls/xray-core/proxy/vless/outbound \
       github.com/xtls/xray-core/app/proxyman/outbound \
       github.com/xtls/xray-core/transport/internet \
@@ -76,7 +87,9 @@ RUN set -eux; \
       github.com/xtls/xray-core/transport/internet/hysteria \
       github.com/xtls/xray-core/transport/internet/splithttp \
       github.com/xtls/xray-core/transport/internet/tls \
-      github.com/xtls/xray-core/transport/internet/httpupgrade; \
+      github.com/xtls/xray-core/transport/internet/httpupgrade \
+      github.com/xtls/xray-core/proxy/http \
+      github.com/xtls/xray-core/transport/internet/reality; \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
       -modfile=/src/multicall.mod -tags=xray_multicall \
       -trimpath -buildvcs=false -gcflags="all=-l=4" \
@@ -90,7 +103,7 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
 ARG XRAY_VERSION=26.9.30
-ARG SB_GATEWAY_VERSION=1.6.49
+ARG SB_GATEWAY_VERSION=1.6.58
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -130,7 +143,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.9.30
 ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
 ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.49
+ARG SB_GATEWAY_VERSION=1.6.58
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \
@@ -146,6 +159,8 @@ LABEL org.opencontainers.image.title="sb-gateway" \
       io.sb-gateway.dependency.xray.vision-padding-overflow-compat="true" \
       io.sb-gateway.dependency.xray.outbound-transport-retirement="true" \
       io.sb-gateway.dependency.xray.concurrency-safety="true" \
+      io.sb-gateway.dependency.xray.health-probe-lifetime="true" \
+      io.sb-gateway.dependency.xray.reverse-backpressure-selection="true" \
       io.sb-gateway.dependency.xray.shared-executable="true" \
       io.sb-gateway.dependency.reality.revision="${XRAY_REALITY_COMMIT}" \
       io.sb-gateway.dependency.reality.x25519-compat="true"

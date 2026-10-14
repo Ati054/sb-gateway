@@ -11,7 +11,7 @@ import (
 const routerOSCandidateHeader = "# SB-GATEWAY generated candidate; managed objects only"
 const routerOSSectionPrefix = "# SB-GATEWAY section:"
 
-var routerOSSectionOrder = []string{"panel-port-check", "public-port-check", "core", "dns", "watchdog", "address-lists", "outage-exceptions", "public-ingress", "panel-ingress", "wireguard-egress", "ipv6", "finalize"}
+var routerOSSectionOrder = []string{"panel-port-check", "public-port-check", "core", "dns", "watchdog", "address-lists", "protocol-policy", "outage-exceptions", "public-ingress", "panel-ingress", "wireguard-egress", "ipv6", "finalize"}
 
 // RenderRouterOSTrafficCandidate renders the idempotent RouterOS traffic-path
 // portion of the current runtime candidate. The script only alters
@@ -41,6 +41,7 @@ func RenderRouterOSTrafficCandidate(config map[string]any, nodes []map[string]an
 		"dns":               renderRouterOSDNS(model),
 		"watchdog":          renderRouterOSWatchdog(model),
 		"address-lists":     renderRouterOSAddressLists(model),
+		"protocol-policy":   strings.Split(strings.TrimSpace(routerosassets.ProtocolPolicySource(model.ContainerIP, model.AllowWANPing)), "\n"),
 		"outage-exceptions": renderRouterOSOutage(outage),
 		"public-ingress":    renderRouterOSPublicIngress(model),
 		"wireguard-egress":  renderRouterOSWireGuard(model),

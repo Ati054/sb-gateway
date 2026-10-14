@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -86,8 +87,9 @@ type xrayCommandRunner func(context.Context, time.Duration, string, ...string) (
 
 var (
 	underlayWANTargets          = []string{"1.1.1.1:443", "9.9.9.9:443", "www.gstatic.com:443"}
-	availabilityProbeTimeout    = 2 * time.Second
-	availabilityFallbackTimeout = 3 * time.Second
+	availabilityProbeTimeout    = 5 * time.Second
+	availabilityFallbackTimeout = 5 * time.Second
+	availabilityFallbackDelay   = 2 * time.Second
 )
 
 func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
@@ -855,16 +857,36 @@ func (runtime *xraySelectorRuntime) ProbeEmergencyAvailability(candidate string)
 	return runtime.probe(candidate, xrayEmergencyProbe)
 }
 
+func (runtime *xraySelectorRuntime) ProbeConfirmationAvailability(candidate string) (evidence probeEvidence) {
+	trace := beginHealthStage("confirmation_availability_probe", runtime.stageLane(), "", candidate)
+	defer func() { trace.finish(evidence.OK) }()
+	return runtime.probe(candidate, xrayEmergencyProbe)
+}
+
 func (runtime *xraySelectorRuntime) probe(candidate string, mode xrayProbeMode) probeEvidence {
 	evidence := probeEvidence{Targets: make(map[string]*int), TargetFailures: make(map[string]probeFailureClass)}
-	// Reverse bridge outbounds exist only while the matching client has an
-	// online session. Selecting an offline bridge is accepted by the balancer
-	// API but every probe then reaches a non-existent outbound and Xray logs a
-	// misleading warning. Treat the online counter as the liveness gate before
-	// touching either probe selector.
-	if runtime.isReverse(candidate) && !runtime.reverseOnline(candidate) {
-		evidence.Failure = probeFailureFatal
-		return evidence
+	reverse := runtime.isReverse(candidate)
+	// An absent Reverse portal cannot serve a probe. API observation failures
+	// are local failures, not proof that the remote client disconnected.
+	if reverse {
+		online, err := runtime.reverseOnlineStatus(candidate)
+		if err != nil {
+			evidence.LocalFailure = true
+			return evidence
+		}
+		if !online {
+			// Session statistics can briefly reach zero while a live portal still
+			// serves traffic. A present handler must be qualified by the path probe.
+			present, err := runtime.outboundPresent(candidate)
+			if err != nil {
+				evidence.LocalFailure = true
+				return evidence
+			}
+			if !present {
+				evidence.Failure = probeFailureTransient
+				return evidence
+			}
+		}
 	}
 	if err := runtime.Select(runtime.probeSelectorName(), candidate); err != nil {
 		evidence.Failure = classifyProbeError(err)
@@ -880,7 +902,13 @@ func (runtime *xraySelectorRuntime) probe(candidate string, mode xrayProbeMode) 
 	trace := beginHealthStage("https", runtime.stageLane(), "", "")
 	trace.target(target.label)
 	started := time.Now()
-	_, err := requestThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, http.MethodHead, 5*time.Second, 0, target.status)
+	method, timeout, limit := http.MethodHead, 5*time.Second, 0
+	if reverse {
+		// Recovery must qualify the same request/deadline as the active lane;
+		// a slower HEAD-only success must not invite an immediate failback.
+		method, timeout, limit = http.MethodGet, availabilityProbeTimeout, 1024
+	}
+	_, err := requestThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, method, timeout, limit, target.status)
 	trace.finish(err == nil)
 	if err == nil {
 		delay := maxInt(1, int(time.Since(started).Milliseconds()))
@@ -897,11 +925,10 @@ func (runtime *xraySelectorRuntime) probe(candidate string, mode xrayProbeMode) 
 	return evidence
 }
 
-// Keep the healthy fast path to one request. If it fails, give both remaining
-// independent origins a bounded chance in parallel. A slow public endpoint
-// must not make a working outbound look dead. Confirmed emergency discovery
-// starts all three together without shortening any origin deadline. Join
-// canceled requests before the selector can be reused for another candidate.
+// Keep the healthy fast path to one request. Hedge a stalled primary after
+// two seconds, or immediately on failure. All origins share one round deadline;
+// confirmation must not multiply sequential HTTP timeouts. Emergency discovery
+// starts all three together. Join canceled workers before reusing the selector.
 func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvidence, parallelPrimary bool) probeEvidence {
 	type targetResult struct {
 		label   string
@@ -929,6 +956,12 @@ func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvide
 		evidence.Targets[result.label] = nil
 		failure := classifyProbeError(result.err)
 		evidence.TargetFailures[result.label] = failure
+		if stage := probeErrorStage(result.err); stage != "" {
+			if evidence.TargetStages == nil {
+				evidence.TargetStages = make(map[string]string)
+			}
+			evidence.TargetStages[result.label] = stage
+		}
 		failures = append(failures, failure)
 		return false
 	}
@@ -936,20 +969,14 @@ func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvide
 		evidence.Failure = probeFailureTransient
 		return evidence
 	}
-	first := 0
-	if !parallelPrimary {
-		if record(probe(runtime.requestContext(), 0, availabilityProbeTimeout)) {
-			return evidence
-		}
-		first = 1
-	}
-
-	// Production has three origins; never grow emergency fanout implicitly.
-	count := minInt(len(healthTargets), 3) - first
-	ctx, cancel := context.WithCancel(runtime.requestContext())
+	// Production has three origins; never grow fanout implicitly.
+	count := minInt(len(healthTargets), 3)
+	ctx, cancel := context.WithTimeout(runtime.requestContext(), max(availabilityProbeTimeout, availabilityFallbackTimeout))
 	defer cancel()
 	results := make(chan targetResult, count)
-	for index := first; index < first+count; index++ {
+	pending := 0
+	launch := func(index int) {
+		pending++
 		go func(index int) {
 			timeout := availabilityFallbackTimeout
 			if index == 0 {
@@ -958,13 +985,41 @@ func (runtime *xraySelectorRuntime) probeAvailabilityTargets(evidence probeEvide
 			results <- probe(ctx, index, timeout)
 		}(index)
 	}
-	for received := 0; received < count; received++ {
-		result := <-results
-		if evidence.OK {
-			continue // Canceled sibling is not a failed target.
+	launch(0)
+	fallbackStarted := false
+	launchFallback := func() {
+		if fallbackStarted {
+			return
 		}
-		if record(result) {
-			cancel()
+		fallbackStarted = true
+		for index := 1; index < count; index++ {
+			launch(index)
+		}
+	}
+	timer := time.NewTimer(availabilityFallbackDelay)
+	defer timer.Stop()
+	var hedge <-chan time.Time = timer.C
+	if parallelPrimary {
+		launchFallback()
+		hedge = nil
+	}
+	for pending > 0 {
+		select {
+		case <-hedge:
+			launchFallback()
+			hedge = nil
+		case result := <-results:
+			pending--
+			if evidence.OK {
+				continue // Canceled sibling is not a failed target.
+			}
+			if record(result) {
+				cancel()
+				hedge = nil
+			} else {
+				launchFallback()
+				hedge = nil
+			}
 		}
 	}
 	if !evidence.OK {
@@ -1113,14 +1168,18 @@ func (runtime *xraySelectorRuntime) isReverse(candidate string) bool {
 }
 
 func (runtime *xraySelectorRuntime) reverseOnline(candidate string) bool {
+	online, err := runtime.reverseOnlineStatus(candidate)
+	return err == nil && online
+}
+
+func (runtime *xraySelectorRuntime) reverseOnlineStatus(candidate string) (bool, error) {
 	if runtime.control != nil {
-		online, err := runtime.control.online(runtime.requestContext(), candidate)
-		return err == nil && online
+		return runtime.control.online(runtime.requestContext(), candidate)
 	}
 	body, err := runtime.command(runtime.requestContext(), 3*time.Second, runtime.opts.XrayBinary,
 		"api", "statsonline", "--server="+runtime.opts.XrayAPIServer, "-email", candidate)
 	if err != nil {
-		return false
+		return false, err
 	}
 	var response struct {
 		Stat struct {
@@ -1129,9 +1188,12 @@ func (runtime *xraySelectorRuntime) reverseOnline(candidate string) bool {
 		} `json:"stat"`
 	}
 	if json.Unmarshal(body, &response) != nil {
-		return false
+		return false, errors.New("Xray online statistic is invalid")
 	}
-	return response.Stat.Name == "user>>>"+candidate+">>>online" && response.Stat.Value > 0
+	if response.Stat.Name != "user>>>"+candidate+">>>online" {
+		return false, errors.New("Xray online statistic name differs")
+	}
+	return response.Stat.Value > 0, nil
 }
 
 func probeHTTP(proxyURL, target string, timeout time.Duration, limit int) (int, error) {
@@ -1165,14 +1227,17 @@ func requestThroughProxyContext(ctx context.Context, proxyURL, target, method st
 	}
 	request.Header.Set("User-Agent", "SB-Gateway-Go-Health/1")
 	request.Header.Set("Accept-Encoding", "identity")
+	trace := &probeRequestTrace{}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace.hooks()))
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, err
+		return 0, trace.wrap(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 || (expectedStatus != 0 && response.StatusCode != expectedStatus) {
-		return 0, fmt.Errorf("probe returned unexpected HTTP status %d", response.StatusCode)
+		return 0, trace.wrap(fmt.Errorf("probe returned unexpected HTTP status %d", response.StatusCode))
 	}
+	trace.stage.Store(uint32(probeStageBody))
 	received := 0
 	buffer := make([]byte, minInt(64*1024, limit))
 	for received < limit {
@@ -1183,7 +1248,7 @@ func requestThroughProxyContext(ctx context.Context, proxyURL, target, method st
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return received, readErr
+			return received, trace.wrap(readErr)
 		}
 	}
 	return received, nil
