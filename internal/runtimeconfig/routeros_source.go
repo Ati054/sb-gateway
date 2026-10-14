@@ -64,6 +64,7 @@ type RouterOSRenderModel struct {
 	WatchdogInterval, WatchdogFailure         int
 	WatchdogRecovery, WatchdogCooldownTicks   int
 	IPv6Mode                                  string
+	AllowWANPing                              bool
 	WireGuardExits                            []RouterOSWireGuardExit
 	PublicIngress                             []RouterOSPublicIngress
 	PublicSourceLists                         []RouterOSPublicSourceList
@@ -185,7 +186,7 @@ func BuildRouterOSRenderModel(config map[string]any, nodes []map[string]any) (Ro
 	if err != nil {
 		return RouterOSRenderModel{}, fmt.Errorf("fail-closed clients: %w", err)
 	}
-	model.Internal4, model.Internal6, err = splitRouterOSCIDRs(internal)
+	model.Internal4, model.Internal6, err = splitRouterOSCIDRs(append(internal, controlPlaneMulticastCIDRs...))
 	if err != nil {
 		return RouterOSRenderModel{}, fmt.Errorf("internal networks: %w", err)
 	}
@@ -226,6 +227,7 @@ func BuildRouterOSRenderModel(config map[string]any, nodes []map[string]any) (Ro
 		}
 	}
 	model.IPv6Mode = textDefault(networking["ipv6_mode"], "block_managed")
+	model.AllowWANPing = boolDefault(networking["allow_wan_ping"], true)
 	if model.IPv6Mode != "block_managed" && model.IPv6Mode != "disabled" {
 		return RouterOSRenderModel{}, errors.New("system.networking.ipv6_mode must be block_managed or disabled")
 	}

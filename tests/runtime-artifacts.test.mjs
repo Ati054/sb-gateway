@@ -144,6 +144,46 @@ test("Xray image applies and exercises graceful outbound transport retirement", 
   ]) assert.ok(patch.includes(name), name);
 });
 
+test("Xray bounds local probe lifetime without capping ordinary client streams", async () => {
+  const [dockerfile, patch, integration] = await Promise.all([
+    text("Dockerfile"), text("patches/xray-health-probe-lifetime.patch"),
+    text("internal/agent/xray_reality_probe_integration_test.go"),
+  ]);
+  const apply = "git apply /tmp/xray-health-probe-lifetime.patch";
+  assert.ok(dockerfile.includes("git apply --check /tmp/xray-health-probe-lifetime.patch"));
+  assert.ok(dockerfile.indexOf(apply) < dockerfile.indexOf("go test ./proxy"));
+  assert.ok(dockerfile.includes("./proxy/http"));
+  assert.ok(dockerfile.includes("./transport/internet/reality"));
+  assert.match(dockerfile, /io\.sb-gateway\.dependency\.xray\.health-probe-lifetime="true"/);
+  assert.ok(patch.includes('strings.HasPrefix(inbound.Tag, "outbound-health-")'));
+  assert.ok(patch.includes("context.WithTimeout(ctx, 8*time.Second)"));
+  assert.ok(patch.includes("TestSBRealityFailureClosesOwnedSocket"));
+  assert.ok(integration.includes("TestXrayRealityProbeLifetimePreservesClient"));
+});
+
+test("Reverse portal avoids blocked receivers without terminating streams", async () => {
+  const [dockerfile, patch] = await Promise.all([
+    text("Dockerfile"), text("patches/xray-reverse-backpressure-selection.patch"),
+  ]);
+  const apply = "git apply /tmp/xray-reverse-backpressure-selection.patch";
+  assert.ok(dockerfile.includes("git apply --check /tmp/xray-reverse-backpressure-selection.patch"));
+  assert.ok(dockerfile.indexOf(apply) < dockerfile.indexOf("go test ./common/mux"));
+  assert.match(dockerfile, /io\.sb-gateway\.dependency\.xray\.reverse-backpressure-selection="true"/);
+  for (const path of ["common/mux", "app/reverse", "proxy/vless/inbound"]) {
+    assert.ok(dockerfile.includes(`github.com/xtls/xray-core/${path}`));
+  }
+  assert.match(patch, /ObserveDownlinkBackpressure: true/);
+  assert.ok(patch.includes("proxy/vless/inbound/inbound.go"));
+  for (const name of [
+    "TestSBReversePickerSkipsBlockedDownlink",
+    "TestSBReversePickerPreservesDrainAndLeastSessionOrder",
+    "TestSBReversePickerRetainsSoleBlockedTunnel",
+    "TestSBReversePickerRetainsAllBlockedFallback",
+    "TestSBReversePickerKeepsProfilesIndependent",
+    "TestSBReverseTrackingClearsOnWriteFailure",
+  ]) assert.ok(patch.includes(name), name);
+});
+
 test("RouterOS container uses kernel TPROXY and mount lists", async () => {
   const install = await text("routeros/install.rsc");
   const preflight = await text("scripts/preflight.sh");
@@ -225,7 +265,7 @@ test("Xray transit uses kernel TPROXY and a dedicated policy table", async () =>
   assert.match(routing, /ip route replace local default dev lo table "\$route_table"/);
   assert.match(routing, /fwmark "\$tproxy_mark" table "\$route_table"/);
   assert.match(routing, /write_ipv4_setting ip_forward 1/);
-  assert.match(routing, /chain forward \{\s+type filter hook forward priority filter; policy accept;\s+\$exclude_rule\s+iifname "\$uplink_dev" counter reject with icmpx type admin-prohibited comment "sb-public-transit-reject"/);
+  assert.match(routing, /chain forward \{[\s\S]*?icmpv6 type \{ destination-unreachable, packet-too-big, time-exceeded, parameter-problem \} ct state related accept[\s\S]*?\$exclude_rule\s+iifname "\$uplink_dev" counter reject with icmpx type admin-prohibited comment "sb-public-transit-reject"/);
   assert.doesNotMatch(routing, /default dev "\$tun_dev"|gvisor|sb-tun0/);
   assert.match(runner, /configure-transparent-routing\.sh apply/);
   assert.match(runner, /startup_deadline=\$\(\(startup_started \+ startup_timeout_seconds\)\)/);
@@ -271,11 +311,12 @@ test("RouterOS bootstrap accepts a local ARM64 archive and waits for extraction"
 });
 
 test("setup mode cannot falsely advertise data-plane readiness", async () => {
-  const [entrypoint, runner, appliance, watchdog] = await Promise.all([
+  const [entrypoint, runner, appliance, watchdog, runtime] = await Promise.all([
     text("entrypoint.sh"),
     text("scripts/run-xray.sh"),
     text("internal/appliance/run.go"),
     text("internal/watchdog/watchdog.go"),
+    text("internal/controlplane/runtime.go"),
   ]);
   assert.match(entrypoint, /session-signing-key/);
   assert.match(entrypoint, /bootstrap\.pem/);
@@ -299,7 +340,10 @@ test("setup mode cannot falsely advertise data-plane readiness", async () => {
   assert.match(watchdog, /procListeningPorts\("tcp"\)/);
   assert.match(watchdog, /procListeningPorts\("udp"\)/);
   assert.doesNotMatch(watchdog, /ss -H -ln/);
-  assert.match(watchdog, /"run", "-test", "-config"/);
+  assert.doesNotMatch(watchdog, /"run", "-test", "-config"/);
+  assert.doesNotMatch(watchdog, /mark\("config_validation"\)/);
+  assert.match(runtime, /"run", "-test", "-config", candidate\.Files\[name\]/);
+  assert.match(runtime, /"XRAY_LOCATION_ASSET=" \+ runtime\.options\.RuleSetDir/);
   assert.doesNotMatch(watchdog, /sing-box/i);
   assert.match(watchdog, /\/config\/generated\/watchdog\.env/);
   assert.match(watchdog, /pruneRestarts/);

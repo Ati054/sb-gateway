@@ -107,7 +107,7 @@ export function useAcmeProfile(id?: string, initialMode = "manual") {
     setCredentials({});
     setStatus((previous) => ({ ...previous, ...result, settings, credentials_configured: true,
       ...(credentials.accounts ? { delegations: acmeDNSDelegations(credentials.accounts) } : {}),
-      message: issue ? "Выпуск поставлен в очередь." : "Настройки сохранены." }));
+      message: typeof result.message === "string" ? result.message : issue ? "Выпуск поставлен в очередь." : "Настройки сохранены." }));
   }
   const issueAvailable = acmeIssueAvailable(loaded, loadError, settings, status);
   return { mode, setMode, settings, setSettings, credentials, setCredentials,

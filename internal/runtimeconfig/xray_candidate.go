@@ -24,12 +24,6 @@ type XrayCandidateArtifacts struct {
 	PolicyDNSBody []byte
 }
 
-// xrayConnectionBufferKiB overrides Xray's unusually small 4 KiB ARM64
-// default. 128 KiB materially reduces copy/wakeup pressure on sustained
-// transparent traffic while keeping the worst-case memory cost bounded by the
-// RouterOS container's 256 MiB hard limit.
-const xrayConnectionBufferKiB = 128
-
 func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandidateOptions) (XrayCandidateArtifacts, error) {
 	sourceInbounds := objectSlice(sourceModel["inbounds"])
 	sourceOutbounds := objectSlice(sourceModel["outbounds"])
@@ -132,7 +126,6 @@ func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandida
 		"policy": map[string]any{
 			"levels": map[string]any{"0": map[string]any{
 				"statsUserUplink": true, "statsUserDownlink": true, "statsUserOnline": true,
-				"bufferSize": xrayConnectionBufferKiB,
 			}},
 			"system": map[string]any{
 				"statsInboundUplink": false, "statsInboundDownlink": false,
@@ -190,10 +183,15 @@ func addURLTestSelectors(config map[string]any, balancers []map[string]any) {
 		}
 		prefix := urlTestPolicyPrefix(id)
 		selectors := stringSlice(balancer["selector"])
+		// Conversion omits the general block leaf when flattening selectors.
+		// Keep an explicit block leaf available to the startup override helper.
+		if !containsText(selectors, "block") {
+			selectors = append([]string{"block"}, selectors...)
+		}
 		if !containsText(selectors, prefix) {
 			selectors = append(selectors, prefix)
-			balancer["selector"] = selectors
 		}
+		balancer["selector"] = selectors
 		prefixes = append(prefixes, prefix)
 		if mode == "priority" {
 			for _, serviceID := range candidateServiceIDs(policy) {

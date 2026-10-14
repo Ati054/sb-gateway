@@ -55,6 +55,7 @@ type telemetrySnapshot struct {
 	SampledAt          *string           `json:"sampled_at"`
 	Month              string            `json:"month"`
 	Clients            []telemetryRow    `json:"clients"`
+	ReverseConnections map[string]bool   `json:"reverse_connections"`
 	Sources            map[string]string `json:"sources"`
 	OnlineWindowSecond int               `json:"online_window_seconds"`
 }
@@ -79,6 +80,7 @@ type telemetryRow struct {
 type activeConfig struct {
 	LocalClients []clientConfig `json:"local_clients"`
 	RemoteUsers  []clientConfig `json:"remote_users"`
+	ReverseExits []clientConfig `json:"reverse_vless_exits"`
 	Policies     []policyConfig `json:"policies"`
 }
 
@@ -118,20 +120,14 @@ func (collector *telemetryCollector) Tick(ctx context.Context, now time.Time) er
 	localClients := enabledClients(config.LocalClients)
 	remoteUsers := enabledClients(config.RemoteUsers)
 
-	type remoteResult struct {
-		measurements map[string]counterPair
-		online       map[string]struct{}
-		err          error
-	}
 	type localResult struct {
 		measurements map[string]counterPair
 		err          error
 	}
-	remoteChannel := make(chan remoteResult, 1)
+	remoteChannel := make(chan remoteMeasurementResult, 1)
 	localChannel := make(chan localResult, 1)
 	go func() {
-		measurements, online, remoteErr := collector.remoteMeasurements(ctx)
-		remoteChannel <- remoteResult{measurements, online, remoteErr}
+		remoteChannel <- collector.remoteMeasurements(ctx)
 	}()
 	go func() {
 		measurements, localErr := collector.localMeasurements(ctx, localClients)
@@ -140,14 +136,17 @@ func (collector *telemetryCollector) Tick(ctx context.Context, now time.Time) er
 	remote := <-remoteChannel
 	local := <-localChannel
 
-	sources := map[string]string{"xray": "available", "local": "available"}
+	sources := map[string]string{"xray": "available", "xray_online": "available", "local": "available"}
 	measurements := make(map[string]counterPair)
-	if remote.err != nil {
+	if remote.statsErr != nil || remote.onlineErr != nil {
 		sources["xray"] = "unavailable"
 	} else {
 		for key, value := range remote.measurements {
 			measurements["remote:"+key] = value
 		}
+	}
+	if remote.onlineErr != nil {
+		sources["xray_online"] = "unavailable"
 	}
 	if local.err != nil {
 		sources["local"] = "unavailable"
@@ -218,6 +217,7 @@ func (collector *telemetryCollector) Tick(ctx context.Context, now time.Time) er
 			SampledAt:          &sampledAt,
 			Month:              month,
 			Clients:            rows,
+			ReverseConnections: reverseConnectionSnapshot(config.ReverseExits, remote.online, remote.onlineErr),
 			Sources:            sources,
 			OnlineWindowSecond: int(onlineWindow / time.Second),
 		},
@@ -227,6 +227,26 @@ func (collector *telemetryCollector) Tick(ctx context.Context, now time.Time) er
 	}
 	collector.lastSample = now
 	return nil
+}
+
+func reverseConnectionSnapshot(exits []clientConfig, online map[string]struct{}, sourceErr error) map[string]bool {
+	connections := make(map[string]bool)
+	if sourceErr != nil {
+		return connections
+	}
+	for _, exit := range exits {
+		if exit.ID != "" {
+			connections[exit.ID] = false
+		}
+	}
+	// Live sessions can outlast a configuration change. Report the core's
+	// authenticated connections even when the active snapshot lacks that ID.
+	for user := range online {
+		if id, reverse := strings.CutPrefix(user, "reverse-vless-"); reverse && id != "" {
+			connections[id] = true
+		}
+	}
+	return connections
 }
 
 type counterRate struct {
@@ -317,7 +337,14 @@ func (collector *telemetryCollector) load(month string) {
 	collector.loaded = true
 }
 
-func (collector *telemetryCollector) remoteMeasurements(ctx context.Context) (map[string]counterPair, map[string]struct{}, error) {
+type remoteMeasurementResult struct {
+	measurements map[string]counterPair
+	online       map[string]struct{}
+	statsErr     error
+	onlineErr    error
+}
+
+func (collector *telemetryCollector) remoteMeasurements(ctx context.Context) remoteMeasurementResult {
 	statsChannel := make(chan commandResult, 1)
 	onlineChannel := make(chan commandResult, 1)
 	go func() {
@@ -329,18 +356,18 @@ func (collector *telemetryCollector) remoteMeasurements(ctx context.Context) (ma
 		onlineChannel <- commandResult{body, err}
 	}()
 	statsResult, onlineResult := <-statsChannel, <-onlineChannel
-	if statsResult.err != nil {
-		return nil, nil, statsResult.err
+	return decodeRemoteMeasurements(statsResult, onlineResult)
+}
+
+func decodeRemoteMeasurements(statsResult, onlineResult commandResult) remoteMeasurementResult {
+	result := remoteMeasurementResult{statsErr: statsResult.err, onlineErr: onlineResult.err}
+	if result.statsErr == nil {
+		result.measurements, result.statsErr = parseXrayStats(statsResult.body)
 	}
-	if onlineResult.err != nil {
-		return nil, nil, onlineResult.err
+	if result.onlineErr == nil {
+		result.online, result.onlineErr = parseXrayOnlineUsers(onlineResult.body)
 	}
-	stats, err := parseXrayStats(statsResult.body)
-	if err != nil {
-		return nil, nil, err
-	}
-	online, err := parseXrayOnlineUsers(onlineResult.body)
-	return stats, online, err
+	return result
 }
 
 type commandResult struct {
@@ -437,6 +464,16 @@ func parseXrayOnlineUsers(body []byte) (map[string]struct{}, error) {
 		}
 	}
 	visit(value, "")
+	for name := range result {
+		parts := strings.Split(name, ">>>")
+		if len(parts) == 1 {
+			continue
+		}
+		delete(result, name)
+		if len(parts) == 3 && parts[0] == "user" && parts[1] != "" && parts[2] == "online" {
+			result[parts[1]] = struct{}{}
+		}
+	}
 	return result, nil
 }
 

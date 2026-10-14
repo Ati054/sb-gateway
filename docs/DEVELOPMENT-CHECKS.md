@@ -1,5 +1,28 @@
 # Development Checks
 
+## Managed IP Protocols
+
+`go test ./routeros ./internal/runtimeconfig` covers the default-enabled WAN
+echo toggle, mandatory multicast/broadcast exclusions, independent related
+ICMP error rules and removal of new owned rules during a legacy rollback.
+`go test ./internal/routeros` additionally validates that legacy cleanup keeps
+the required full-candidate header and section order accepted by SSH transport.
+Release verification must exercise IPv4/IPv6 echo enabled and disabled,
+related PMTUD errors in both states, unrequested ICMP errors and unsupported
+GRE/ESP, multicast with the editable exclusions removed, repeated Apply and
+rollback. Keep packet captures and environment-specific results private.
+
+Watchdog probes the live dataplane and does not run `xray -test`. The controller
+validates candidate configurations with `XRAY_LOCATION_ASSET` set from
+`SB_RULESET_DIR` (default `/config/rulesets`); startup validation is retained.
+`TestDeepProbeDoesNotLaunchXrayValidation` covers routing-only file changes and
+confirms that missing live TCP/UDP listeners still fail readiness. With
+`SB_TEST_XRAY` pointing to the pinned core,
+`TestPinnedXrayGeoIPCandidateValidation` validates a synthetic content-addressed
+GeoIP database and verifies that a missing asset rejects activation without
+publishing the candidate or restarting processes. It requires no external
+network access and does not alter the running core or generated configuration.
+
 The release-hygiene workflow has an independent Go quality job:
 
 - `go vet ./...`;
@@ -70,6 +93,113 @@ defaults, transport settings, DNS controls and configuration-owned exits.
 These tests are important but do not provide compile-time coverage for every
 string key. This change does not convert the complete schema or split large
 files. Add focused validation-to-rendering contracts when changing a field.
+
+The pinned core includes `xray-reverse-backpressure-selection.patch`.
+Run `go test ./common/mux ./app/reverse ./proxy/vless/inbound` in the patched
+Xray source. The blocked-receiver fixture requires an independent tunnel to
+deliver a response while its sibling is blocked, then checks selection away
+from that sibling and its reuse after recovery without closing either tunnel.
+Sole/all-blocked fallback, drain priority, closed-worker exclusion and write-error
+cleanup and isolation between separate profile pickers must remain intact.
+Repeat the focused tests under `-race`; benchmark
+`BenchmarkSBReverseDownlinkTracking` with allocation reporting before release.
+Both image build stages exercise these packages. These deterministic core tests
+do not establish public-WAN throughput, real failover timing or release-image
+acceptance on CHR; record those checks separately before claiming them complete.
+
+Reverse regressions cover converted/pruned selector membership, zero online
+counters with a live portal, and local API failures without node penalties.
+`TestReverseRecoveryUsesActiveRequestContract` requires the same GET/deadline
+for Reverse quality qualification and active availability. HEAD-only and slow
+GET responses must not qualify a return; a healthy primary needs one request.
+HTTP trace regressions isolate CONNECT rejection, silent TLS, missing headers
+and stalled bodies; classification and cancellation must survive error wrapping.
+Startup regressions also require native RPC override/readback for every ordinary
+selector with no CLI binary available, plus a bounded readiness budget rather
+than a fixed startup delay.
+Pool-only reload fixtures use the readiness marker, not host process-name scans;
+an unrelated running Reverse client must not invalidate their cached generation.
+The opt-in `TestStartupReverseWaitPinnedCoreReconnect` uses an isolated core,
+ephemeral ports and a temporary external-client JSON exchange. Set
+`SB_TEST_XRAY`, `SB_TEST_REVERSE_ADDRESS` and `SB_TEST_REVERSE_EXCHANGE`;
+run the exchanged client separately. `SB_TEST_REVERSE_TRANSPORT` accepts
+`tcp` (REALITY + Vision) or `xhttp` (REALITY). The fixture permits only its
+explicit IP/port target, verifies real data transfer and repeats restoration
+after core restart. It does not alter existing route-sheet configuration.
+The client fixture uses exported TCP defaults: keepalive idle 30 seconds,
+interval 10 seconds, and unacknowledged-data timeout 60000 milliseconds.
+`SB_TEST_REVERSE_BURST=1` additionally alternates 320 availability and quality
+requests per startup with pauses for mux worker rotation. Both request kinds
+must remain healthy across rotation and the subsequent core restart.
+An online counter alone is not a passing data-path or restart test.
+
+`SB_TEST_REVERSE_FAULTS=1` requires a trusted external HTTPS origin at
+`SB_TEST_REVERSE_TARGET` (explicit IP/port), with `/data` returning 204 and
+`/mode/slow`, `/mode/silent`, `/mode/normal`, `/mode/stop` controlling the
+fixture. Slow mode delays only probe headers for four seconds; `/data` must
+remain immediate in both slow and silent modes. The test keeps
+concurrent data requests running, reproduces two rejections with the former
+2/3-second budgets,
+then requires both production availability and Reverse recovery probes to
+accept the same delayed response. Availability shares a five-second round
+deadline across its origins, hedging after two seconds; recovery uses a
+five-second primary request. After the first active timeout, the controller
+starts all three origins immediately in the confirming round, under the same
+five-second budget. Recovery resets the failure count and restores the ordinary
+one-request fast path. `health_confirmation_test.go` checks controller dispatch,
+immediate origin fanout, canceled-worker joining and Apply-generation rejection;
+non-timeout failure classes must not enable this confirming fanout.
+Silent mode delays headers for thirty seconds;
+two complete failure rounds are timed against the former sequential schedule.
+Healthy HTTP-schedule comparisons record process CPU ticks for twenty probes
+per schedule, excluding identical selector/API observations
+(test process plus isolated core only, excluding the external client/host).
+Stop mode terminates the external client and restarts it after twelve seconds;
+the test requires rejection of the
+dead path, recovery, and restoration after an isolated core restart. Install
+only the fixture CA through `SSL_CERT_FILE`; never disable TLS verification.
+This is a controlled deadline comparison, not proof of a production root cause
+or an automatic failover/Apply test. IP-based origins do not cover DNS latency.
+Fault mode uses a local TLS 1.3 camouflage endpoint rather than a public site.
+
+`SB_TEST_REVERSE_BULK=1` additionally compares one and four concurrent HTTPS
+downloads with availability checks, using `/bulk` and `/bulk/paced` on that
+same owned origin. Each response is 8 MiB, streamed from a 64 KiB buffer;
+paced responses pause 10 ms per block. Runs are bounded and canceled workers
+are joined. Any data error, empty transfer or failed concurrent probe fails
+the run; failed runs must not be averaged into a release pass. Bytes from the
+deliberately canceled last transfers count toward throughput, not completed
+responses or errors; requiring an entire 8 MiB per
+stream inside the window would impose an arbitrary minimum aggregate speed.
+Report payload throughput, test-plus-core CPU ticks per delivered MiB and
+probe failures; do not equate this local transfer or application-level pacing
+with public-WAN RTT, loss, queueing, upload performance, or real failover timing.
+The isolated core leaves the connection buffer at its architecture default
+unless buffer comparison is explicitly enabled. No shared network
+qdisc is changed.
+
+`SB_TEST_REVERSE_BUFFER_COMPARE=1` with bulk mode compares isolated core
+buffers in the order 4, 128, 128, 4 KiB, restarting and restoring the real
+Reverse connection before each run. It requires bulk mode without burst mode,
+skips the long fault scenarios and uses one post-run path proof. Only the core
+buffer changes; the external
+client keeps its architecture default. Repeated opposing-order results are
+needed before attributing a throughput change to buffering. This does not
+measure peak memory per connection or justify a production buffer change by
+itself.
+
+The loopback-only origin is `tests/fixtures/reverse-https-origin`. Build it with
+`go build ./tests/fixtures/reverse-https-origin`, then run the binary with an
+owned temporary directory and the external Xray binary as arguments. The
+fixture uses the project's Go toolchain and needs no Python runtime.
+Supply `cert.pem` and `key.pem` in that directory (IP SAN `127.0.0.1`, valid
+on both hosts); the fixture writes `origin.port`. Use
+`https://127.0.0.1:PORT/probe` as the target and trust that certificate in the
+test process. Copy the exchanged client configuration to the directory as
+`client.json` only after allowing its exact test endpoint through lab filters.
+The fixture validates and starts that client, handles its stop/restart scenario,
+and terminates only its owned child on exit. It neither edits route sheets nor
+opens the HTTPS origin to external clients. Keep generated keys and logs local.
 
 Keep bug fixes, features and release metadata in separate focused commits with
 descriptive subjects. Do not rewrite existing release history just to rename it.

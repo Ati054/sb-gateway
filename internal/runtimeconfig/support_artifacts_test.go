@@ -122,7 +122,7 @@ func TestRenderTransparentExclusionsMatchesTunSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "192.168.3.0/24\n10.10.0.0/16\n172.31.255.0/30\n"
+	want := "224.0.0.0/4\n255.255.255.255/32\nff00::/8\n192.168.3.0/24\n10.10.0.0/16\n172.31.255.0/30\n"
 	if got := string(body); got != want {
 		t.Fatalf("transparent exclusions = %q, want %q", got, want)
 	}

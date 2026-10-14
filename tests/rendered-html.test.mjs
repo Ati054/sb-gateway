@@ -6,6 +6,16 @@ import { normalizeLocalizedSource } from "./source-localization.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
 
+test("routing autosave leaves reverse profile input interactive", async () => {
+  const page = await readFile(new URL("app/page.tsx", projectRoot), "utf8");
+  const routing = page.slice(page.indexOf("function RoutingInfrastructure"), page.indexOf("function ReverseVlessSettings"));
+  assert.ok(routing.includes('className="routing-infrastructure"'));
+  assert.doesNotMatch(routing, /inert=\{saveBusy\}/);
+  const reverse = page.slice(page.indexOf("function ReverseVlessSettings"), page.indexOf("function Connections"));
+  assert.match(reverse, /<form ref=\{formRef\} onChange=\{\(\) => setMessage\(""\)\}/);
+  assert.match(reverse, /key=\{id\}/);
+});
+
 test("URLTest switching help exposes latency without download settings", async () => {
   const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
   assert.doesNotMatch(page, /name="speed_/);
@@ -322,6 +332,10 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /google:\s*"8\.8\.8\.8"/);
   assert.match(page, /quad9:\s*"9\.9\.9\.9"/);
   assert.match(page, /Отключать QUIC для сервисных карточек/);
+  assert.match(page, /Ping через WAN/);
+  assert.match(page, /networking\.allow_wan_ping !== false/);
+  assert.match(page, /allow_wan_ping:\s*allowWanPing/);
+  assert.match(page, /setAllowWanPing\(networking\.allow_wan_ping !== false\)/);
   assert.match(
     page,
     /force_tcp_for_proxy_services:\s*forceTcpForProxyServices/,

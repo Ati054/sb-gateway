@@ -63,7 +63,7 @@ func TestConfirmedEmergencyDoesNotYieldToUnrelatedPolicyCheck(t *testing.T) {
 		return errHealthYield
 	})
 	controller := &healthController{runtime: runtime}
-	measured, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, effectivePolicySettings{})
+	measured, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, nil)
 	if err != nil || selected == "" || !measured[selected].OK || checks != 0 {
 		t.Fatalf("confirmed emergency was preempted: selected=%q checks=%d err=%v", selected, checks, err)
 	}
@@ -89,7 +89,7 @@ func TestEmergencyRejectsGenerationChangedBeforeFirstResult(t *testing.T) {
 	})
 	defer timer.Stop()
 	controller := &healthController{runtime: runtime}
-	_, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, effectivePolicySettings{})
+	_, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, nil)
 	if changeErr := <-changed; changeErr != nil {
 		t.Fatal(changeErr)
 	}
@@ -104,7 +104,7 @@ func TestEmergencyCancellationJoinsWorkersWithoutSelection(t *testing.T) {
 	defer cancel()
 	runtime.ctx = ctx
 	controller := &healthController{runtime: runtime}
-	_, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, effectivePolicySettings{})
+	_, selected, err := controller.probeEmergencyCandidates("route", []string{"a", "b"}, nil)
 	if selected != "" || !errors.Is(err, errHealthYield) {
 		t.Fatalf("cancelled emergency selected a route: selected=%q err=%v", selected, err)
 	}

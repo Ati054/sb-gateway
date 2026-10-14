@@ -231,6 +231,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	}
 	// Compare against what was actually committed, not the old configuration
 	// re-rendered by the new binary (which conceals renderer fixes on upgrade).
+	previousRouterOS = runtimeconfig.WithLegacyProtocolCleanup(previousRouterOS, desiredRouterOS)
 	routerOSChanged := committedRouterOS == "" || desiredRouterOS != previousRouterOS
 	if activeRevision == check.Revision && previousRuntimeRevision == candidate.Revision && !routerOSChanged {
 		result := applyResponse("unchanged", check.Revision, activeRevision, candidate.Revision, false, "none", nil, nil, false)

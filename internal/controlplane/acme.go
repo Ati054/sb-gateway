@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type acmeRecord struct {
 	Revision                string              `json:"revision"`
 	CredentialsRef          string              `json:"credentials_ref"`
 	Intent                  string              `json:"intent,omitempty"`
+	ManualIssue             bool                `json:"manual_issue,omitempty"`
 	State                   string              `json:"state"`
 	LastOutcome             string              `json:"last_outcome,omitempty"`
 	Message                 string              `json:"message"`
@@ -53,6 +55,12 @@ const (
 )
 
 var errInvalidACMERecord = errors.New("invalid persisted ACME record")
+
+func (record acmeRecord) pendingManualIssue() bool {
+	// Queued jobs are explicit requests. Older running initial jobs predate
+	// the marker, but must retain the same preparation-only behavior.
+	return record.State == "queued" || record.State == "running" && (record.ManualIssue || record.Intent == acmeIntentInitial)
+}
 
 func decodeACMERecord(raw any) (acmeRecord, error) {
 	if raw == nil {
@@ -473,39 +481,46 @@ func (s *Server) configureACME(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, r, 422, "invalid_credentials", err.Error())
 		return
 	}
-	secret, _ := json.Marshal(credentials)
-	ref := "acme/" + id + "/dns.json"
-	undo, err := s.writeEntitySecrets([]pendingEntitySecret{{reference: ref, value: string(secret), overwrite: true}})
-	if err != nil {
-		s.writeErrorResponse(w, r, 500, "secret_store_failed", "Не удалось сохранить доступ к DNS API.")
-		return
-	}
-	record.Settings = settings
-	record.CredentialsRef = ref
-	record.Revision, _ = randomURLToken(12)
-	if issue {
-		if s.verifiedManagedACMEPair(id, acmeProfile(draft, id), record, settings) {
-			record.Intent = acmeIntentRenewal
-		} else {
-			record.Intent = acmeIntentInitial
+	_, suppliedCredentials := body["credentials"]
+	preservePending := !issue && !suppliedCredentials && record.pendingManualIssue() && reflect.DeepEqual(record.Settings, settings)
+	if !preservePending {
+		secret, _ := json.Marshal(credentials)
+		ref := "acme/" + id + "/dns.json"
+		undo, err := s.writeEntitySecrets([]pendingEntitySecret{{reference: ref, value: string(secret), overwrite: true}})
+		if err != nil {
+			s.writeErrorResponse(w, r, 500, "secret_store_failed", "Не удалось сохранить доступ к DNS API.")
+			return
 		}
-		record.State = "queued"
-		record.Message = "Выпуск поставлен в очередь."
-	} else if !settings.Enabled {
-		record.State = "disabled"
-		record.Message = "Автопродление выключено."
-	} else {
-		record.State = "configured"
-		record.Message = "Настройки сохранены."
-	}
-	state[id] = record
-	if err := s.repository.saveAuxiliary("acme", state); err != nil {
-		_ = undo()
-		s.internalStateError(w, r, err)
-		return
+		record.Settings = settings
+		record.CredentialsRef = ref
+		record.Revision, _ = randomURLToken(12)
+		if issue {
+			record.ManualIssue = true
+			if s.verifiedManagedACMEPair(id, acmeProfile(draft, id), record, settings) {
+				record.Intent = acmeIntentRenewal
+			} else {
+				record.Intent = acmeIntentInitial
+			}
+			record.State = "queued"
+			record.Message = "Выпуск поставлен в очередь."
+		} else if !settings.Enabled {
+			record.ManualIssue = false
+			record.State = "disabled"
+			record.Message = "Автопродление выключено."
+		} else {
+			record.ManualIssue = false
+			record.State = "configured"
+			record.Message = "Настройки сохранены."
+		}
+		state[id] = record
+		if err := s.repository.saveAuxiliary("acme", state); err != nil {
+			_ = undo()
+			s.internalStateError(w, r, err)
+			return
+		}
 	}
 	manualIssueNeeded, renewalNotBefore := s.acmeManualIssueStatus(id, acmeProfile(draft, id), record, settings, s.now())
-	response := map[string]any{"saved": true, "state": record.State, "manual_issue_needed": manualIssueNeeded}
+	response := map[string]any{"saved": true, "state": record.State, "message": record.Message, "manual_issue_needed": manualIssueNeeded}
 	if !renewalNotBefore.IsZero() {
 		response["renewal_not_before"] = renewalNotBefore
 	}
@@ -752,7 +767,7 @@ func (s *Server) processOneACME(ctx context.Context) error {
 		if p == nil {
 			p = acmeProfile(active, candidate)
 		}
-		if p == nil || p["enabled"] == false {
+		if p == nil || p["enabled"] == false && !rec.pendingManualIssue() {
 			continue
 		}
 		if rec.State == "running" {
@@ -846,6 +861,7 @@ func (s *Server) processOneACME(ctx context.Context) error {
 		return errors.Join(err, saveErr)
 	}
 	// Persist the cooldown before any network action, including across restarts.
+	record.ManualIssue = record.State == "queued"
 	record.State = "running"
 	record.LastOutcome = "running"
 	record.Message = "Проверка DNS и выпуск сертификата…"
@@ -971,11 +987,12 @@ func (s *Server) processOneACME(ctx context.Context) error {
 		record.State = "issued"
 		record.LastOutcome = "issued"
 		record.Intent = acmeIntentRenewal
-		record.Message = "Сертификат выпущен. Автопродление включено."
+		record.Message = "Сертификат выпущен."
 		record.NextAttempt = s.now().Add(successfulACMECooldown)
 		record.Diagnostic = nil
 		record.clearCARetry()
 	}
+	record.ManualIssue = false
 	state[id] = record
 	return errors.Join(err, s.repository.saveAuxiliary("acme", state))
 }
@@ -1104,7 +1121,7 @@ func (s *Server) installACMECertificate(ctx context.Context, id string, domains 
 	}
 	live := acmeProfile(active, id)
 	managedLive := live != nil && live["enabled"] != false && live["certificate_secret_ref"] == "tls-profiles/"+id+"/acme-bundle.pem" && originalRef == subscriptionText(live["certificate_secret_ref"])
-	if !managedLive && (profile == nil || profile["enabled"] == false || subscriptionText(profile["certificate_secret_ref"]) != originalRef) {
+	if !managedLive && (profile == nil || profile["enabled"] == false && !record.pendingManualIssue() || subscriptionText(profile["certificate_secret_ref"]) != originalRef) {
 		return errors.New("TLS profile changed during issuance")
 	}
 	metadata, err := validateACMEPair(result, domains, s.now(), s.acmeRoots)

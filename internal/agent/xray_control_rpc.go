@@ -165,6 +165,9 @@ func (client *xrayControlClient) online(parent context.Context, candidate string
 	name := "user>>>" + candidate + ">>>online"
 	setControlString(request, "name", name)
 	if err := client.invoke(parent, "statsonline", "stats", "StatsService/GetStatsOnline", request, response); err != nil {
+		if status.Code(err) == codes.NotFound {
+			return false, nil
+		}
 		return false, err
 	}
 	field := response.Descriptor().Fields().ByName("stat")

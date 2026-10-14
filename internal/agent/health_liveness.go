@@ -56,7 +56,13 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	item.RuntimeConfirmed = true
 	item.RuntimeSelected = actual
 	item.RuntimeError = ""
-	evidence := controller.runtime.ProbeAvailability(selected)
+	var evidence probeEvidence
+	confirmation, canConfirm := controller.runtime.(confirmationAvailabilityRuntime)
+	if canConfirm && item.AvailabilityFailures[selected] > 0 && item.FailureClass[selected] == string(probeFailureTimeout) {
+		evidence = confirmation.ProbeConfirmationAvailability(selected)
+	} else {
+		evidence = controller.runtime.ProbeAvailability(selected)
+	}
 	if err := takeProbeInterruption(controller.runtime); err != nil {
 		item.LatencyComparisons = nil
 		return true, err
@@ -100,7 +106,7 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	}
 	item.AvailabilityFailures[selected]++
 	threshold := failureConfirmationThreshold(evidence, p.failureThreshold)
-	controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-failed", Policy: policyID, Node: selected, Failure: evidence.Failure, Count: item.AvailabilityFailures[selected], Threshold: threshold, Targets: probeTargetResults(evidence)})
+	controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-failed", Policy: policyID, Node: selected, Failure: evidence.Failure, Count: item.AvailabilityFailures[selected], Threshold: threshold, Targets: probeTargetResults(evidence), TargetStages: evidence.TargetStages})
 	if item.AvailabilityFailures[selected] >= threshold {
 		item.AvailabilityFailures[selected] = p.failureThreshold
 		// The failed active must not consume the emergency reserve batch again.
