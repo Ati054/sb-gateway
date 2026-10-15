@@ -106,7 +106,16 @@ diagnostics, logs, status API и UI diff не содержат значений.
   RouterOS `policy` вместе с `test`: это требуется для общего hysteresis-state
   между scheduler/admin environments. В их policy отсутствуют `password` и
   `sensitive`, а source не принимает пользовательские команды.
-- RouterOS WebFig/API/SSH/WinBox закрыты для контейнера и remote users.
+- Группа служебного REST-пользователя имеет широкие права управления, а не
+  изоляцию по отдельным объектам. `ssh` нужен для Safe Mode/SCP при Apply,
+  `ftp` — для файловых операций, `sensitive` — для зашифрованного binary backup.
+  Ограничение адресом контейнера `/32` не защищает RouterOS при компрометации
+  самого контейнера. Сокращение этих прав требует проверки Apply, rollback,
+  backup/restore и обновления образа; удаление флагов без такой проверки ломает
+  штатные операции. Разрешение `ftp` само по себе не включает FTP service.
+- RouterOS WebFig/API/SSH/WinBox закрыты для удалённых VLESS-пользователей.
+  Контейнеру разрешены только необходимые служебные обращения через собственные
+  input-правила проекта; это не запрет на его административный доступ.
 - До разрешений trusted-role удалённым VLESS отклоняются loopback
   `127.0.0.0/8`/`::1`, точные container/TUN IP и все адреса RouterOS,
   импортированные из свежего обычного export без флага `show-sensitive`.
