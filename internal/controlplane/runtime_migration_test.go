@@ -112,6 +112,12 @@ func writeStartupProbeJSON(t *testing.T, path string, value any) {
 }
 
 func TestStartupMigratesDomainRuntimeWithoutChangingDraft(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) { testStartupDomainMigration(t, version) })
+	}
+}
+
+func testStartupDomainMigration(t *testing.T, version int) {
 	server, _, expected := startupProbeMigrationFixture(t, nil)
 	before, err := server.getDraft()
 	if err != nil {
@@ -121,7 +127,8 @@ func TestStartupMigratesDomainRuntimeWithoutChangingDraft(t *testing.T) {
 	if err := json.Unmarshal(expected["policy-dns.json"], &dns); err != nil {
 		t.Fatal(err)
 	}
-	dns["version"] = 1
+	dns["version"] = version
+	delete(dns, "domain_index_version")
 	writeStartupProbeJSON(t, server.opts.Runtime.PolicyDNSConfig, dns)
 	if changed, err := MigrateLegacyDynamicRuntime(context.Background(), server.opts); err != nil || !changed {
 		t.Fatalf("migration: %t %v", changed, err)

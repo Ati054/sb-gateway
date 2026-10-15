@@ -75,11 +75,12 @@ type PolicyDNSArtifacts struct {
 // Fields are declared in canonical key order so MarshalPolicyDNS is byte-for-
 // byte compatible with the current compact, sorted JSON artifact.
 type PolicyDNSRuntime struct {
-	DomainSets     map[string]domainset.Set   `json:"domain_sets,omitempty"`
-	Lanes          []PolicyDNSLane            `json:"lanes"`
-	Servers        map[string]PolicyDNSServer `json:"servers"`
-	TimeoutSeconds int                        `json:"timeout_seconds,omitempty"`
-	Version        int                        `json:"version"`
+	DomainIndexVersion int                        `json:"domain_index_version,omitempty"`
+	DomainSets         map[string]domainset.Set   `json:"domain_sets,omitempty"`
+	Lanes              []PolicyDNSLane            `json:"lanes"`
+	Servers            map[string]PolicyDNSServer `json:"servers"`
+	TimeoutSeconds     int                        `json:"timeout_seconds,omitempty"`
+	Version            int                        `json:"version"`
 }
 
 type PolicyDNSServer struct {
@@ -577,7 +578,40 @@ func copyIdentityToXray(identity policyDNSIdentity, route map[string]any) {
 	}
 }
 
+// MarshalPolicyDNS expands the compiler's interned representation into the
+// predecessor-compatible wire format. Persist candidates through this helper.
 func MarshalPolicyDNS(runtime PolicyDNSRuntime) ([]byte, error) {
+	// Keep persisted rules readable by predecessor images during rollback.
+	if runtime.Version == 2 {
+		runtime.Version, runtime.DomainIndexVersion = 1, 1
+		runtime.Lanes = append(make([]PolicyDNSLane, 0, len(runtime.Lanes)), runtime.Lanes...)
+		for n := range runtime.Lanes {
+			lane := &runtime.Lanes[n]
+			lane.Rules = append(make([]PolicyDNSRule, 0, len(lane.Rules)), lane.Rules...)
+			for m := range lane.Rules {
+				rule := &lane.Rules[m]
+				if rule.DomainSet == "" {
+					continue
+				}
+				set, exists := runtime.DomainSets[rule.DomainSet]
+				if !exists {
+					return nil, errors.New("DNS rule references a missing shared domain set")
+				}
+				if len(rule.Domain) == 0 {
+					rule.Domain = set.Domain
+				} else {
+					rule.Domain = append(append([]string(nil), rule.Domain...), set.Domain...)
+				}
+				if len(rule.DomainSuffix) == 0 {
+					rule.DomainSuffix = set.DomainSuffix
+				} else {
+					rule.DomainSuffix = append(append([]string(nil), rule.DomainSuffix...), set.DomainSuffix...)
+				}
+				rule.DomainSet = ""
+			}
+		}
+		runtime.DomainSets = nil
+	}
 	var body bytes.Buffer
 	encoder := json.NewEncoder(&body)
 	encoder.SetEscapeHTML(false)
