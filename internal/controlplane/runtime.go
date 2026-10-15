@@ -49,6 +49,7 @@ type RuntimeOptions struct {
 	XrayProcessLog          string
 	ControlPlaneLog         string
 	NginxErrorLog           string
+	NginxPublicErrorLog     string
 	XrayHealthPool          string
 	PolicyDNSConfig         string
 	NginxConfig             string
@@ -80,6 +81,7 @@ func RuntimeOptionsFromEnvironment() RuntimeOptions {
 		XrayProcessLog:          envOr("SB_XRAY_PROCESS_LOG", "/logs/xray-process.log"),
 		ControlPlaneLog:         envOr("SB_GATEWAY_CONTROL_PLANE_LOG", "/logs/control-plane.log"),
 		NginxErrorLog:           envOr("SB_NGINX_ERROR_LOG", "/logs/nginx/error.log"),
+		NginxPublicErrorLog:     envOr("SB_NGINX_PUBLIC_ERROR_LOG", "/logs/nginx/public-error.log"),
 		XrayHealthPool:          envOr("SB_XRAY_URLTEST_POOL", "/config/generated/urltest-pool.json"),
 		PolicyDNSConfig:         envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
 		NginxConfig:             envOr("SB_NGINX_RUNTIME_CONFIG", "/run/sb-gateway/nginx.conf"),
