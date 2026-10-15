@@ -50,7 +50,7 @@ func TestLargeDomainPacksUseOneImmutableGeoSiteReference(t *testing.T) {
 	}
 }
 
-func TestPolicyDNSLargeSetsAreSerializedOnce(t *testing.T) {
+func TestPolicyDNSLargeSetsAreInternedAndWireCompatible(t *testing.T) {
 	domains := make([]string, 1000)
 	for i := range domains {
 		domains[i] = fmt.Sprintf("host-%d.example", i)
@@ -69,5 +69,43 @@ func TestPolicyDNSLargeSetsAreSerializedOnce(t *testing.T) {
 				t.Fatal("large rules retained inline")
 			}
 		}
+	}
+	before, err := json.Marshal(artifacts.Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := MarshalPolicyDNS(artifacts.Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These fields are exactly what predecessor workers understand.
+	var legacy struct {
+		Version int `json:"version"`
+		Lanes   []struct {
+			Rules []struct {
+				DomainSuffix []string `json:"domain_suffix"`
+				Action       string   `json:"action"`
+				Server       string   `json:"server"`
+			} `json:"rules"`
+		} `json:"lanes"`
+	}
+	if err := json.Unmarshal(body, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Version != 1 || len(legacy.Lanes) != len(artifacts.Runtime.Lanes) {
+		t.Fatal("incompatible persisted DNS format")
+	}
+	for n, lane := range legacy.Lanes {
+		for m, rule := range lane.Rules {
+			original := artifacts.Runtime.Lanes[n].Rules[m]
+			set := artifacts.Runtime.DomainSets[original.DomainSet]
+			if !reflect.DeepEqual(rule.DomainSuffix, set.DomainSuffix) || rule.Action != original.Action || rule.Server != original.Server {
+				t.Fatal("predecessor would lose a DNS rule")
+			}
+		}
+	}
+	after, err := json.Marshal(artifacts.Runtime)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("marshal mutated the compiled candidate")
 	}
 }

@@ -2,6 +2,7 @@
 
 ## 1.6.61
 
+- Kept DNS domain rules compatible with image rollback while sharing their in-memory membership.
 - Updated Xray and REALITY to pinned upstream revisions through 2026-10-14.
 - Fixed gRPC channel reconnection after a completed or canceled first request and improved Hysteria cancellation and cleanup.
 
