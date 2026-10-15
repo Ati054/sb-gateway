@@ -52,8 +52,13 @@ test("mandatory Claude and Antigravity candidate packs stay narrow and complete"
 
 test("ARM64 image builds pinned Xray and static UI", async () => {
   const dockerfile = await text("Dockerfile");
-  assert.match(dockerfile, /ARG XRAY_VERSION=26\.9\.30/);
-  assert.match(dockerfile, /b26a91de4f3294e26a0ad0a970b81a386a41f789/);
+  assert.match(dockerfile, /ARG XRAY_VERSION=26\.10\.10/);
+  assert.match(dockerfile, /0888beb38a9ba45440557175e71ce21cf8ba3b13/);
+  assert.match(dockerfile, /XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83/);
+  assert.match(dockerfile, /git apply --check \/tmp\/xray-grpc-context-regression\.patch/);
+  const grpcRegression = await text("patches/xray-grpc-context-regression.patch");
+  assert.match(grpcRegression, /TestGRPCSharedClientOutlivesItsFirstRequest/);
+  assert.match(grpcRegression, /TestGRPCReconnectAfterFirstRequestFinishes/);
   assert.match(dockerfile, /XRAY_GO_IMAGE=golang:1\.27\.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673/);
   assert.match(dockerfile, /FROM --platform=\$BUILDPLATFORM \$\{XRAY_GO_IMAGE\} AS xray-build/);
   assert.match(dockerfile, /go test \.\/app\/router -run '\^TestSB'/);

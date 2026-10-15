@@ -1,0 +1,145 @@
+diff --git a/transport/internet/grpc/request_context_test.go b/transport/internet/grpc/request_context_test.go
+new file mode 100644
+--- /dev/null
++++ b/transport/internet/grpc/request_context_test.go
+@@ -0,0 +1,140 @@
++package grpc
++
++import (
++	"context"
++	"io"
++	gonet "net"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/testing/servers/tcp"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	grpcgo "google.golang.org/grpc"
++	"google.golang.org/grpc/connectivity"
++)
++
++func TestGRPCSharedClientOutlivesItsFirstRequest(t *testing.T) {
++	for _, multi := range []bool{false, true} {
++		t.Run(map[bool]string{false: "single", true: "multi"}[multi], func(t *testing.T) {
++			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			dest := net.TCPDestination(net.LocalHostIP, tcp.PickPort())
++			listener := grpcContextListener(t, ctx, dest)
++			defer listener.Close()
++			settings := &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{MultiMode: multi}}
++			defer grpcContextCleanup(dest, settings)
++			first, finishFirst := context.WithCancel(ctx)
++			finishFirst()
++			client, err := getGrpcClient(first, dest, settings)
++			if err != nil {
++				t.Fatal(err)
++			}
++			grpcContextReady(t, ctx, client)
++			conn, err := Dial(ctx, dest, settings)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			grpcContextEcho(t, conn)
++		})
++	}
++}
++
++func TestGRPCReconnectAfterFirstRequestFinishes(t *testing.T) {
++	for _, multi := range []bool{false, true} {
++		t.Run(map[bool]string{false: "single", true: "multi"}[multi], func(t *testing.T) {
++			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			dest := net.TCPDestination(net.LocalHostIP, tcp.PickPort())
++			listener := grpcContextListener(t, ctx, dest)
++			defer func() { listener.Close() }()
++			settings := &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{MultiMode: multi}}
++			defer grpcContextCleanup(dest, settings)
++			firstCtx, finishFirst := context.WithCancel(ctx)
++			defer finishFirst()
++			client, err := getGrpcClient(firstCtx, dest, settings)
++			if err != nil {
++				t.Fatal(err)
++			}
++			grpcContextReady(t, ctx, client)
++			first, err := Dial(firstCtx, dest, settings)
++			if err != nil {
++				t.Fatal(err)
++			}
++			grpcContextEcho(t, first)
++			first.Close()
++			finishFirst()
++			listener.Close()
++			for state := client.GetState(); state == connectivity.Ready; state = client.GetState() {
++				if !client.WaitForStateChange(ctx, state) {
++					t.Fatal("server disconnect was not observed")
++				}
++			}
++			listener = grpcContextListener(t, ctx, dest)
++			grpcContextReady(t, ctx, client)
++			second, err := Dial(ctx, dest, settings)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer second.Close()
++			grpcContextEcho(t, second)
++		})
++	}
++}
++
++func grpcContextListener(t *testing.T, ctx context.Context, dest net.Destination) internet.Listener {
++	t.Helper()
++	listener, err := Listen(ctx, dest.Address, dest.Port,
++		&internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{}},
++		func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() })
++	if err != nil {
++		t.Fatal(err)
++	}
++	for {
++		conn, err := gonet.DialTimeout("tcp", dest.NetAddr(), 100*time.Millisecond)
++		if err == nil {
++			conn.Close()
++			return listener
++		}
++		select {
++		case <-ctx.Done():
++			listener.Close()
++			t.Fatal("gRPC listener did not start: ", ctx.Err())
++		case <-time.After(time.Millisecond):
++		}
++	}
++}
++
++func grpcContextReady(t *testing.T, ctx context.Context, client *grpcgo.ClientConn) {
++	t.Helper()
++	client.ResetConnectBackoff()
++	client.Connect()
++	for state := client.GetState(); state != connectivity.Ready; state = client.GetState() {
++		if !client.WaitForStateChange(ctx, state) {
++			t.Fatal("shared gRPC client could not connect independently of first request: ", ctx.Err())
++		}
++	}
++}
++
++func grpcContextEcho(t *testing.T, conn stat.Connection) {
++	t.Helper()
++	if _, err := conn.Write([]byte("live")); err != nil {
++		t.Fatal(err)
++	}
++	var response [4]byte
++	if _, err := io.ReadFull(conn, response[:]); err != nil || string(response[:]) != "live" {
++		t.Fatalf("gRPC stream failed: %q %v", response, err)
++	}
++}
++
++func grpcContextCleanup(dest net.Destination, settings *internet.MemoryStreamConfig) {
++	globalDialerAccess.Lock()
++	client := globalDialerMap[dialerConf{dest, settings}]
++	delete(globalDialerMap, dialerConf{dest, settings})
++	globalDialerAccess.Unlock()
++	if client != nil {
++		client.Close()
++	}
++}
