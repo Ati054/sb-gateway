@@ -38,6 +38,12 @@ an arithmetic sum below memory.high is not an RSS or long-term stability proof.
 
 ## Log Retention And Ingress Capacity
 
+Xray's local failure hints are best-effort: their delivery test resets limiter
+state between runs and allows bounded retries when a short local socket deadline
+expires under build load. Immediate duplicate suppression and the absence of
+probe-generated hints must still be checked without delivery retries. Runtime
+hint deadlines and independent HTTPS confirmation remain unchanged.
+
 `go test ./internal/diagnosticlog ./internal/controlplane ./internal/runtimeconfig`
 covers append-inode preservation, bounded legacy/current archives, interrupted
 reopen recovery, missing files, cancellation and link rejection. Repeat focused
