@@ -198,6 +198,15 @@ func Run(ctx context.Context, opts Options) error {
 	go server.runACMEScheduler(runContext)
 	if server.runtime != nil {
 		go server.runXrayLoggingScheduler(runContext)
+		logsStopped := make(chan struct{})
+		go func() {
+			defer close(logsStopped)
+			server.runDiagnosticLogMaintenance(runContext)
+		}()
+		defer func() {
+			cancel()
+			<-logsStopped
+		}()
 	}
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)),

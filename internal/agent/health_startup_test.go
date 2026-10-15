@@ -39,6 +39,17 @@ func TestXrayStartupOrderPinsBeforeRoutingAndHealth(t *testing.T) {
 	}
 }
 
+func TestXrayProcessLogUsesStableAppendDescriptor(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "scripts", "run-xray.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	if !strings.Contains(script, `xray run -config "$config" >>"$process_log" 2>&1 &`) || strings.Contains(script, `mv "$process_log"`) {
+		t.Fatal("Xray process output must keep an append descriptor; rotation belongs to the controller")
+	}
+}
+
 func TestXrayStartupUsesOneBoundedReadinessAndRestoreBudget(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "scripts", "run-xray.sh"))
 	if err != nil {
@@ -52,8 +63,6 @@ func TestXrayStartupUsesOneBoundedReadinessAndRestoreBudget(t *testing.T) {
 		`while [ "$xray_api_ready" -ne 1 ]; do`,
 		`selector_timeout_seconds=$((startup_deadline - startup_now))`,
 		`--timeout "${selector_timeout_seconds}s"`,
-		`process_log_limit_bytes="${SB_XRAY_PROCESS_LOG_LIMIT_BYTES:-4194304}"`,
-		`mv "$process_log" "$process_log.1"`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("startup script is missing shared deadline contract %q", required)
