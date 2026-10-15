@@ -40,6 +40,13 @@ covers configuration validation and the other ACME, so a long certificate
 operation does not need to block Apply. Validation subprocesses within the
 controller are serialized with a cancellable wait.
 
+These are arithmetic headroom allocations, not preallocated RAM. Combining the
+two helper slots would require serializing certificate issuance with validation;
+DNS challenge propagation could then delay Check/Apply for the whole issuance.
+Do not reclaim a helper slot without enforcing that exclusion across startup and
+controller subprocesses and measuring the operational delay. Any reclaimed
+budget would follow the same 65/35 split, not all go to Xray.
+
 With high/max 224/256 MiB the planned soft limits are approximately 83.2 MiB
 Xray, 44.8 MiB gateway and 28 MiB for each helper, plus 40 MiB non-Go reserve.
 For 320/384 MiB they are 140.4, 75.6 and 32 MiB respectively, plus 40 MiB.
