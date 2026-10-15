@@ -76,6 +76,15 @@ func TestRenderNginxCandidateBuildsDirectAndCDNSubscriptionWithoutDuplicateLocat
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := CheckNginxStreamingLimits(result); err != nil {
+		t.Fatalf("full generated config failed streaming audit: %v", err)
+	}
+	if !strings.Contains(result, "worker_connections 8192;") || !strings.Contains(result, "worker_rlimit_nofile 16384;") {
+		t.Fatal("generated Nginx capacity minima are missing")
+	}
+	if updated, err := UpgradeNginxCapacity(result); err != nil || updated != result {
+		t.Fatalf("newly generated Nginx capacity is not current: %v", err)
+	}
 	if strings.Contains(result, "${") {
 		t.Fatal("Nginx candidate contains unresolved variables")
 	}
