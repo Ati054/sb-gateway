@@ -1,11 +1,53 @@
 package controlplane
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestStartupNginxWarnsOnNoncanonicalStreamingLimits(t *testing.T) {
+	var output bytes.Buffer
+	writer := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(writer) })
+	for _, header := range []string{nginxSchema2Header, nginxSchema3Header} {
+		for _, upstream := range []string{"grpc_pass grpc://127.0.0.1:11002;", "proxy_pass http://127.0.0.1:11004;"} {
+			path := filepath.Join(t.TempDir(), "nginx.conf")
+			probe := ""
+			if header == nginxSchema3Header {
+				probe = nginxTrafficReady
+			}
+			original := header + "\nhttp {\n" + nginxInternalStart + probe + nginxInternalTail + "    }\nserver { location /private-secret/ {\n # deliberately noncanonical spacing\n\t" + upstream + "\n} }\n}\n"
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			output.Reset()
+			changed, err := EnsureStartupNginxTrafficReadiness(path)
+			if err != nil || changed != (header == nginxSchema2Header) {
+				t.Fatalf("startup result = %t, %v", changed, err)
+			}
+			if !strings.Contains(output.String(), "startup Nginx streaming limits warning:") || !strings.Contains(output.String(), "Check and Apply") || strings.Contains(output.String(), "private-secret") {
+				t.Fatalf("missing or unsafe startup warning: %s", output.String())
+			}
+			updated := string(mustReadFile(t, path))
+			if !strings.Contains(updated, "location /private-secret/ {\n # deliberately noncanonical spacing\n\t"+upstream) || strings.Contains(updated, "client_max_body_size 0;") {
+				t.Fatal("noncanonical transport was silently rewritten")
+			}
+			fixed := strings.Replace(updated, "\t"+upstream, "\tclient_max_body_size 0;\n\tclient_body_timeout 300s;\n\t"+upstream, 1)
+			if err := os.WriteFile(path, []byte(fixed), 0600); err != nil {
+				t.Fatal(err)
+			}
+			output.Reset()
+			if changed, err := EnsureStartupNginxTrafficReadiness(path); err != nil || changed || output.Len() != 0 {
+				t.Fatalf("fixed config still warned or changed: %t, %v, %s", changed, err, output.String())
+			}
+		}
+	}
+}
 
 func TestEnsureStartupNginxTrafficReadinessMigratesOnlyInternalProbe(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nginx.conf")
@@ -43,6 +85,33 @@ http {
 	migrated, err = EnsureStartupNginxTrafficReadiness(path)
 	if err != nil || migrated {
 		t.Fatalf("idempotent migration = %t, %v", migrated, err)
+	}
+}
+
+func TestStartupNginxCapacityUpgradesWithoutApply(t *testing.T) {
+	for _, header := range []string{nginxSchema2Header, nginxSchema3Header} {
+		for _, newline := range []string{"\n", "\r\n"} {
+			path := filepath.Join(t.TempDir(), "nginx.conf")
+			probe := ""
+			if header == nginxSchema3Header {
+				probe = nginxTrafficReady
+			}
+			original := header + "\nworker_processes 1;\nevents {\n\tworker_connections\n 1024 ; # old capacity\n}\nhttp {\n" + nginxInternalStart + probe + nginxInternalTail + "    }\n}\n"
+			original = strings.ReplaceAll(original, "\n", newline)
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := EnsureStartupNginxTrafficReadiness(path); err != nil || !changed {
+				t.Fatalf("migration=%t %v", changed, err)
+			}
+			updated := string(mustReadFile(t, path))
+			if !strings.Contains(updated, "worker_connections 8192;") || !strings.Contains(updated, "worker_rlimit_nofile 16384;") || !strings.Contains(updated, "# old capacity") {
+				t.Fatal("capacity not upgraded or adjacent text lost")
+			}
+			if changed, err := EnsureStartupNginxTrafficReadiness(path); err != nil || changed {
+				t.Fatalf("second startup=%t %v", changed, err)
+			}
+		}
 	}
 }
 
