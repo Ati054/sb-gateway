@@ -14,6 +14,14 @@ RC headings use the same parser.
 The export copies the reviewed file byte-for-byte, including line endings,
 so Windows archives and Linux verification compare the same content.
 
+## Probe Budget Checks
+
+Availability-budget regressions use a primary handler that waits for cancellation
+and a fallback slower than the primary budget, with scheduling headroom inside
+the round deadline. Repeat these tests under the race detector; millisecond-scale
+deadline margins must not turn host scheduling jitter into transport failures.
+Test timing overrides do not change production probe budgets.
+
 ## Memory Budget Checks
 
 Domain-set verification and native Xray matcher checks are documented in
@@ -259,8 +267,8 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 
 ## Public Export Boundary
 
-Public source export retains only the current stable or numbered RC changelog
-section. User conversations, attachments, incident logs, owner test reports,
+Public source export retains the reviewed user-facing changelog history and only
+the current release-notes document. User conversations, attachments, incident logs, owner test reports,
 private topology and hardware acceptance receipts must never enter public
 history, source archives or release descriptions. Generic regression tests and
 operational documentation remain public. Replacement deletes are constrained
