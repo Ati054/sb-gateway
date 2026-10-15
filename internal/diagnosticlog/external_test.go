@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,9 @@ func TestExternalAppendRotationKeepsWriterAndBoundsArchive(t *testing.T) {
 }
 
 func TestExternalReopenRetriesWithoutReplacingLiveArchive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Linux rename semantics for an open Nginx log descriptor")
+	}
 	path := filepath.Join(t.TempDir(), "nginx.log")
 	writer, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
