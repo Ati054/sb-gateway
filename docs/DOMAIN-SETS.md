@@ -13,13 +13,18 @@ file. Publication, bounded verification, candidate leases, retention cleanup
 and encrypted recovery use the existing managed geodata asset machinery.
 Startup and Apply verify referenced assets before launching or validating a core.
 
-Policy DNS schema 2 stores large exact/suffix sets once in `domain_sets`.
-Rules refer to their content IDs. Each resolver generation compiles one shared
+Persisted policy DNS keeps schema 1 and complete inline domain conditions, so
+predecessor workers cannot silently lose rules during an image rollback.
+The new worker decodes one lane at a time and interns large exact/suffix sets
+before reading its siblings. Each resolver generation compiles one shared
 membership index, while every lane owns its own rule-order/server/reject
 decisions. First-match order, suffix boundaries and source/user isolation are
-unchanged. No process-global history cache retains old generations. Old schema
-1 remains readable; image startup transactionally rebuilds committed runtime
+unchanged. No process-global history cache retains old generations. The interim
+schema 2 reference format remains readable. A `domain_index_version` marker lets
+startup transactionally rebuild committed runtime
 artifacts without changing the saved draft or requiring another Apply.
+Resolver documents are bounded at 32 MiB; listener readiness reads only lane
+addresses and does not rebuild the membership index.
 
 Trusted catalog updates parse bounded HTTP readers line by line, including
 GeoIP text. Parent responses close before following includes. Limits remain

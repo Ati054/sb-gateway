@@ -80,12 +80,13 @@ type runtime struct {
 }
 
 func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Duration) (*runtime, error) {
-	payload, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	var raw rawConfig
-	if err := json.Unmarshal(payload, &raw); err != nil {
+	defer file.Close()
+	raw, err := decodeRuntimeConfig(file)
+	if err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
 	if raw.Version < 0 || raw.Version > 2 {
@@ -155,7 +156,13 @@ func ProbeListeners(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	var raw rawConfig
+	var raw struct {
+		Lanes []struct {
+			ID   string `json:"id"`
+			Host string `json:"host"`
+			Port int    `json:"port"`
+		} `json:"lanes"`
+	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return err
 	}

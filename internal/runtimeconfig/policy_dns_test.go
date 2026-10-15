@@ -18,7 +18,7 @@ func TestCompilePolicyDNSEmptySource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(body), "{\"lanes\":[],\"servers\":{},\"version\":2}\n"; got != want {
+	if got, want := string(body), "{\"domain_index_version\":1,\"lanes\":[],\"servers\":{},\"version\":1}\n"; got != want {
 		t.Fatalf("unexpected empty runtime:\n%s\nwant:\n%s", got, want)
 	}
 	if len(artifacts.XrayInbounds) != 0 || len(artifacts.XrayOutbounds) != 0 || len(artifacts.XrayRules) != 0 {
@@ -57,7 +57,7 @@ func TestCompilePolicyDNSMatchesCurrentArtifactContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"lanes\":[" +
+	want := "{\"domain_index_version\":1,\"lanes\":[" +
 		"{\"final\":\"direct\",\"host\":\"127.0.0.1\",\"id\":\"dns-policy-lane-0\",\"port\":30001,\"rules\":[" +
 		"{\"action\":\"route\",\"domain\":[\"example.com\"],\"domain_suffix\":[],\"server\":\"vpn\"}," +
 		"{\"action\":\"route\",\"domain\":[],\"domain_suffix\":[\"youtube.com\"],\"server\":\"vpn\"}]}," +
@@ -66,7 +66,7 @@ func TestCompilePolicyDNSMatchesCurrentArtifactContract(t *testing.T) {
 		"],\"servers\":{" +
 		"\"direct\":{\"detour\":\"direct-wan\",\"path\":\"/dns-query\",\"server\":\"192.168.88.1\",\"server_name\":\"\",\"server_port\":53,\"type\":\"udp\"}," +
 		"\"vpn\":{\"detour\":\"europe\",\"dot_fallback\":true,\"path\":\"/dns-query\",\"server\":\"1.1.1.1\",\"server_name\":\"cloudflare-dns.com\",\"server_port\":443,\"tunnel_host\":\"127.0.0.1\",\"tunnel_port\":32002,\"type\":\"https\"}" +
-		"},\"timeout_seconds\":5,\"version\":2}\n"
+		"},\"timeout_seconds\":5,\"version\":1}\n"
 	if got := string(body); got != want {
 		t.Fatalf("runtime contract changed:\n%s\nwant:\n%s", got, want)
 	}
