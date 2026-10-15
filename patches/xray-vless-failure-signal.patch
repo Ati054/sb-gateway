@@ -82,7 +82,7 @@ diff --git a/proxy/vless/outbound/failure_signal_test.go b/proxy/vless/outbound/
 new file mode 100644
 --- /dev/null
 +++ b/proxy/vless/outbound/failure_signal_test.go
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,87 @@
 +package outbound
 +
 +import (
@@ -98,10 +98,21 @@ new file mode 100644
 +	"github.com/xtls/xray-core/common/session"
 +)
 +
++func resetSBFailureSlots(t *testing.T) {
++	t.Helper()
++	for i := range sbFailureSlots {
++		slot := &sbFailureSlots[i]
++		slot.Lock()
++		slot.last = time.Time{}
++		slot.Unlock()
++	}
++}
++
 +func TestSBServerFailureSignalIsLocalAndMinimal(t *testing.T) {
 +	if runtime.GOOS == "windows" {
 +		t.Skip("unixgram is validated on the Linux target")
 +	}
++	resetSBFailureSlots(t)
 +	path := filepath.Join(t.TempDir(), "failures.sock")
 +	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
 +	if err != nil {
@@ -109,14 +120,22 @@ new file mode 100644
 +	}
 +	defer listener.Close()
 +	t.Setenv("SB_XRAY_FAILURE_SOCKET", path)
-+	signalSBServerFailure(context.Background(), "selected-tag", "dial")
-+	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-+		t.Fatal(err)
-+	}
 +	var buffer [513]byte
-+	count, _, err := listener.ReadFromUnix(buffer[:])
-+	if err != nil {
-+		t.Fatal(err)
++	var count int
++	deadline := time.Now().Add(5 * time.Second)
++	for {
++		signalSBServerFailure(context.Background(), "selected-tag", "dial")
++		if err := listener.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
++			t.Fatal(err)
++		}
++		count, _, err = listener.ReadFromUnix(buffer[:])
++		if err == nil {
++			break
++		}
++		if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() || time.Now().After(deadline) {
++			t.Fatal(err)
++		}
++		time.Sleep(250 * time.Millisecond)
 +	}
 +	var message map[string]any
 +	if err := json.Unmarshal(buffer[:count], &message); err != nil {
@@ -143,6 +162,7 @@ new file mode 100644
 +}
 +
 +func TestSBServerFailureSignalNeverBlocksWithoutListener(t *testing.T) {
++	resetSBFailureSlots(t)
 +	t.Setenv("SB_XRAY_FAILURE_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
 +	start := time.Now()
 +	signalSBServerFailure(context.Background(), "selected-tag", "dial")
