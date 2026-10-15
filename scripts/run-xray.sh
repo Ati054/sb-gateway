@@ -112,19 +112,8 @@ xray_api_server="${SB_XRAY_API_SERVER:-127.0.0.1:10085}"
 startup_started="$(date +%s)"
 startup_deadline=$((startup_started + startup_timeout_seconds))
 process_log="${SB_XRAY_PROCESS_LOG:-/logs/xray-process.log}"
-process_log_limit_bytes="${SB_XRAY_PROCESS_LOG_LIMIT_BYTES:-4194304}"
-case "$process_log_limit_bytes" in
-  ''|*[!0-9]*|0) process_log_limit_bytes=4194304 ;;
-esac
 mkdir -p "$(dirname "$process_log")"
-process_log_bytes="$(wc -c <"$process_log" 2>/dev/null || printf '0')"
-if [ "$process_log_bytes" -ge "$process_log_limit_bytes" ]; then
-  rm -f "$process_log.2"
-  if [ -f "$process_log.1" ]; then
-    mv "$process_log.1" "$process_log.2"
-  fi
-  mv "$process_log" "$process_log.1"
-fi
+# The controller bounds append logs while Xray runs; keep this descriptor stable.
 xray_gomemlimit="${SB_XRAY_GOMEMLIMIT:-off}"
 GOMEMLIMIT="$xray_gomemlimit" xray run -config "$config" >>"$process_log" 2>&1 &
 xray_pid=$!
