@@ -49,6 +49,9 @@ covers append-inode preservation, bounded legacy/current archives, interrupted
 reopen recovery, missing files, cancellation and link rejection. Repeat focused
 rotation and startup tests under `-race`. Rotation errors must preserve the
 original log and must not request a runtime restart.
+The live renamed-descriptor recovery test requires Linux and is skipped on
+Windows, whose open-file rename semantics differ. Append, archive bounds and
+link-rejection tests remain portable; exercise real Nginx reopen on Linux.
 
 Saved schema-2/3 configurations receive capacity minima on image startup.
 Test comments, whitespace, quoted directive lookalikes, absent defaults,
