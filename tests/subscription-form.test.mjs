@@ -1,9 +1,9 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
 
-const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+const page = normalizeLocalizedSource(await readConsoleSource());
 const start = page.indexOf('                  Имя подписки');
 const end = page.indexOf('                {!cdnTransportKind', start);
 const form = page.slice(start, end);

@@ -1,8 +1,9 @@
+import { readConsoleSourceSync } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+const page = readConsoleSourceSync();
 const api = readFileSync(
   new URL("../internal/controlplane/api.go", import.meta.url),
   "utf8",

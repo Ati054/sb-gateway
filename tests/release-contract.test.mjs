@@ -48,13 +48,30 @@ test("release image declares the in-place update contract", async () => {
   assert.match(dockerfile, /io\.sb-gateway\.config\.minimum-schema="1"/);
 });
 
-test("public changelog stops at either stable or numbered RC headings", async () => {
+test("public changelog preserves the reviewed history rather than exporting the internal journal", async () => {
   const source = await readFile(new URL("../scripts/export-public-source.ps1", import.meta.url), "utf8");
-  const match = source.match(/\$changelogLines\[\$index\] -match '([^']+)'/);
+  const match = source.match(/if \(\$_ -match '([^']+)'\)/);
   assert.ok(match, "Missing changelog boundary guard");
   const guard = new RegExp(match[1]);
   for (const heading of ["## 1.6.43", "## 1.6.44-rc.2", "## 1.6.44-rc.12"]) assert.ok(guard.test(heading), heading);
   for (const heading of ["### Changes", "## 1.6.44-rc.0", "## 1.6.44-rc"]) assert.ok(!guard.test(heading), heading);
+  assert.match(source, /docs\/PUBLIC-CHANGELOG\.md/);
+  assert.match(source, /\[System\.IO\.File\]::Copy\(\$publicChangelogPath,/);
+  assert.doesNotMatch(source, /\$changelogLines\[\$start\.\./);
+  const history = await readFile(new URL("../docs/PUBLIC-CHANGELOG.md", import.meta.url), "utf8");
+  const versions = [...history.matchAll(new RegExp(guard.source, "gm"))].map(match => match[1]);
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(versions[0], pkg.version);
+  assert.ok(versions.length > 1);
+  assert.equal(new Set(versions).size, versions.length);
+  for (const version of [
+    "1.6.17", "1.6.18", "1.6.19", "1.6.20", "1.6.21", "1.6.22",
+    "1.6.24", "1.6.25", "1.6.26", "1.6.27", "1.6.33", "1.6.34",
+    "1.6.35", "1.6.49", "1.6.58",
+  ]) assert.ok(versions.includes(version), `Published history lost ${version}`);
+  assert.doesNotMatch(history, /### (Verification|Проверка)|acceptance report/i);
+  const privateAttachmentName = new RegExp(["codex", "clipboard"].join("-"), "i");
+  assert.doesNotMatch(history, privateAttachmentName);
 });
 
 test("public source excludes internal CHR verification receipts", async () => {

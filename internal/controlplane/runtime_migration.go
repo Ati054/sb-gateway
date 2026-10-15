@@ -88,7 +88,11 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 			return false, err
 		}
 	}
-	if !legacy && !probeMigration {
+	domainMigration, err := legacyDomainRuntime(opts.Runtime.PolicyDNSConfig)
+	if err != nil {
+		return false, err
+	}
+	if !legacy && !probeMigration && !domainMigration {
 		return false, nil
 	}
 	if !safeRevision(revision) {
@@ -139,7 +143,8 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 		return false, err
 	}
 	if !containsRuntimeArtifact(receipt.Changed(), "xray.json") &&
-		!(probeMigration && containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json")) {
+		!(probeMigration && containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json")) &&
+		!(domainMigration && containsRuntimeArtifact(receipt.Changed(), "policy-dns.json")) {
 		if err := runtime.store.Rollback(receipt); err != nil {
 			return false, err
 		}
@@ -152,6 +157,29 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 		return false, fmt.Errorf("record migrated runtime revision: %w", err)
 	}
 	return true, nil
+}
+
+func legacyDomainRuntime(path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	present, err := runtimeMigrationInputsPresent(path)
+	if err != nil || !present {
+		return false, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	var header struct {
+		Version int `json:"version"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, maxRuntimeMigrationArtifactBytes+1))
+	if err := decoder.Decode(&header); err != nil {
+		return false, err
+	}
+	return header.Version == 1, nil
 }
 
 func committedRuntimeMigrationNodes(repository *stateRepository, metadata map[string]any, revision string) ([]map[string]any, error) {

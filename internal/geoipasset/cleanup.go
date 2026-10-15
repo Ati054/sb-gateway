@@ -89,7 +89,7 @@ func Prune(root string, configs, candidateRoots []string, live []byte, now time.
 	}
 	removed := 0
 	for _, entry := range entries {
-		if !namePattern.MatchString(entry.Name()) || keep[entry.Name()] {
+		if !IsManagedName(entry.Name()) || keep[entry.Name()] {
 			continue
 		}
 		info, err := entry.Info()
@@ -144,4 +144,42 @@ func collectReferences(reader io.Reader, keep map[string]bool) error {
 			}
 		}
 	}
+}
+
+// VerifyConfig rejects damaged immutable assets before a core can use them.
+func VerifyConfig(root, config string) error {
+	info, err := os.Lstat(config)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 32<<20 {
+		return errors.New("unsafe geodata configuration")
+	}
+	file, err := os.Open(config)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return errors.New("geodata configuration changed during open")
+	}
+	keep := make(map[string]bool)
+	limited := &io.LimitedReader{R: file, N: (32 << 20) + 1}
+	if err := collectReferences(limited, keep); err != nil {
+		return err
+	}
+	if limited.N == 0 {
+		return errors.New("geodata configuration exceeds the limit")
+	}
+	for name := range keep {
+		code := "domains"
+		if match := namePattern.FindStringSubmatch(name); match != nil {
+			code = match[1]
+		}
+		if err := Verify(root, "ext:"+name+":"+code); err != nil {
+			return err
+		}
+	}
+	return nil
 }

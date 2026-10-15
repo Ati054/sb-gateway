@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"strings"
+
+	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 // EnsureStartupNginxTrafficReadiness upgrades the exact schema-2 runtime that
 // predates route-aware readiness. It preserves every public listener and only
 // adds the private RouterOS probe before the internal server's deny-all tail.
+// Both supported schemas also receive the transport-local streaming limits.
 func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -55,6 +58,9 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 		if strings.Count(internal, "location = /traffic-ready") != 1 {
 			return false, errors.New("schema-3 Nginx traffic readiness is missing or ambiguous")
 		}
+		updated := runtimeconfig.UpgradeNginxStreamingLimits(text)
+		normalized = normalized || updated != text
+		text = updated
 		if normalized {
 			if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
 				return false, err
@@ -72,6 +78,7 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 	if !strings.Contains(internal, "location = /traffic-ready") {
 		text = text[:internalTail] + nginxTrafficReady + "\n" + text[internalTail:]
 	}
+	text = runtimeconfig.UpgradeNginxStreamingLimits(text)
 	if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
 		return false, err
 	}

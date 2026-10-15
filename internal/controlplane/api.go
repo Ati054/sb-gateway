@@ -154,7 +154,7 @@ func NewServer(opts Options) (*Server, error) {
 		checkPersistentMounts: appliancePersistentMountsWritable,
 		fetchCDNFeed:          cdnfeed.NewFetcher(),
 		refreshServicePack: func(pack rulesets.ServicePack, root string) (map[string]any, error) {
-			return rulesets.RefreshPack(pack, root, rulesets.HTTPFetch(rulesets.OptionsFromEnvironment().Timeout))
+			return rulesets.RefreshPackStream(pack, root, rulesets.HTTPStreamFetch(rulesets.OptionsFromEnvironment().Timeout))
 		},
 	}
 	server.selectUpdateExit = server.selectSubscriptionUpdateExit

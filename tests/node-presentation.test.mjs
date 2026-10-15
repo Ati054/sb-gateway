@@ -1,5 +1,6 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import test from "node:test";
 import { nodePresentation, selectorCandidateIds, routeCandidateIds, compareRouteCandidates, nodeDisplayLabel, nodeLocationDetail, nodeProtocolSuffix } from "../app/node-presentation.ts";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
@@ -93,7 +94,7 @@ test("priority location detail does not repeat country and city already present 
 });
 
 test("subscription is a hover hint without visible provider codes", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const nodeName = page.split("function NodeName(")[1].split("function protocolLabel(")[0];
   assert.match(nodeName, /title=\{provider \?/);
   assert.match(nodeName, /tr\("\{node\} · Подписка: \{provider\}", \{ node: node\.label, provider \}\)/);
@@ -102,7 +103,7 @@ test("subscription is a hover hint without visible provider codes", async () => 
 });
 
 test("settings save action follows the complete settings grid", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = await readConsoleSource();
   const settingsStart = source.indexOf("function Settings(");
   const settingsEnd = source.indexOf("function ResetDraftDialog(", settingsStart);
   const settingsSource = source.slice(settingsStart, settingsEnd);
@@ -117,7 +118,7 @@ test("settings save action follows the complete settings grid", async () => {
 });
 
 test("TLS export lives in the edit footer between deletion and cancel", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const dialog = page.split("function TlsProfileDialog(")[1].split("function ConnectionDialog(")[0];
   assert.match(dialog, /Подготовить удаление[\s\S]*setExportOpen\(true\)[\s\S]*>Экспорт<[\s\S]*>Отмена</);
   assert.match(dialog, /exportOpen && workingId.*TlsTransferDialog/);
@@ -125,7 +126,7 @@ test("TLS export lives in the edit footer between deletion and cancel", async ()
 });
 
 test("routing uses lightweight visible-only polling and shares one node label", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   assert.equal((page.match(/<NodeName label=/g) ?? []).length, 3);
   assert.match(page, /if \(screen !== "routing"\) return;[\s\S]*visibilityState === "visible"[\s\S]*setInterval\(refresh, 5_000\)/);
   assert.match(page, /refreshDetailedStatus\(\), refreshSelectorStatus\(\)/);

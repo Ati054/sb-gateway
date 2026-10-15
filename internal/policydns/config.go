@@ -11,15 +11,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/domainset"
 )
 
 const maxDNSMessage = 65535
 
 type rawConfig struct {
-	Version        int                     `json:"version"`
-	Servers        map[string]serverConfig `json:"servers"`
-	Lanes          []laneConfig            `json:"lanes"`
-	TimeoutSeconds float64                 `json:"timeout_seconds"`
+	DomainSets     map[string]domainset.Set `json:"domain_sets"`
+	Version        int                      `json:"version"`
+	Servers        map[string]serverConfig  `json:"servers"`
+	Lanes          []laneConfig             `json:"lanes"`
+	TimeoutSeconds float64                  `json:"timeout_seconds"`
 }
 
 type serverConfig struct {
@@ -43,6 +46,7 @@ type laneConfig struct {
 }
 
 type ruleConfig struct {
+	DomainSet    string   `json:"domain_set"`
 	Domain       []string `json:"domain"`
 	DomainSuffix []string `json:"domain_suffix"`
 	Action       string   `json:"action"`
@@ -56,12 +60,14 @@ type ruleDecision struct {
 }
 
 type lane struct {
-	id     string
-	host   string
-	port   int
-	final  string
-	exact  map[string]ruleDecision
-	suffix map[string]ruleDecision
+	shared       *domainset.Index
+	setDecisions map[uint32]ruleDecision
+	id           string
+	host         string
+	port         int
+	final        string
+	exact        map[string]ruleDecision
+	suffix       map[string]ruleDecision
 }
 
 type runtime struct {
@@ -81,6 +87,9 @@ func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Durati
 	var raw rawConfig
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
+	}
+	if raw.Version < 0 || raw.Version > 2 {
+		return nil, errors.New("unsupported policy DNS schema")
 	}
 	if len(raw.Lanes) == 0 {
 		return nil, errNoLanes
@@ -106,8 +115,13 @@ func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Durati
 		}
 		runtime.servers[tag] = server
 	}
+	shared, ids, err := domainset.Compile(raw.DomainSets)
+	if err != nil {
+		runtime.close()
+		return nil, err
+	}
 	for _, rawLane := range raw.Lanes {
-		compiled, err := compileLane(rawLane)
+		compiled, err := compileLaneWithSets(rawLane, shared, ids)
 		if err != nil {
 			runtime.close()
 			return nil, err
@@ -163,6 +177,10 @@ func ProbeListeners(ctx context.Context, path string) error {
 var errNoLanes = errors.New("policy DNS config has no lanes yet")
 
 func compileLane(raw laneConfig) (*lane, error) {
+	return compileLaneWithSets(raw, nil, nil)
+}
+
+func compileLaneWithSets(raw laneConfig, shared *domainset.Index, ids map[string]uint32) (*lane, error) {
 	if raw.ID == "" {
 		return nil, errors.New("policy DNS lane has no id")
 	}
@@ -173,12 +191,14 @@ func compileLane(raw laneConfig) (*lane, error) {
 		return nil, fmt.Errorf("policy DNS lane %q has unsafe port", raw.ID)
 	}
 	result := &lane{
-		id:     raw.ID,
-		host:   raw.Host,
-		port:   raw.Port,
-		final:  raw.Final,
-		exact:  make(map[string]ruleDecision),
-		suffix: make(map[string]ruleDecision),
+		shared:       shared,
+		setDecisions: make(map[uint32]ruleDecision),
+		id:           raw.ID,
+		host:         raw.Host,
+		port:         raw.Port,
+		final:        raw.Final,
+		exact:        make(map[string]ruleDecision),
+		suffix:       make(map[string]ruleDecision),
 	}
 	if result.final == "" {
 		result.final = "reject"
@@ -192,6 +212,15 @@ func compileLane(raw laneConfig) (*lane, error) {
 			order:  index,
 			reject: rule.Action == "reject",
 			server: server,
+		}
+		if rule.DomainSet != "" {
+			id, exists := ids[rule.DomainSet]
+			if !exists {
+				return nil, errors.New("DNS rule references a missing shared domain set")
+			}
+			if _, exists := result.setDecisions[id]; !exists {
+				result.setDecisions[id] = decision
+			}
 		}
 		for _, value := range rule.Domain {
 			name := strings.ToLower(value)
@@ -229,6 +258,12 @@ func (lane *lane) target(name string) (string, bool) {
 		}
 		suffix = suffix[separator+1:]
 	}
+	// Shared membership never owns the server/reject decision of a lane.
+	lane.shared.Match(name, func(id uint32) {
+		if candidate, exists := lane.setDecisions[id]; exists && (!found || candidate.order < decision.order) {
+			decision, found = candidate, true
+		}
+	})
 	if !found {
 		return lane.final, lane.final == "reject"
 	}

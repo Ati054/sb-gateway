@@ -1,3 +1,4 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
@@ -9,7 +10,7 @@ const escapedPackageVersion = packageVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$
 test("regional catalog cards match maintained service packs", async () => {
   const [catalogText, page] = await Promise.all([
     text("internal/rulesets/service-packs.json"),
-    text("app/page.tsx"),
+    readConsoleSource(),
   ]);
   const packs = Object.fromEntries(JSON.parse(catalogText).map((pack) => [pack.id, pack]));
   for (const id of [

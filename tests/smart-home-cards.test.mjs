@@ -1,10 +1,11 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 
 test("smart-home cards stay separate, bounded and available in the panel", async () => {
  const catalog=JSON.parse(await readFile(new URL("../internal/rulesets/service-packs.json", import.meta.url), "utf8"));
- const page=await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+ const page=await readConsoleSource();
  const ids=["ewelink", "xiaomi-home", "tuya", "aqara", "shelly"];
  const seen=new Set();
  for(const id of ids){

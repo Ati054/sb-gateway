@@ -1,5 +1,5 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { disableSubscriptionPublication } from "../app/subscription-publication.ts";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
@@ -30,7 +30,7 @@ test("disabling publication preserves the complete saved endpoint configuration"
 });
 
 test("Connections keeps the publication toggle outside disabled endpoint fields", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /disableSubscriptionPublication\(config\)/);
   assert.match(page, /label="Публикация подписки"/);
   assert.match(page, /<fieldset className="subscription-publication-fields" disabled=\{!subscriptionEndpointEnabled\}>/);
@@ -39,7 +39,7 @@ test("Connections keeps the publication toggle outside disabled endpoint fields"
 });
 
 test("client-only defaults do not require public TLS", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /return required\.every\(\(transport\) =>/);
   assert.match(page, /subscription_endpoint_enabled:\s*Boolean\(subscriptionHost\)/);
   assert.match(page, /if \(step === 2 && subscriptionHost && !subscriptionHost\.includes\("\."\)\)/);
@@ -48,13 +48,13 @@ test("client-only defaults do not require public TLS", async () => {
 });
 
 test("disabling a CDN transport also disables its deployments and required fields", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /required=\{transportEnabled && deployment\.enabled !== false\}/);
   assert.match(page, /if \(!enabled && cdnTransportKind\)[\s\S]*current\.map\(\(deployment\) => \(\{ \.\.\.deployment, enabled: false \}\)\)/);
 });
 
 test("Connections persists the Happ Provider ID used for managed mobile routes", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /Happ Provider ID/);
   assert.match(page, /happ_provider_id:\s*happProviderId\.trim\(\)/);
   assert.match(page, /configuredHappProviderId/);
@@ -62,7 +62,7 @@ test("Connections persists the Happ Provider ID used for managed mobile routes",
 });
 
 test("Remote users keep their Happ tunnel preferences separate", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /Happ на iOS · системный туннель/);
   assert.match(page, /Доступно только после настройки Happ Provider ID/);
   assert.match(page, /happ_include_all_networks:\s*happIncludeAllNetworks/);
@@ -72,7 +72,7 @@ test("Remote users keep their Happ tunnel preferences separate", async () => {
 });
 
 test("Connections keeps direct and dedicated CDN hostnames separate", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /subscription_cdn_hostname/);
   assert.match(page, /configuredSubscriptionEndpointMode === "separate"[\s\S]*configuredSubscriptionOriginServerName/);
   assert.match(page, /value="subscription-cdn"/);
@@ -80,7 +80,7 @@ test("Connections keeps direct and dedicated CDN hostnames separate", async () =
 });
 
 test("Connections keeps CDN edge and MikroTik origin ports separate", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   assert.match(page, /subscription_public_port:\s*subscriptionHasEditablePublicCdnPort/);
   assert.match(page, /subscription_listen_port:\s*subscriptionOriginPort/);
   assert.match(page, /Публичный HTTPS-порт/);

@@ -3,6 +3,7 @@ package appliance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/controlplane"
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 	"github.com/sb-gateway/sb-gateway/internal/geoiprefresh"
 	"github.com/sb-gateway/sb-gateway/internal/monitor"
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
@@ -57,7 +59,7 @@ func Run(ctx context.Context, options Options) error {
 	if migrated, err := controlplane.EnsureStartupNginxTrafficReadiness(options.NginxConfig); err != nil {
 		return err
 	} else if migrated {
-		log.Printf("appliance: Nginx runtime migrated to route-aware traffic readiness")
+		log.Printf("appliance: Nginx startup compatibility reconciled")
 	}
 	if migrated, err := controlplane.EnforceStartupTrafficSafety(ctx, options.ControlPlane); err != nil {
 		log.Printf("appliance: startup traffic safety could not be reconciled yet: %v", err)
@@ -73,6 +75,13 @@ func Run(ctx context.Context, options Options) error {
 		log.Printf("appliance: committed startup runtime contract reconciled")
 	}
 	var supervisor *Supervisor
+	if _, err := os.Stat(options.XrayConfig); err == nil {
+		if err := geoipasset.VerifyConfig(options.ControlPlane.Runtime.RuleSetDir, options.XrayConfig); err != nil {
+			return fmt.Errorf("startup geodata integrity: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	nginx, err := CommandProgram(
 		"nginx", options.NginxBinary,
 		[]string{"-c", options.NginxConfig, "-g", "daemon off;"},

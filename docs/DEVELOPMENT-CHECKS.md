@@ -1,5 +1,58 @@
 # Development Checks
 
+## Public Release History
+
+`docs/PUBLIC-CHANGELOG.md` is the reviewed, user-facing version history. The
+public export copies it to `CHANGELOG.md` in full and verifies that its first
+release matches `package.json`. Add a new entry when preparing a release;
+do not discard older entries or substitute the internal development journal.
+The public-tree check rejects missing or duplicate versions and a mismatched
+copy. Detailed private acceptance evidence remains outside this history.
+The release-contract test also retains the known public version headings;
+adding a release must not silently remove older entries. Stable and numbered
+RC headings use the same parser.
+The export copies the reviewed file byte-for-byte, including line endings,
+so Windows archives and Linux verification compare the same content.
+
+## Memory Budget Checks
+
+Domain-set verification and native Xray matcher checks are documented in
+[Shared Domain Sets](DOMAIN-SETS.md). Keep shared membership independent of
+per-lane actions and test both matched and unmatched traffic before publishing.
+
+`go test ./internal/memorybudget ./cmd/sb-gateway ./internal/controlplane`
+covers finite/unlimited and nested cgroup limits, role allocation, explicit
+lower overrides, safe persisted hints, helper dispatch and unchanged Apply/ACME
+contracts. The budgeting opt-in is set by the image, not by host test commands.
+Exercise at least 128/256/384 MiB cgroups before releasing a budget change.
+Also measure sustained traffic, concurrent ACME/Apply, cgroup events and GC CPU;
+an arithmetic sum below memory.high is not an RSS or long-term stability proof.
+
+## Console Forms
+
+Run `npm test`, `npm run lint` and `npm run build:static` after moving console
+components. `tests/console-modules.test.mjs` rejects cyclic section imports and
+another oversized route entry. Source-contract checks include every console
+module, including RU/EN translations and transport serializers.
+
+After the static build, `npm run test:browser` runs the real bundled UI against
+an isolated synthetic API. It requires a developer-installed Playwright and
+Chromium. `SB_PLAYWRIGHT_MODULE` may point to an existing Playwright `index.mjs`;
+`SB_BROWSER_CHANNEL=chrome` selects an installed Chrome instead. These are test
+tools, not container dependencies. The fixture never accesses RouterOS or an
+external service and uses no real accounts, subscriptions or keys.
+
+The browser matrix covers both languages, LAN/WireGuard/PPP device edits,
+VLESS subscription formats, routing DNS and Reverse names, navigation before
+autosave completes, failed writes preserving input, Settings with the default
+zero recovery cooldown, and one explicit Apply followed by a reload. It also
+checks desktop/mobile rendering. A mocked Apply proves the frontend request
+contract only; it does not replace protected Apply and dataplane tests on CHR.
+
+`settings-validation.test.mjs` covers all Settings recovery-field boundaries.
+Zero recovery cooldown is valid, including in an otherwise untouched default
+configuration; it must not disable saving unrelated settings.
+
 ## Managed IP Protocols
 
 `go test ./routeros ./internal/runtimeconfig` covers the default-enabled WAN
