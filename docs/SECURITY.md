@@ -377,6 +377,20 @@ local parser guards. Node/npm are not shipped in the MikroTik runtime image.
 No allowlist, suppression or clean-public-release claim is authorized by the
 CHR functional tests or the final version number.
 
+### Multicall Dependency Checks
+
+The server core is linked into `sb-gateway`. An untagged controller-only source
+scan does not cover that core: analyze `xray_multicall` with the exact combined
+module graph, patched Xray and matching REALITY sources, Go toolchain and ARM64
+build target. Check the separate ACME executable against its own module graph.
+
+For stripped executables, govulncheck can fall back to module-level precision
+when it cannot extract symbols. OpenPGP wildcard findings must remain recorded;
+do not present that raw binary scan as clean. Verify the affected package's
+presence in the target-specific import graph and the complete source call graph
+before classifying applicability. This limitation is documented by
+[govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
+
 Офлайн восстановление не требует работающей панели или передачи ей tar.
 Генератор принимает доверенный SHA-256, проверяет весь архив и создаёт скрипт
 для точной identity/root/veth. На роутере проверяется размер файла, не SHA-256;
