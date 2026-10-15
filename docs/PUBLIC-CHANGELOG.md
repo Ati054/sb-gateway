@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.62
+
+- Raised Nginx connection capacity and upgraded saved limits automatically at startup.
+- Added periodic size-based rotation for Xray and Nginx diagnostic logs without restarting traffic services.
+- Added startup warnings for unverified streaming limits in custom saved Nginx configurations.
+
 ## 1.6.61
 
 - Kept DNS domain rules compatible with image rollback while sharing their in-memory membership.

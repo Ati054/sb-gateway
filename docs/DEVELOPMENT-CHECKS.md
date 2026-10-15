@@ -36,6 +36,49 @@ Exercise at least 128/256/384 MiB cgroups before releasing a budget change.
 Also measure sustained traffic, concurrent ACME/Apply, cgroup events and GC CPU;
 an arithmetic sum below memory.high is not an RSS or long-term stability proof.
 
+## Log Retention And Ingress Capacity
+
+`go test ./internal/diagnosticlog ./internal/controlplane ./internal/runtimeconfig`
+covers append-inode preservation, bounded legacy/current archives, interrupted
+reopen recovery, missing files, cancellation and link rejection. Repeat focused
+rotation and startup tests under `-race`. Rotation errors must preserve the
+original log and must not request a runtime restart.
+
+Saved schema-2/3 configurations receive capacity minima on image startup.
+Test comments, whitespace, quoted directive lookalikes, absent defaults,
+larger custom values and repeated startup. External main/events includes and
+ambiguous directives must produce a warning without a partial rewrite.
+
+Run in an isolated Linux container with Nginx plus stream and a file-descriptor
+limit of at least 16384:
+
+```sh
+SB_SHARED_LIVE_NGINX=1 go test ./internal/runtimeconfig -run TestNginxCapacityAndLogReopenLive -v
+```
+
+The test reproduces the old 1024-slot ceiling, holds 512 simultaneous real
+stream/TLS/Upgrade connections using the migrated configuration, then verifies
+echo data survives Nginx log rotation, the master PID is unchanged, new errors
+reach reopened logs and retained archives stay bounded. This verifies proxy
+capacity, not 512 real users or capacity of every target router under sustained
+VLESS traffic.
+
+## Saved Nginx Streaming Limits
+
+Startup migrates canonical gRPC/XHTTP locations, then audits saved inline
+directives independently of whitespace, comments and directive order. Missing
+unlimited request bodies or a body timeout below 300 seconds produce a warning
+without preventing startup or rewriting a noncanonical transport location.
+The audit observes inline scope inheritance; it does not expand external
+includes or replace `nginx -t`. Warning text must not disclose paths or secrets.
+Run the following and repeat under `-race`; lexer seeds also run as ordinary
+tests. Check malformed input, quoted delimiters, sibling isolation, both schemas
+and idempotent canonical migration.
+
+```sh
+go test ./internal/runtimeconfig ./internal/controlplane -run 'Test.*(Streaming|StartupNginx)'
+```
+
 ## Console Forms
 
 Run `npm test`, `npm run lint` and `npm run build:static` after moving console
