@@ -265,6 +265,30 @@ opens the HTTPS origin to external clients. Keep generated keys and logs local.
 Keep bug fixes, features and release metadata in separate focused commits with
 descriptive subjects. Do not rewrite existing release history just to rename it.
 
+## Pinned Core Upgrade
+
+The server pins the Xray 26.10.10 development snapshot through 2026-10-14 at
+`0888beb38a9ba45440557175e71ce21cf8ba3b13`, with REALITY
+`83f621788ca88b83179810b12baa7ae518aacb83`. This is not a stable upstream tag;
+promotion still requires renderer, Reverse and external data-plane acceptance.
+Exported Reverse bridge versions remain independently pinned.
+
+The upstream gRPC dialer now uses the shared channel's reconnect context, not
+the first stream's context. `xray-grpc-context-regression.patch` adds tests only:
+single and multi streams must work after a canceled first request and after a
+server disconnect/restart with the same cached channel. Run these tests with
+the retirement tests under the race detector. The Hysteria retirement patch
+preserves upstream instance shutdown cleanup and permanently closes each retired
+client only after its acquired streams finish. Nginx body limits apply to inbound
+transports; they do not explain an outbound subscription's throughput.
+
+The snapshot also honors Hysteria request cancellation and cleans up clients
+outside the manager's shared lock. The local retirement tests use its cancellable
+per-client lock rather than reintroducing a mutex. Changes to REALITY use the
+corresponding pinned dependency and preserve the narrow X25519 compatibility
+patch. TUN, Lua and MASQUE remain disabled unless explicitly configured; updating
+their implementation does not enable them in generated gateway rules.
+
 ## Public Export Boundary
 
 Public source export retains the reviewed user-facing changelog history and only

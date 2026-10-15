@@ -1,5 +1,5 @@
 diff --git a/app/proxyman/outbound/handler.go b/app/proxyman/outbound/handler.go
-index 136796f..773c8f4 100644
+index fe43c42..d2427b0 100644
 --- a/app/proxyman/outbound/handler.go
 +++ b/app/proxyman/outbound/handler.go
 @@ -329,11 +329,18 @@ func (h *Handler) Start() error {
@@ -46,7 +46,7 @@ index d865428..5de00fb 100644
  	return nil
  }
 diff --git a/transport/internet/grpc/dial.go b/transport/internet/grpc/dial.go
-index a54d7c0..8b4dc90 100644
+index bb65041..aceaba4 100644
 --- a/transport/internet/grpc/dial.go
 +++ b/transport/internet/grpc/dial.go
 @@ -27,8 +27,10 @@ import (
@@ -118,7 +118,7 @@ index a54d7c0..8b4dc90 100644
  	globalDialerAccess.Lock()
  	defer globalDialerAccess.Unlock()
  
-@@ -202,7 +224,9 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
+@@ -197,7 +219,9 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
  		setUserAgent(conn, userAgent)
  		conn.Connect()
  	}
@@ -252,19 +252,19 @@ index 07b8f6d..6077f96 100644
  	udpConn.write = m.conn.SendDatagram
  	udpConn.close = func() {
 diff --git a/transport/internet/hysteria/dialer.go b/transport/internet/hysteria/dialer.go
-index 5a32f81..f8cc41e 100644
+index 1d7b8a9..38517b4 100644
 --- a/transport/internet/hysteria/dialer.go
 +++ b/transport/internet/hysteria/dialer.go
-@@ -222,7 +222,7 @@ func (c *client) dial(ctx context.Context) error {
- 	return nil
+@@ -233,7 +233,7 @@ func (c *client) unlock() {
+ 	<-c.lock
  }
  
 -func (c *client) tcp(ctx context.Context) (stat.Connection, error) {
 +func (c *client) tcp(ctx context.Context, release func()) (stat.Connection, error) {
- 	c.Lock()
- 	defer c.Unlock()
- 
-@@ -241,11 +241,12 @@ func (c *client) tcp(ctx context.Context) (stat.Connection, error) {
+ 	select {
+ 	case <-ctx.Done():
+ 		return nil, ctx.Err()
+@@ -256,11 +256,12 @@ func (c *client) tcp(ctx context.Context) (stat.Connection, error) {
  		local:  c.conn.LocalAddr(),
  		remote: c.conn.RemoteAddr(),
  
@@ -276,10 +276,10 @@ index 5a32f81..f8cc41e 100644
  
 -func (c *client) udp(ctx context.Context) (stat.Connection, error) {
 +func (c *client) udp(ctx context.Context, release func()) (stat.Connection, error) {
- 	c.Lock()
- 	defer c.Unlock()
- 
-@@ -254,7 +255,7 @@ func (c *client) udp(ctx context.Context) (stat.Connection, error) {
+ 	select {
+ 	case <-ctx.Done():
+ 		return nil, ctx.Err()
+@@ -273,7 +274,7 @@ func (c *client) udp(ctx context.Context) (stat.Connection, error) {
  		return nil, err
  	}
  
@@ -287,8 +287,8 @@ index 5a32f81..f8cc41e 100644
 +	return c.udpSM.udp(release)
  }
  
- func (c *client) clean() {
-@@ -296,6 +297,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+ func (c *client) clean(force bool) {
+@@ -328,6 +329,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  	if tlsConfig == nil {
  		return nil, errors.New("tls config is nil")
  	}
@@ -296,7 +296,7 @@ index 5a32f81..f8cc41e 100644
  
  	datagram := DatagramFromContext(ctx)
  	dest.Network = net.Network_UDP
-@@ -306,6 +308,24 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -338,6 +340,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  		go manager.clean()
  	})
@@ -311,17 +311,13 @@ index 5a32f81..f8cc41e 100644
 +		}
 +		manager.Unlock()
 +		for _, client := range clients {
-+			client.Lock()
-+			if client.conn != nil {
-+				client.close()
-+			}
-+			client.Unlock()
++			client.clean(true)
 +		}
 +	})
  
- 	manager.RLock()
- 	c := manager.m[dialerConf{dest, streamSettings}]
-@@ -328,10 +348,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+ 	dialerConfKey := dialerConf{dest, streamSettings}
+ 
+@@ -364,10 +380,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		manager.Unlock()
  	}
  
@@ -342,10 +338,10 @@ index 5a32f81..f8cc41e 100644
  
  func init() {
 diff --git a/transport/internet/memory_settings.go b/transport/internet/memory_settings.go
-index 02fb247..5740946 100644
+index 6277151..bc81a27 100644
 --- a/transport/internet/memory_settings.go
 +++ b/transport/internet/memory_settings.go
-@@ -17,6 +17,7 @@ type MemoryStreamConfig struct {
+@@ -21,6 +21,7 @@ type MemoryStreamConfig struct {
  	QuicParams       *QuicParams
  	SocketSettings   *SocketConfig
  	DownloadSettings *MemoryStreamConfig
@@ -354,7 +350,7 @@ index 02fb247..5740946 100644
  
  // ToMemoryStreamConfig converts a StreamConfig to MemoryStreamConfig. It returns a default non-nil MemoryStreamConfig for nil input.
 diff --git a/transport/internet/splithttp/client.go b/transport/internet/splithttp/client.go
-index a2b5f75..5f4cf79 100644
+index a2b5f75..7059258 100644
 --- a/transport/internet/splithttp/client.go
 +++ b/transport/internet/splithttp/client.go
 @@ -16,6 +16,7 @@ import (
@@ -380,14 +376,15 @@ index a2b5f75..5f4cf79 100644
  	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
  }
  
-@@ -50,5 +53,6 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+@@ -49,6 +52,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ 	// and we can unblock the Dial function and print correct net addresses in
  	// logs
  	gotConn := done.New()
 +	dialErr := make(chan error, 1)
  	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
  		GotConn: func(connInfo httptrace.GotConnInfo) {
  			remoteAddr = connInfo.Conn.RemoteAddr()
-@@ -61,7 +64,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+@@ -61,7 +65,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
  	if body != nil {
  		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
  	}
@@ -396,7 +393,7 @@ index a2b5f75..5f4cf79 100644
  	if err != nil {
  		errors.LogInfoInner(ctx, err, "failed to create HTTP request for "+url)
  		return nil, nil, nil, err
-@@ -69,14 +72,17 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+@@ -69,13 +73,16 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
  	c.transportConfig.FillStreamRequest(req, sessionId, "")
  
  	wrc = &WaitReadCloser{wait: done.New()}
@@ -413,9 +410,7 @@ index a2b5f75..5f4cf79 100644
  			gotConn.Close()
  			common.Close(body)
  			wrc.Close()
- 			return
-@@ -94,5 +99,10 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
- 		wrc.(*WaitReadCloser).Set(resp.Body)
+@@ -95,12 +102,17 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
  	}()
  
  	<-gotConn.Wait()
@@ -425,7 +420,7 @@ index a2b5f75..5f4cf79 100644
 +	default:
 +	}
  	return
-@@ -100,7 +105,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
+ }
  
  func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {
  	method := c.transportConfig.GetNormalizedUplinkHTTPMethod()
@@ -434,7 +429,7 @@ index a2b5f75..5f4cf79 100644
  	if err != nil {
  		return err
  	}
-@@ -128,59 +133,116 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
+@@ -128,59 +140,116 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
  		requestBuff.Grow(512 + int(req.ContentLength))
  		common.Must(req.Write(requestBuff))
  
@@ -572,18 +567,18 @@ index 613e1f3..275f4a0 100644
  
  	err := c.writer.Close()
 diff --git a/transport/internet/splithttp/dialer.go b/transport/internet/splithttp/dialer.go
-index 9bac57a..975ddba 100644
+index b52f5a7..1572742 100644
 --- a/transport/internet/splithttp/dialer.go
 +++ b/transport/internet/splithttp/dialer.go
 @@ -44,12 +44,26 @@ var (
  	globalDialerAccess sync.Mutex
  )
  
+-func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
 +// Bound only connection establishment. A completed stream keeps its own
 +// lifetime, so retiring a handler never terminates an established stream.
 +var xhttpHandshakeTimeout = 60 * time.Second
 +
--func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
 +func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings, owner *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
  	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
  
@@ -603,7 +598,7 @@ index 9bac57a..975ddba 100644
  
  	globalDialerAccess.Lock()
  	defer globalDialerAccess.Unlock()
-@@ -70,7 +80,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
+@@ -70,7 +84,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
  		}
  
  		xmuxManager = NewXmuxManager(xmuxConfig, func() XmuxConn {
@@ -612,7 +607,7 @@ index 9bac57a..975ddba 100644
  		})
  		globalDialerMap[key] = xmuxManager
  	}
-@@ -98,7 +108,7 @@ func decideHTTPVersion(tlsConfig *tls.Config, realityConfig *reality.Config) str
+@@ -98,7 +112,7 @@ func decideHTTPVersion(tlsConfig *tls.Config, realityConfig *reality.Config) str
  	return "2"
  }
  
@@ -621,7 +616,9 @@ index 9bac57a..975ddba 100644
  	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
  	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
  
-@@ -118,9 +132,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+@@ -116,29 +130,36 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 	transportConfig := streamSettings.ProtocolSettings.(*Config)
+ 
  	dialContext := func(ctxInner context.Context) (net.Conn, error) {
 +		setupCtx, cancel := context.WithTimeout(ctxInner, xhttpHandshakeTimeout)
 +		defer cancel()
@@ -635,7 +632,7 @@ index 9bac57a..975ddba 100644
 +			conn, err = internet.DialSystem(setupCtx, dest, streamSettings.SocketSettings)
  		}
  		if err != nil {
-@@ -131,17 +147,22 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 			return nil, err
  		}
  
  		if realityConfig != nil {
@@ -660,7 +657,7 @@ index 9bac57a..975ddba 100644
  			}
  		}
  
-@@ -231,6 +242,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+@@ -227,6 +248,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
  
  				conn, err := tr.DialEarly(ctx, udpAddr, tlsCfg, cfg)
  				if err != nil {
@@ -669,7 +666,7 @@ index 9bac57a..975ddba 100644
  					return nil, err
  				}
  				context.AfterFunc(conn.Context(), func() { tr.Close(); pktConn.Close() })
-@@ -279,11 +292,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+@@ -275,11 +298,11 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
  
  	client := &DefaultDialerClient{
  		transportConfig: transportConfig,
@@ -682,7 +679,7 @@ index 9bac57a..975ddba 100644
  		dialUploadConn: dialContext,
  	}
  
-@@ -295,6 +308,17 @@ func init() {
+@@ -291,6 +314,17 @@ func init() {
  }
  
  func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
@@ -700,7 +697,7 @@ index 9bac57a..975ddba 100644
  	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
  	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
  
-@@ -331,7 +355,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -327,7 +361,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  	requestURL.Path = transportConfiguration.GetNormalizedPath()
  	requestURL.RawQuery = transportConfiguration.GetNormalizedQuery()
  
@@ -709,7 +706,7 @@ index 9bac57a..975ddba 100644
  
  	mode := transportConfiguration.Mode
  	if mode == "" || mode == "auto" {
-@@ -395,7 +419,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -391,7 +425,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  		requestURL2.Path = config2.GetNormalizedPath()
  		requestURL2.RawQuery = config2.GetNormalizedQuery()
@@ -718,7 +715,7 @@ index 9bac57a..975ddba 100644
  		errors.LogInfo(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", dest2, "stream-down", httpVersion2, requestURL2.Host))
  	}
  
-@@ -414,6 +438,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -410,6 +444,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  			if closed.Add(1) > 1 {
  				return
  			}
@@ -727,7 +724,7 @@ index 9bac57a..975ddba 100644
  			if xmuxClient != nil {
  				xmuxClient.DoneRunning()
  			}
-@@ -431,8 +457,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -427,8 +463,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
  		if err != nil { // browser dialer only
@@ -738,7 +735,7 @@ index 9bac57a..975ddba 100644
  		return stat.Connection(&conn), nil
  	} else { // stream-down
  		if xmuxClient2 != nil {
-@@ -440,6 +468,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -436,6 +474,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
  		if err != nil { // browser dialer only
@@ -746,7 +743,7 @@ index 9bac57a..975ddba 100644
  			return nil, err
  		}
  	}
-@@ -449,8 +478,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -445,8 +484,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
  		if err != nil { // browser dialer only
@@ -757,7 +754,7 @@ index 9bac57a..975ddba 100644
  		return stat.Connection(&conn), nil
  	}
  
-@@ -473,7 +504,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -469,7 +510,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		maxUploadSize,
  	}
  
@@ -767,7 +764,7 @@ index 9bac57a..975ddba 100644
  		var seq int64
  		var lastWrite time.Time
  
-@@ -515,10 +548,12 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -511,10 +554,12 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  
  				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Add(-1) <= 0 ||
  					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
@@ -781,7 +778,7 @@ index 9bac57a..975ddba 100644
  					err := hClient.PostPacket(
  						ctx,
  						requestURL.String(),
-@@ -541,6 +576,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -537,6 +582,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  	}()
  
@@ -790,7 +787,7 @@ index 9bac57a..975ddba 100644
  }
  
 diff --git a/transport/internet/splithttp/mux.go b/transport/internet/splithttp/mux.go
-index 4897ace..9a3a275 100644
+index 1945224..6f5b54a 100644
 --- a/transport/internet/splithttp/mux.go
 +++ b/transport/internet/splithttp/mux.go
 @@ -59,6 +59,16 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
@@ -1397,10 +1394,10 @@ index 0000000..db27823
 +}
 diff --git a/transport/internet/hysteria/retirement_test.go b/transport/internet/hysteria/retirement_test.go
 new file mode 100644
-index 0000000..3c2defb
+index 0000000..898737b
 --- /dev/null
 +++ b/transport/internet/hysteria/retirement_test.go
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,130 @@
 +package hysteria
 +
 +import (
@@ -1461,11 +1458,15 @@ index 0000000..3c2defb
 +		if remains {
 +			t.Fatal("retired Hysteria generation remains cached")
 +		}
-+		cached.Lock()
++		cached.lock <- struct{}{}
 +		open := cached.conn != nil || cached.tr != nil || cached.pktConn != nil || cached.udpSM != nil
-+		cached.Unlock()
++		forced := cached.forced
++		cached.unlock()
 +		if open {
 +			t.Fatal("retired QUIC resources remain open")
++		}
++		if !forced {
++			t.Fatal("retired client can reconnect after cleanup")
 +		}
 +		late, err := Dial(ctx, dest, settings)
 +		if err != nil {
@@ -1529,7 +1530,7 @@ index 0000000..3c2defb
 +}
 diff --git a/transport/internet/splithttp/retirement_test.go b/transport/internet/splithttp/retirement_test.go
 new file mode 100644
-index 0000000..a4d0d09
+index 0000000..cf8ce8e
 --- /dev/null
 +++ b/transport/internet/splithttp/retirement_test.go
 @@ -0,0 +1,330 @@

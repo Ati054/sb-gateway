@@ -9,9 +9,9 @@ FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build
 ARG TARGETARCH
 # The server can use the current validated core. Xray's simplified Reverse
 # regression is bridge-side; exported reverse clients are pinned separately.
-ARG XRAY_VERSION=26.9.30
-ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
-ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
+ARG XRAY_VERSION=26.10.10
+ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
+ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
 RUN test "${TARGETARCH}" = "arm64"
 RUN apk add --no-cache git patch
 WORKDIR /src
@@ -24,6 +24,7 @@ COPY patches/xray-concurrency-safety.patch /tmp/xray-concurrency-safety.patch
 COPY patches/xray-library-main.patch /tmp/xray-library-main.patch
 COPY patches/xray-health-probe-lifetime.patch /tmp/xray-health-probe-lifetime.patch
 COPY patches/xray-reverse-backpressure-selection.patch /tmp/xray-reverse-backpressure-selection.patch
+COPY patches/xray-grpc-context-regression.patch /tmp/xray-grpc-context-regression.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -44,6 +45,8 @@ RUN git init \
     && git apply /tmp/xray-health-probe-lifetime.patch \
     && git apply --check /tmp/xray-reverse-backpressure-selection.patch \
     && git apply /tmp/xray-reverse-backpressure-selection.patch \
+    && git apply --check /tmp/xray-grpc-context-regression.patch \
+    && git apply /tmp/xray-grpc-context-regression.patch \
     && go test ./app/router -run '^TestSB' \
     && go test ./common/mux ./app/reverse ./proxy/vless/inbound \
     && go test ./proxy ./proxy/vless/outbound ./app/proxyman/outbound \
@@ -61,8 +64,8 @@ RUN set -eux; \
     go mod edit -replace github.com/xtls/reality=/src/reality
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
-ARG SB_GATEWAY_VERSION=1.6.60
+ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
+ARG SB_GATEWAY_VERSION=1.6.61
 ARG SB_GATEWAY_REVISION=uncommitted
 WORKDIR /src
 COPY --from=xray-build /src /opt/xray-source
@@ -102,8 +105,8 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
-ARG XRAY_VERSION=26.9.30
-ARG SB_GATEWAY_VERSION=1.6.60
+ARG XRAY_VERSION=26.10.10
+ARG SB_GATEWAY_VERSION=1.6.61
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -140,10 +143,10 @@ RUN set -eux; \
     if ! grep -q '^www-data:' /etc/group; then addgroup -S www-data; fi; \
     if ! grep -q '^www-data:' /etc/passwd; then adduser -S -D -H -s /sbin/nologin -G www-data www-data; fi; \
     rm -f /etc/nginx/http.d/default.conf
-ARG XRAY_VERSION=26.9.30
-ARG XRAY_COMMIT=b26a91de4f3294e26a0ad0a970b81a386a41f789
-ARG XRAY_REALITY_COMMIT=8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8
-ARG SB_GATEWAY_VERSION=1.6.60
+ARG XRAY_VERSION=26.10.10
+ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
+ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
+ARG SB_GATEWAY_VERSION=1.6.61
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.61
+
+- Updated Xray and REALITY to pinned upstream revisions through 2026-10-14.
+- Fixed gRPC channel reconnection after a completed or canceled first request and improved Hysteria cancellation and cleanup.
+
 ## 1.6.60
 
 - Shared large domain sets across routing and DNS rules and streamed catalog updates.
