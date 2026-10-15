@@ -197,14 +197,18 @@ func TestAvailabilityProbeAcceptsFallbackWithinItsOwnBudget(t *testing.T) {
 	for i := range healthTargets {
 		healthTargets[i].url = "http://probe.invalid/" + healthTargets[i].label
 	}
-	availabilityProbeTimeout = 20 * time.Millisecond
-	availabilityFallbackTimeout = 60 * time.Millisecond
+	availabilityProbeTimeout = 50 * time.Millisecond
+	availabilityFallbackTimeout = 2 * time.Second
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(35 * time.Millisecond)
 		if r.URL.Path == "/gstatic-204" {
-			w.WriteHeader(http.StatusNoContent)
-		} else {
+			<-r.Context().Done()
+			return
+		}
+		// Longer than the primary budget, with headroom inside the shared round.
+		select {
+		case <-time.After(100 * time.Millisecond):
 			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
 		}
 	}))
 	defer server.Close()
