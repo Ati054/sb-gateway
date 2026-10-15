@@ -7,8 +7,6 @@ and keep reserve routes ready. It is intended for home and small-office admins.
 
 [Русский](README-RU.md) · [Install](docs/INSTALL.md) · [Latest release](https://github.com/Ati054/sb-gateway/releases/latest)
 
-This source tree targets the unreleased `1.6.61` candidate. Use the latest published release for installation.
-
 ## What You Need
 
 - A MikroTik with ARM64 RouterOS 7 and container support, such as hAP ax3.
