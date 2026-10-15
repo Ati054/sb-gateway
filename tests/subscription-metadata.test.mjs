@@ -1,3 +1,4 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -16,7 +17,7 @@ test("new authoritative metadata can change or remove the provider expiry", () =
   assert.equal(mergeSubscriptionMetadata({ a: old }, { a: newer }, ["a"]).a, newer);
 });
 test("connections load compact metadata without waiting for node inventories and keep cache outside the screen", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const start = page.indexOf("function Connections(");
   const effect = page.slice(page.indexOf("  useEffect(() => {\n    let active = true;", start), page.indexOf("  const tlsProfilesById", start));
   assert.match(effect, /getSubscriptionMetadata/);

@@ -1,12 +1,12 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
 
-const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+const page = normalizeLocalizedSource(await readConsoleSource());
 const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let sharedTLSFields;
 

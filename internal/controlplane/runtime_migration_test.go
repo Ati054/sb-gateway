@@ -111,6 +111,38 @@ func writeStartupProbeJSON(t *testing.T, path string, value any) {
 	}
 }
 
+func TestStartupMigratesDomainRuntimeWithoutChangingDraft(t *testing.T) {
+	server, _, expected := startupProbeMigrationFixture(t, nil)
+	before, err := server.getDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dns map[string]any
+	if err := json.Unmarshal(expected["policy-dns.json"], &dns); err != nil {
+		t.Fatal(err)
+	}
+	dns["version"] = 1
+	writeStartupProbeJSON(t, server.opts.Runtime.PolicyDNSConfig, dns)
+	if changed, err := MigrateLegacyDynamicRuntime(context.Background(), server.opts); err != nil || !changed {
+		t.Fatalf("migration: %t %v", changed, err)
+	}
+	after, err := server.getDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := canonicalJSON(before)
+	b, _ := canonicalJSON(after)
+	if !bytes.Equal(a, b) {
+		t.Fatal("startup changed saved settings")
+	}
+	if got := mustReadFile(t, server.opts.Runtime.PolicyDNSConfig); !bytes.Equal(got, expected["policy-dns.json"]) {
+		t.Fatal("DNS runtime not upgraded")
+	}
+	if changed, err := MigrateLegacyDynamicRuntime(context.Background(), server.opts); err != nil || changed {
+		t.Fatalf("idempotent migration: %t %v", changed, err)
+	}
+}
+
 func makeStartupProbeLegacy(t *testing.T, server *Server, oldLanes bool) {
 	t.Helper()
 	pool, err := decodeObject(mustReadFile(t, server.opts.Runtime.XrayHealthPool))

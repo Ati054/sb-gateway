@@ -1,10 +1,11 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const projectRoot = new URL("../", import.meta.url);
 const [page, client, css] = await Promise.all([
-  readFile(new URL("app/page.tsx", projectRoot), "utf8"),
+  readConsoleSource(),
   readFile(new URL("app/api-client.ts", projectRoot), "utf8"),
   readFile(new URL("app/globals.css", projectRoot), "utf8"),
 ]);

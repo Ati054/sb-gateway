@@ -176,6 +176,12 @@ func TestContainerMemorySchedulesOwnedOneShotWithoutLivePatch(t *testing.T) {
 	if r.Code != 202 || !scheduled || !strings.Contains(worker, "memory-high=335544320 memory-max=402653184") {
 		t.Fatalf("memory change not scheduled: %d %s", r.Code, r.Body.String())
 	}
+	hint, err := server.repository.auxiliary("memory-budget-limits")
+	hintHigh, _ := numberToInt64(hint["high_bytes"])
+	hintMax, _ := numberToInt64(hint["max_bytes"])
+	if err != nil || hintHigh != 224<<20 || hintMax != 256<<20 {
+		t.Fatalf("unconfirmed increase changed fallback: %v %v", hint, err)
+	}
 	retry := performRequest(t, server, http.MethodPost, apiPrefix+"/routeros/container/memory", body, map[string]string{csrfHeader: csrf}, cookie)
 	if retry.Code != 409 {
 		t.Fatalf("duplicate change accepted: %d", retry.Code)

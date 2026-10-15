@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/sb-gateway/sb-gateway/internal/memorybudget"
 )
 
 func TestXrayAliasDispatchNames(t *testing.T) {
@@ -19,5 +21,23 @@ func TestXrayAliasDispatchNames(t *testing.T) {
 	}
 	if isXrayAlias("xray.exe") != (runtime.GOOS == "windows") {
 		t.Fatal("executable suffix does not match platform")
+	}
+}
+
+func TestXrayMemoryRoles(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		role memorybudget.Role
+	}{
+		{nil, memorybudget.Xray},
+		{[]string{"run", "-config", "test.json"}, memorybudget.Xray},
+		{[]string{"run", "-test", "-config", "test.json"}, memorybudget.Worker},
+		{[]string{"run", "--test=true"}, memorybudget.Worker},
+		{[]string{"api", "statsquery"}, memorybudget.Worker},
+		{[]string{"version"}, memorybudget.Worker},
+	} {
+		if got := xrayMemoryRole(tc.args); got != tc.role {
+			t.Fatalf("%v: role %d", tc.args, got)
+		}
 	}
 }

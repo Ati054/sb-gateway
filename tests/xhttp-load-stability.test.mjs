@@ -1,8 +1,9 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+const page = await readConsoleSource();
 const healthcheck = await readFile(new URL("../scripts/healthcheck.sh", import.meta.url), "utf8");
 
 test("recommended XHTTP XMUX settings bound mobile connection growth", () => {

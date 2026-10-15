@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sb-gateway/sb-gateway/internal/domainset"
 )
 
 const maxPolicyDNSRulesetBytes = 16 << 20
@@ -73,6 +75,7 @@ type PolicyDNSArtifacts struct {
 // Fields are declared in canonical key order so MarshalPolicyDNS is byte-for-
 // byte compatible with the current compact, sorted JSON artifact.
 type PolicyDNSRuntime struct {
+	DomainSets     map[string]domainset.Set   `json:"domain_sets,omitempty"`
 	Lanes          []PolicyDNSLane            `json:"lanes"`
 	Servers        map[string]PolicyDNSServer `json:"servers"`
 	TimeoutSeconds int                        `json:"timeout_seconds,omitempty"`
@@ -102,6 +105,7 @@ type PolicyDNSLane struct {
 type PolicyDNSRule struct {
 	Action       string   `json:"action"`
 	Domain       []string `json:"domain"`
+	DomainSet    string   `json:"domain_set,omitempty"`
 	DomainSuffix []string `json:"domain_suffix"`
 	Server       string   `json:"server"`
 }
@@ -211,7 +215,7 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 		Runtime: PolicyDNSRuntime{
 			Lanes:   make([]PolicyDNSLane, 0),
 			Servers: make(map[string]PolicyDNSServer, len(source.Servers)),
-			Version: 1,
+			Version: 2,
 		},
 		XrayInbounds:  make([]map[string]any, 0),
 		XrayOutbounds: make([]map[string]any, 0),
@@ -276,7 +280,19 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 				if _, ok := servers[conditions.Server]; ok {
 					server = conditions.Server
 				}
-				lane.Rules = append(lane.Rules, PolicyDNSRule{Action: action, Domain: exact, DomainSuffix: suffixes, Server: server})
+				rule := PolicyDNSRule{Action: action, Domain: exact, DomainSuffix: suffixes, Server: server}
+				if len(exact)+len(suffixes) >= domainset.ShareThreshold {
+					set := domainset.Set{Domain: exact, DomainSuffix: suffixes}
+					if artifacts.Runtime.DomainSets == nil {
+						artifacts.Runtime.DomainSets = make(map[string]domainset.Set)
+					}
+					rule.DomainSet = set.ID()
+					if _, exists := artifacts.Runtime.DomainSets[rule.DomainSet]; !exists {
+						artifacts.Runtime.DomainSets[rule.DomainSet] = set
+					}
+					rule.Domain, rule.DomainSuffix = []string{}, []string{}
+				}
+				lane.Rules = append(lane.Rules, rule)
 			}
 		}
 		artifacts.Runtime.Lanes = append(artifacts.Runtime.Lanes, lane)
@@ -510,10 +526,10 @@ func (compiler *policyDNSCompiler) expand(raw PolicyDNSSourceRule) ([]PolicyDNSS
 			valid++
 			merged := raw
 			if len(entry.Domain) != 0 {
-				merged.Domain = append([]string(nil), entry.Domain...)
+				merged.Domain = entry.Domain
 			}
 			if len(entry.DomainSuffix) != 0 {
-				merged.DomainSuffix = append([]string(nil), entry.DomainSuffix...)
+				merged.DomainSuffix = entry.DomainSuffix
 			}
 			result = append(result, merged)
 		}

@@ -61,8 +61,16 @@ if [ "$first_release" != "$package_version" ]; then
 fi
 
 release_count="$(tr -d '\r' <CHANGELOG.md | grep -Ec '^## [0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$')"
-if [ "$release_count" -ne 1 ]; then
-  printf '%s\n' "first public source must contain exactly one CHANGELOG release" >&2
+if [ "$release_count" -lt 1 ]; then
+  printf '%s\n' "public CHANGELOG must contain release history" >&2
+  exit 1
+fi
+if ! cmp -s CHANGELOG.md docs/PUBLIC-CHANGELOG.md; then
+  printf '%s\n' "public CHANGELOG must match the maintained public history" >&2
+  exit 1
+fi
+if tr -d '\r' <CHANGELOG.md | sed -nE 's/^## ([0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?)$/\1/p' | sort | uniq -d | grep -q .; then
+  printf '%s\n' "public CHANGELOG contains duplicate releases" >&2
   exit 1
 fi
 
