@@ -1,13 +1,14 @@
 # sb-gateway-nginx-schema: 3
 user www-data;
 worker_processes 1;
+worker_rlimit_nofile 16384;
 pid /run/nginx.pid;
 error_log /logs/nginx/error.log warn;
 
 ${SHARED_STREAM}
 
 events {
-    worker_connections 1024;
+    worker_connections 8192;
 }
 
 http {

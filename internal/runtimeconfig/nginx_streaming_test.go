@@ -22,6 +22,9 @@ func TestTransportStreamingLimits(t *testing.T) {
 			if strings.Contains(location, nginxStreamingLimits) != streaming {
 				t.Fatalf("unexpected streaming overrides for %s: %s", kind, location)
 			}
+			if err := CheckNginxStreamingLimits("http { server { " + location + " } }"); err != nil {
+				t.Fatalf("generated location failed streaming audit: %v", err)
+			}
 		})
 	}
 }

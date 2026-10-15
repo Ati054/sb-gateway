@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"errors"
+	"log"
 	"os"
 	"strings"
 
@@ -61,6 +62,9 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 		updated := runtimeconfig.UpgradeNginxStreamingLimits(text)
 		normalized = normalized || updated != text
 		text = updated
+		text = upgradeStartupNginxCapacity(text)
+		normalized = normalized || text != updated
+		warnStartupNginxStreamingLimits(text)
 		if normalized {
 			if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
 				return false, err
@@ -79,8 +83,25 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 		text = text[:internalTail] + nginxTrafficReady + "\n" + text[internalTail:]
 	}
 	text = runtimeconfig.UpgradeNginxStreamingLimits(text)
+	text = upgradeStartupNginxCapacity(text)
+	warnStartupNginxStreamingLimits(text)
 	if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func upgradeStartupNginxCapacity(config string) string {
+	updated, err := runtimeconfig.UpgradeNginxCapacity(config)
+	if err != nil {
+		log.Printf("startup Nginx capacity warning: %v; use Check and Apply to regenerate managed configuration", err)
+		return config
+	}
+	return updated
+}
+
+func warnStartupNginxStreamingLimits(config string) {
+	if err := runtimeconfig.CheckNginxStreamingLimits(config); err != nil {
+		log.Printf("startup Nginx streaming limits warning: %v; use Check and Apply to regenerate managed configuration", err)
+	}
 }
