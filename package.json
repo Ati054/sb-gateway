@@ -1,6 +1,6 @@
 {
   "name": "sb-gateway-web",
-  "version": "1.6.58",
+  "version": "1.6.60",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "author": "Ati054 <ati054@tutamail.com> (https://github.com/Ati054)",
@@ -20,6 +20,7 @@
     "test:dependencies": "node --test tests/build-dependencies.test.mjs tests/braces-hardening.test.mjs",
     "audit:dependencies": "npm run test:dependencies && npm audit --audit-level=low",
     "test": "npm run build && node --experimental-strip-types --test tests/*.test.mjs",
+    "test:browser": "node scripts/test-console-browser.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .tmp --ignore-pattern .cache-release"
   },
   "dependencies": {

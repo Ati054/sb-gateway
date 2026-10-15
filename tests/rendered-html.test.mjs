@@ -1,3 +1,4 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
@@ -7,7 +8,7 @@ import { normalizeLocalizedSource } from "./source-localization.mjs";
 const projectRoot = new URL("../", import.meta.url);
 
 test("routing autosave leaves reverse profile input interactive", async () => {
-  const page = await readFile(new URL("app/page.tsx", projectRoot), "utf8");
+  const page = await readConsoleSource();
   const routing = page.slice(page.indexOf("function RoutingInfrastructure"), page.indexOf("function ReverseVlessSettings"));
   assert.ok(routing.includes('className="routing-infrastructure"'));
   assert.doesNotMatch(routing, /inert=\{saveBusy\}/);
@@ -17,7 +18,7 @@ test("routing autosave leaves reverse profile input interactive", async () => {
 });
 
 test("URLTest switching help exposes latency without download settings", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.doesNotMatch(page, /name="speed_/);
   assert.match(page, /Минимальное преимущество свежего HTTPS-отклика над активным узлом/);
   assert.match(page, /name="switch_improvement_ms"/);
@@ -29,7 +30,7 @@ test("URLTest switching help exposes latency without download settings", async (
 });
 
 test("URLTest tolerance uses a compact responsive number input", async () => {
-  const page = await readFile(new URL("app/page.tsx", projectRoot), "utf8");
+  const page = await readConsoleSource();
   const css = await readFile(new URL("app/globals.css", projectRoot), "utf8");
   assert.match(page, /className="field form-span policy-latency-tolerance"/);
   assert.match(css, /\.policy-editor-modal \.policy-latency-tolerance \{[^}]*max-width: 360px;/);
@@ -38,7 +39,7 @@ test("URLTest tolerance uses a compact responsive number input", async () => {
 
 test("node quality offers a reversible local 24-hour display baseline", async () => {
   const [page, css] = await Promise.all([
-    readFile(new URL("app/page.tsx", projectRoot), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("app/globals.css", projectRoot), "utf8"),
   ]);
   assert.match(page, /QUALITY_24H_BASELINE_STORAGE_KEY/);
@@ -51,7 +52,7 @@ test("node quality offers a reversible local 24-hour display baseline", async ()
 });
 
 test("sidebar waits for the reported container version without flashing a historical fallback", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   assert.match(page, /const containerVersion = asText\(build\.container_version, ""\)/);
   assert.match(page, /containerVersion \? `v\$\{containerVersion\}` : "—"/);
   assert.doesNotMatch(page, /asText\(build\.container_version, "1\.5\.10"\)/);
@@ -59,7 +60,7 @@ test("sidebar waits for the reported container version without flashing a histor
 
 test("overview shows the live RouterOS restart count for the current container start", async () => {
   const [page, apiClient] = await Promise.all([
-    readFile(new URL("app/page.tsx", projectRoot), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("app/api-client.ts", projectRoot), "utf8"),
   ]);
   assert.match(page, /Количество перезапусков:/);
@@ -72,7 +73,7 @@ test("overview shows the live RouterOS restart count for the current container s
 });
 
 test("TCP tuning uses shared defaults and exposes its actual scope", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const fields = page.match(/const tcpStabilityFields = \([\s\S]*?\n  \);/)?.[0];
   assert.ok(fields);
   assert.match(fields, /Xray JSON · клиент → CDN/);
@@ -86,7 +87,7 @@ test("TCP tuning uses shared defaults and exposes its actual scope", async () =>
 
 test("new Hysteria transports use the 15-second QUIC keepalive default", async () => {
   const [page, defaults] = await Promise.all([
-    readFile(new URL("app/page.tsx", projectRoot), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("internal/controlplane/default-config.json", projectRoot), "utf8"),
   ]);
   assert.match(page, /hysteria_keep_alive_period", label: "Keepalive QUIC", value: "15"/);
@@ -95,7 +96,7 @@ test("new Hysteria transports use the 15-second QUIC keepalive default", async (
 });
 
 test("direct REALITY fallback help describes unverified connections without CDN deployment advice", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const section = page.match(/<legend>Ограничение непроверенного fallback[\s\S]*?<\/fieldset>/)?.[0];
   assert.ok(section);
   assert.match(section, /Ограничивает только подключения, не прошедшие проверку REALITY\. Скорость 0 отключает ограничение\./);
@@ -104,7 +105,7 @@ test("direct REALITY fallback help describes unverified connections without CDN 
 });
 
 test("Reverse VLESS offers only the three direct REALITY transports", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("app/page.tsx", projectRoot), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const section = page.match(/function ReverseVlessSettings\([\s\S]*?const transports =/)?.[0];
   assert.ok(section);
   const kinds = section.match(/const supportedKinds = new Set\(\[([\s\S]*?)\]\);/)?.[1];
@@ -155,7 +156,7 @@ test("server-renders the Russian management panel", async () => {
 
 test("offers a persistent RU/EN choice before the first browser session", async () => {
   const [page, i18n, css] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("../app/i18n.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
@@ -171,7 +172,7 @@ test("offers a persistent RU/EN choice before the first browser session", async 
 
 test("ships without starter artifacts and encodes the outage policy", async () => {
   const [page, apiClient, layout, css, packageJson, i18n] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("../app/api-client.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
@@ -906,10 +907,7 @@ test("ships without starter artifacts and encodes the outage policy", async () =
 });
 
 test("requires provisioned named TLS profiles before Apply", async () => {
-  const source = normalizeLocalizedSource(await readFile(
-    new URL("../app/page.tsx", import.meta.url),
-    "utf8",
-  ));
+  const source = normalizeLocalizedSource(await readConsoleSource());
   assert.match(source, /asObjectList\(config\.tls_profiles\)/);
   assert.match(source, /asText\(profile\?\.certificate_secret_ref, ""\)/);
   assert.match(source, /asText\(profile\?\.private_key_secret_ref, ""\)/);
@@ -919,7 +917,7 @@ test("requires provisioned named TLS profiles before Apply", async () => {
 
 test("offers a reversible form-only parameter reset for every Xray transport", async () => {
   const [source, i18n] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("../app/i18n.tsx", import.meta.url), "utf8"),
   ]);
   for (const transport of [
@@ -948,7 +946,7 @@ test("offers a reversible form-only parameter reset for every Xray transport", a
 
 test("combines transport reset and rotations in one compact pending-action menu", async () => {
   const [source, css, i18n] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8").then(normalizeLocalizedSource),
+    readConsoleSource().then(normalizeLocalizedSource),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/i18n.tsx", import.meta.url), "utf8"),
   ]);
@@ -981,7 +979,7 @@ test("combines transport reset and rotations in one compact pending-action menu"
 });
 
 test("keeps automatic client address inline and delegates WAN binding to the server", async () => {
-  const source = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const source = normalizeLocalizedSource(await readConsoleSource());
   assert.match(source, /<option value="auto">Автоматически<\/option>/);
   assert.match(source, /<option value="manual">Вручную<\/option>/);
   assert.doesNotMatch(source, /Привязка входящего порта|name="wan_destination_address"|direct-wan-binding/);
@@ -1002,7 +1000,7 @@ test("keeps automatic client address inline and delegates WAN binding to the ser
 });
 
 test("a stale overview cannot hide a newly saved draft from Apply", async () => {
-  const source = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const source = normalizeLocalizedSource(await readConsoleSource());
   const start = source.indexOf('  const draftRevision = asText(draftEnvelope?.revision');
   const end = source.indexOf('  const pendingConfigChanges =', start);
   assert(start > 0 && end > start);

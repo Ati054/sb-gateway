@@ -20,6 +20,7 @@ import (
 	"github.com/sb-gateway/sb-gateway/internal/controlplane"
 	"github.com/sb-gateway/sb-gateway/internal/diagnosticlog"
 	"github.com/sb-gateway/sb-gateway/internal/geoiprefresh"
+	"github.com/sb-gateway/sb-gateway/internal/memorybudget"
 	"github.com/sb-gateway/sb-gateway/internal/monitor"
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
 	"github.com/sb-gateway/sb-gateway/internal/recovery"
@@ -44,7 +45,15 @@ func main() {
 	}
 	closeDiagnosticLog := configureDiagnosticLog(os.Args[1])
 	defer closeDiagnosticLog()
-
+	role := memorybudget.Worker
+	if os.Args[1] == "appliance" {
+		role = memorybudget.Gateway
+	}
+	if limit := memorybudget.Configure(role, os.Getenv("GOMEMLIMIT")); limit > 0 && role == memorybudget.Gateway {
+		plan := memorybudget.Current()
+		coreLimit := memorybudget.Cap(plan.Xray, os.Getenv("SB_XRAY_GOMEMLIMIT"))
+		log.Printf("memory: soft Go budgets gateway=%d xray=%d helper_max=%d ceiling=%d", limit, coreLimit, plan.Worker, plan.Ceiling)
+	}
 	switch os.Args[1] {
 	case "appliance":
 		exitApplianceOnError(runAppliance(os.Args[2:]))

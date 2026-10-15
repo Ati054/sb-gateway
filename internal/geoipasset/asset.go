@@ -87,6 +87,10 @@ func Publish(root, id string, body []byte) (string, error) {
 	sum := sha256.Sum256(data)
 	code := strings.TrimPrefix(id, "geoip-")
 	name := "sb-geoip-" + code + "-" + hex.EncodeToString(sum[:]) + ".dat"
+	return publishEncoded(root, name, code, data)
+}
+
+func publishEncoded(root, name, code string, data []byte) (string, error) {
 	publication.Lock()
 	defer publication.Unlock()
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -138,10 +142,15 @@ func ReferenceName(reference string) (string, bool) {
 		return "", false
 	}
 	match := namePattern.FindStringSubmatch(parts[1])
+	if siteNamePattern.MatchString(parts[1]) {
+		return parts[1], parts[2] == "domains"
+	}
 	return parts[1], match != nil && match[1] == parts[2]
 }
 
-func IsManagedName(name string) bool { return namePattern.MatchString(name) }
+func IsManagedName(name string) bool {
+	return namePattern.MatchString(name) || siteNamePattern.MatchString(name)
+}
 
 // Verify checks a persisted reference without loading its database into Go RAM.
 func Verify(root, reference string) error {
@@ -172,7 +181,13 @@ func Verify(root, reference string) error {
 		return err
 	}
 	match := namePattern.FindStringSubmatch(name)
-	if n > 8<<20 || hex.EncodeToString(digest.Sum(nil)) != match[2] {
+	want := ""
+	if match != nil {
+		want = match[2]
+	} else if site := siteNamePattern.FindStringSubmatch(name); site != nil {
+		want = site[1]
+	}
+	if n > 8<<20 || hex.EncodeToString(digest.Sum(nil)) != want {
 		return errors.New("GeoIP asset checksum mismatch")
 	}
 	return nil

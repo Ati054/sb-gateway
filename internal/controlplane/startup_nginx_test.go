@@ -60,6 +60,32 @@ func TestEnsureStartupNginxTrafficReadinessRejectsAmbiguousLegacyConfig(t *testi
 	}
 }
 
+func TestEnsureStartupNginxUpgradesStreamingWithoutApply(t *testing.T) {
+	for _, header := range []string{nginxSchema2Header, nginxSchema3Header} {
+		t.Run(header, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "nginx.conf")
+			probe := ""
+			if header == nginxSchema3Header {
+				probe = nginxTrafficReady
+			}
+			original := header + "\nhttp {\nclient_max_body_size 2m;\n" + nginxInternalStart + probe + nginxInternalTail + "    }\nserver { location /Tunnel/ {\n            grpc_send_timeout 300s;\n            grpc_pass grpc://127.0.0.1:11002;\n} }\n}\n"
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := EnsureStartupNginxTrafficReadiness(path); err != nil || !changed {
+				t.Fatalf("startup upgrade: %t %v", changed, err)
+			}
+			updated := string(mustReadFile(t, path))
+			if strings.Count(updated, "client_max_body_size 0;") != 1 || !strings.Contains(updated, "client_max_body_size 2m;") || !strings.Contains(updated, "client_body_timeout 300s;") {
+				t.Fatal("missing or overbroad streaming migration")
+			}
+			if changed, err := EnsureStartupNginxTrafficReadiness(path); err != nil || changed {
+				t.Fatalf("second startup: %t %v", changed, err)
+			}
+		})
+	}
+}
+
 func TestEnsureStartupNginxTrafficReadinessNormalizesCRLF(t *testing.T) {
 	for _, header := range []string{nginxSchema2Header, nginxSchema3Header} {
 		t.Run(header, func(t *testing.T) {

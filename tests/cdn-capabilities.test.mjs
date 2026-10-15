@@ -1,3 +1,4 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -11,7 +12,7 @@ test("official feed choices match backend adapters and preserve honest unsupport
   for (const id of ["vk", "cdnetworks", "custom", ""]) assert.equal(supportsAutomaticCidr(id), false);
   assert.match(automaticCidrHint("gcore"), /15 минут/);
   assert.match(automaticCidrHint("cloudflare"), /Автообновление/);
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   assert.match(page, /supportsAutomaticCidr\(subscriptionCdnProvider\)/);
   assert.match(page, /supportsAutomaticCidr\(deploymentProvider\)/);
   assert.doesNotMatch(page, /без официального машинного CIDR feed/);

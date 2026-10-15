@@ -1,5 +1,5 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { subscriptionFeedGroups } from "../app/subscription-feed.ts";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
@@ -17,7 +17,7 @@ test("subscription view preserves provider and node order without sorting names"
 });
 
 test("subscription view is a presentation toggle and keeps the shared selection", async () => {
-  const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(await readConsoleSource());
   const picker = page.slice(page.indexOf("function SubscriptionLocationPicker("), page.indexOf("function resultRows("));
   assert.match(picker, /nodeView === "subscription" \? subscriptionFeeds\.map/);
   assert.match(picker, /checked=\{checked\}/);

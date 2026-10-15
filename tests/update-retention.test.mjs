@@ -1,9 +1,10 @@
+import { readConsoleSourceSync } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
 
-const page = normalizeLocalizedSource(readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8"));
+const page = normalizeLocalizedSource(readConsoleSourceSync());
 test("plain toggle labels inherit the readable form label size", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.toggle-row strong\s*\{\s*font-size: inherit;\s*\}/);

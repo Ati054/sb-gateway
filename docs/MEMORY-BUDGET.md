@@ -25,7 +25,55 @@ Readback checks both limits, the same root and native control-plane health.
 An unconfirmed operation is not automatically retried or reported as success.
 Reopening Settings resumes reconciliation. Changing limits is not optimization.
 
+## Go Process Budgets
+
+The packaged image enables `SB_MEMORY_BUDGET=1`. Gateway, the multicall Xray
+core and transient helpers derive soft Go limits at process startup from
+cgroup v2 `memory.high` and `memory.max`, including visible parent limits.
+The working ceiling is the lower finite value of `memory.high` and 7/8 of
+`memory.max`. Unlimited or missing values do not become enormous Go budgets.
+
+The ceiling reserves up to 40 MiB (at most one quarter of the ceiling) for
+non-Go memory. Two helper reserves are each at most 32 MiB or one eighth of
+the ceiling. The remaining budget is split 65% Xray, 35% gateway. One reserve
+covers configuration validation and the other ACME, so a long certificate
+operation does not need to block Apply. Validation subprocesses within the
+controller are serialized with a cancellable wait.
+
+With high/max 224/256 MiB the planned soft limits are approximately 83.2 MiB
+Xray, 44.8 MiB gateway and 28 MiB for each helper, plus 40 MiB non-Go reserve.
+For 320/384 MiB they are 140.4, 75.6 and 32 MiB respectively, plus 40 MiB.
+Container limits themselves are never raised by this calculation.
+
+If neither cgroup value is available, the last finite RouterOS limits observed
+by the memory Settings endpoint are read from `memory-budget-limits.json` in
+the control-plane state directory. Before a scheduled change, this hint may
+tighten but cannot assume an unconfirmed increase. Without either source the
+fallback ceiling is 224 MiB. This fallback cannot discover a smaller limit
+on its own: cgroup-unavailable installations must confirm memory Settings
+before relying on it. Supported panel changes restart the container, so the
+new processes recalculate automatically. Manual external limit changes also
+require a restart to update the long-running processes' budgets.
+
+`GOMEMLIMIT` (gateway) and `SB_XRAY_GOMEMLIMIT` (core) may lower their calculated
+limits; they cannot raise them while automatic budgeting is enabled. Xray
+validation/API commands use a helper budget rather than a second core budget.
+ACME keeps its minimal environment and `GOMAXPROCS=1`; THP remains disabled.
+Host-side developer commands are not automatically capped by this image setting.
+
+`GOGC=150` still controls ordinary collection before a soft limit is reached.
+GOMEMLIMIT is not a reservation, a combined RSS limit or a guarantee against
+OOM: live objects can exceed it, and binary mappings, sockets and file cache
+need separate headroom. Smaller budgets can increase GC CPU. Functional tests
+and the formula do not establish capacity for a full LAN or sustained traffic;
+compare CPU, latency, throughput and cgroup pressure under the same workload.
+
 ## Allocation Optimizations
+
+- Large service domain rules use content-addressed GeoSite assets and share
+  compiled Xray matchers. DNS shares membership independently of per-lane
+  routing decisions; catalog text is parsed as a bounded stream.
+  See [Shared Domain Sets](DOMAIN-SETS.md) for migration and verification.
 
 - The shared-executable candidate retains separate gateway/core processes while
   deduplicating their compiled dependencies. See [Shared Executable](XRAY-MULTICALL.md)
@@ -56,10 +104,9 @@ Reopening Settings resumes reconciliation. Changing limits is not optimization.
   than repeating inline CIDR arrays. See [GeoIP Assets](GEOIP-ASSETS.md) for
   publication, activation, rollback and obsolete-file cleanup.
 
-Connection buffers and existing runtime settings are unchanged. No new 64 MiB
-Go cap, production profiler, periodic forced GC or artificial memory reset is
-introduced. The pre-existing `GOMEMLIMIT=128MiB`, `GOGC=150` and separate
-`SB_XRAY_GOMEMLIMIT=192MiB` remain soft process budgets, not container limits.
+Connection buffers remain at the architecture default. No periodic forced GC,
+production profiler or artificial memory reset is introduced. Connection idle
+timeouts are unchanged; reducing them requires evidence and long-session tests.
 
 ## Operational Limits
 

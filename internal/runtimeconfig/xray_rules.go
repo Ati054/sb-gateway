@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sb-gateway/sb-gateway/internal/domainset"
 	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
 
@@ -73,18 +74,21 @@ func convertXrayRuleConditions(conditions map[string]any, target string, selecta
 	if protocols := stringOrList(conditions["protocol"]); len(protocols) != 0 {
 		rule["protocol"] = protocols
 	}
-	domains := make([]string, 0)
-	for _, value := range stringSlice(conditions["domain_suffix"]) {
-		domains = append(domains, "domain:"+value)
-	}
-	for _, value := range stringSlice(conditions["domain"]) {
-		domains = append(domains, "full:"+value)
-	}
-	for _, value := range stringSlice(conditions["domain_keyword"]) {
-		domains = append(domains, "keyword:"+value)
-	}
-	for _, value := range stringSlice(conditions["domain_regex"]) {
-		domains = append(domains, "regexp:"+value)
+	domains := stringSlice(conditions["_sb_geosite_reference"])
+	if len(domains) == 0 {
+		domains = make([]string, 0)
+		for _, value := range stringSlice(conditions["domain_suffix"]) {
+			domains = append(domains, "domain:"+value)
+		}
+		for _, value := range stringSlice(conditions["domain"]) {
+			domains = append(domains, "full:"+value)
+		}
+		for _, value := range stringSlice(conditions["domain_keyword"]) {
+			domains = append(domains, "keyword:"+value)
+		}
+		for _, value := range stringSlice(conditions["domain_regex"]) {
+			domains = append(domains, "regexp:"+value)
+		}
 	}
 	if len(domains) != 0 {
 		rule["domain"] = domains
@@ -137,6 +141,9 @@ func (compiler *xrayRuleCompiler) expand(raw map[string]any) ([]map[string]any, 
 		valid := 0
 		for _, entry := range entries {
 			merged := cloneWithoutKey(base, "")
+			if !hasDomainFields(base) && textValue(entry["_sb_geosite_reference"]) != "" {
+				merged["_sb_geosite_reference"] = []string{textValue(entry["_sb_geosite_reference"])}
+			}
 			if strings.HasPrefix(name, "geoip-") {
 				merged["_sb_geoip_pack"] = name
 			}
@@ -214,9 +221,31 @@ func (compiler *xrayRuleCompiler) load(name string) ([]map[string]any, error) {
 				entry[key] = stringOrList(value)
 			}
 		}
+		fields := make(map[string][]string)
+		count := 0
+		for _, key := range []string{"domain", "domain_suffix", "domain_keyword", "domain_regex"} {
+			fields[key] = stringOrList(entry[key])
+			count += len(fields[key])
+		}
+		if count >= domainset.ShareThreshold {
+			reference, err := geoipasset.PublishDomains(compiler.root, fields)
+			if err != nil {
+				return nil, err
+			}
+			entry["_sb_geosite_reference"] = reference
+		}
 	}
 	compiler.cache[name] = document.Rules
 	return document.Rules, nil
+}
+
+func hasDomainFields(rule map[string]any) bool {
+	for _, key := range []string{"domain", "domain_suffix", "domain_keyword", "domain_regex"} {
+		if len(stringOrList(rule[key])) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func copyXrayList(source, destination map[string]any, sourceKey, destinationKey string) {

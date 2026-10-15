@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
+	"github.com/sb-gateway/sb-gateway/internal/memorybudget"
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
@@ -710,7 +712,10 @@ func (runtime *nativeRuntime) validateCandidate(ctx context.Context, candidate r
 		var err error
 		switch name {
 		case "xray.json":
-			err = runValidationCommandWithEnv(ctx, []string{"XRAY_LOCATION_ASSET=" + runtime.options.RuleSetDir}, runtime.options.XrayBinary, "run", "-test", "-config", candidate.Files[name])
+			if err := geoipasset.VerifyConfig(runtime.options.RuleSetDir, candidate.Files[name]); err != nil {
+				return fmt.Errorf("verify runtime geodata: %w", err)
+			}
+			err = runValidationCommandWithEnv(ctx, []string{"XRAY_LOCATION_ASSET=" + runtime.options.RuleSetDir, fmt.Sprintf("GOMEMLIMIT=%d", memorybudget.Current().Worker)}, runtime.options.XrayBinary, "run", "-test", "-config", candidate.Files[name])
 		case "nginx.conf":
 			err = runValidationCommand(ctx, runtime.options.NginxBinary, "-t", "-c", candidate.Files[name], "-p", "/")
 		case "policy-dns.json":
@@ -734,7 +739,15 @@ func runValidationCommand(ctx context.Context, executable string, arguments ...s
 	return runValidationCommandWithEnv(ctx, nil, executable, arguments...)
 }
 
+var validationCommandSlot = make(chan struct{}, 1)
+
 func runValidationCommandWithEnv(ctx context.Context, environment []string, executable string, arguments ...string) error {
+	select {
+	case validationCommandSlot <- struct{}{}:
+		defer func() { <-validationCommandSlot }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Env = append(os.Environ(), environment...)
 	output := &limitedWriter{remaining: 64 << 10}

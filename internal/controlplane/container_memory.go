@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/memorybudget"
 	"github.com/sb-gateway/sb-gateway/internal/routeros"
 )
 
@@ -52,6 +53,8 @@ func (server *Server) containerMemoryStatus(response http.ResponseWriter, reques
 		return
 	}
 	defer server.mutationMu.Unlock()
+	high, highOK := routerOSByteSize(current["memory-high"])
+	maximum, maxOK := routerOSByteSize(current["memory-max"])
 	operation, err := server.repository.auxiliary(containerMemoryOperation)
 	if err != nil {
 		server.internalStateError(response, request, err)
@@ -85,6 +88,20 @@ func (server *Server) containerMemoryStatus(response http.ResponseWriter, reques
 				server.internalStateError(response, request, err)
 				return
 			}
+		}
+	}
+	if highOK && maxOK {
+		if operation["pending"] == true {
+			if target, ok := numberToInt64(operation["high_bytes"]); ok && target > 0 {
+				high = min(high, target)
+			}
+			if target, ok := numberToInt64(operation["max_bytes"]); ok && target > 0 {
+				maximum = min(maximum, target)
+			}
+		}
+		if err := server.rememberContainerMemoryLimits(high, maximum); err != nil {
+			server.internalStateError(response, request, err)
+			return
 		}
 	}
 	server.writeJSON(response, 200, map[string]any{"container": container, "operation": operation})
@@ -167,6 +184,12 @@ func (server *Server) updateContainerMemory(response http.ResponseWriter, reques
 		server.writeJSON(response, 200, map[string]any{"operation": map[string]any{"state": "unchanged", "pending": false}})
 		return
 	}
+	// Until readback confirms a change, fallback hints may tighten but never
+	// assume a larger limit from an unconfirmed RouterOS scheduler response.
+	if err := server.rememberContainerMemoryLimits(min(oldHigh, high), min(oldMax, maximum)); err != nil {
+		server.internalStateError(response, request, err)
+		return
+	}
 	operation := map[string]any{"pending": true, "state": "scheduled", "root_dir": containerRoot, "high_bytes": high, "max_bytes": maximum, "deadline": server.now().Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)}
 	if err := server.repository.saveAuxiliary(containerMemoryOperation, operation); err != nil {
 		server.internalStateError(response, request, err)
@@ -184,4 +207,20 @@ func (server *Server) updateContainerMemory(response http.ResponseWriter, reques
 	}
 	server.audit(request, fmt.Sprint(session["sub"]), "container.memory", "scheduled", map[string]any{"memory_high_mib": highMiB, "memory_max_mib": maxMiB})
 	server.writeJSON(response, 202, map[string]any{"operation": operation})
+}
+
+func (server *Server) rememberContainerMemoryLimits(high, maximum int64) error {
+	if high < 16*memorybudget.MiB || high > maximum || maximum > 8192*memorybudget.MiB {
+		return nil
+	}
+	known, err := server.repository.auxiliary(memorybudget.HintName)
+	if err != nil {
+		return err
+	}
+	oldHigh, _ := numberToInt64(known["high_bytes"])
+	oldMax, _ := numberToInt64(known["max_bytes"])
+	if oldHigh == high && oldMax == maximum {
+		return nil
+	}
+	return server.repository.saveAuxiliary(memorybudget.HintName, map[string]any{"high_bytes": high, "max_bytes": maximum})
 }

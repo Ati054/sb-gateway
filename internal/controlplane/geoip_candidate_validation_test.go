@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,7 +67,7 @@ func TestPinnedXrayGeoIPCandidateValidation(t *testing.T) {
 	if err := os.Remove(filepath.Join(assets, name)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.activate(ctx, candidate); err == nil || !strings.Contains(err.Error(), "failed to open") {
+	if _, err := r.activate(ctx, candidate); err == nil || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing GeoIP asset did not reject activation through validation: %v", err)
 	}
 	if current, err := os.ReadFile(live); err != nil || string(current) != string(baseline) {

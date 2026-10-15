@@ -1,3 +1,4 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
@@ -92,7 +93,7 @@ test("config refresh keeps an open subscription endpoint draft", () => {
 });
 
 test("actual Connections refresh effect keeps an open typed hostname and TLS choice", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let refreshEffect;
   function visit(node) {
@@ -182,7 +183,7 @@ test("CDN TLS changes never replace the public edge hostname", () => {
 });
 
 test("subscription edge and origin fields use separate native datalists", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /list=\{subscriptionHostnameDatalistId\}/);
   assert.match(page, /id=\{subscriptionHostnameDatalistId\}/);
@@ -207,7 +208,7 @@ test("subscription edge and origin fields use separate native datalists", async 
 });
 
 test("opening subscription settings hydrates legacy CDN and direct origin before the dialog renders", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let opener = "";
   function visit(node) {
@@ -226,7 +227,7 @@ test("opening subscription settings hydrates legacy CDN and direct origin before
 });
 
 test("Connections cannot render from defaults before the current draft is hydrated", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   assert.match(
     page,
     /screen === "connections"[\s\S]*?configurationHydrated \? \([\s\S]*?<Connections[\s\S]*?Загружаю настройки подключений…/,
@@ -234,7 +235,7 @@ test("Connections cannot render from defaults before the current draft is hydrat
 });
 
 test("SetupWizard retains an explicit separate origin while saving an incomplete draft", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   const parsed = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let wizardText = "";
   function visit(node) {

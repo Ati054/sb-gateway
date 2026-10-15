@@ -125,7 +125,7 @@ if [ "$process_log_bytes" -ge "$process_log_limit_bytes" ]; then
   fi
   mv "$process_log" "$process_log.1"
 fi
-xray_gomemlimit="${SB_XRAY_GOMEMLIMIT:-192MiB}"
+xray_gomemlimit="${SB_XRAY_GOMEMLIMIT:-off}"
 GOMEMLIMIT="$xray_gomemlimit" xray run -config "$config" >>"$process_log" 2>&1 &
 xray_pid=$!
 

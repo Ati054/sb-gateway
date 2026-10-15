@@ -1,5 +1,8 @@
 # Managed GeoIP Assets
 
+The same immutable publication, verification, retention and recovery mechanism
+also handles managed GeoSite assets. See [Shared Domain Sets](DOMAIN-SETS.md).
+
 Retention inputs must contain exactly one complete JSON object. Empty,
 truncated or concatenated documents abort cleanup before any asset deletion.
 

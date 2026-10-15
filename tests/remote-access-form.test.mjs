@@ -1,10 +1,10 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
 
-const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+const page = normalizeLocalizedSource(await readConsoleSource());
 const asText = (value, fallback) => typeof value === "string" ? value : fallback;
 
 test("client policy controls state their full-profile scope", () => {

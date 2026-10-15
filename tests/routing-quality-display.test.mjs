@@ -1,10 +1,11 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
 
-const page = normalizeLocalizedSource(await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"));
+const page = normalizeLocalizedSource(await readConsoleSource());
 const routing = page.slice(page.indexOf("function Routing("), page.indexOf("function Connections("));
 
 test("quality table follows configured priority or visible URLTest median ranking", async () => {
@@ -111,7 +112,7 @@ test("user groups match multiple emoji tokens across presentation variants", () 
 });
 
 test("rule-based group editor offers all subscriptions and provider-neutral examples", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = await readConsoleSource();
   assert.match(source, /<option value="\*">\{tr\("Все подписки"\)\}<\/option>/);
   assert.match(source, /<option value="">\{tr\("Любой источник \(старое правило\)"\)\}<\/option>/);
   assert.match(source, /subscription_ids: \[newSubscription\]/);

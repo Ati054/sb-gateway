@@ -1,5 +1,25 @@
 # SB Gateway for MikroTik RouterOS 7
 
+SB Gateway lets you choose how devices on your MikroTik reach the internet,
+using a browser panel instead of editing proxy configuration files.
+Assign a route to a device, choose which services use the normal connection,
+and keep reserve routes ready. It is intended for home and small-office admins.
+
+[Русский](README-RU.md) · [Install](docs/INSTALL.md) · [Latest release](https://github.com/Ati054/sb-gateway/releases/latest)
+
+## What You Need
+
+- A MikroTik with ARM64 RouterOS 7 and container support, such as hAP ax3.
+- An external USB SSD for the container and persistent data.
+- A working internet connection and an upstream subscription or another supported exit.
+- A domain and certificate only for incoming connections that require them; outbound-only routing does not require a domain.
+
+![Routing panel with an example configuration](docs/images/panel-routing.png)
+
+The screenshot uses synthetic example data, not a live installation.
+
+## Technical Overview
+
 SB Gateway is a bilingual Web-managed traffic-policy gateway packaged as
 one Linux ARM64 RouterOS container. The current server runtime is Xray-core 26.9.30
 only; sing-box is not shipped and there is no core switch in the UI.
@@ -54,7 +74,7 @@ depend on one fixed RouterOS release channel.
 
 ## First installation
 
-Download `sb-gateway-1.6.45-routeros-bundle.zip` from the GitHub release and
+Download the RouterOS bundle from the [latest release](https://github.com/Ati054/sb-gateway/releases/latest) and
 verify its SHA-256 checksum. The bundle contains the ARM64 container archive,
 its checksum and manifest, and the RouterOS scripts required for installation.
 

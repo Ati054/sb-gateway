@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
 )
@@ -179,6 +180,10 @@ func mergeBaseline(payload map[string]any, pack ServicePack) bool {
 }
 
 func CompileDomainList(rootName string, fetch Fetch) (map[string]any, error) {
+	return CompileDomainListStream(rootName, stringFetcher(fetch))
+}
+
+func CompileDomainListStream(rootName string, fetch StreamFetch) (map[string]any, error) {
 	fields := map[string]map[string]struct{}{
 		"domain": {}, "domain_suffix": {}, "domain_keyword": {}, "domain_regex": {},
 	}
@@ -197,11 +202,18 @@ func CompileDomainList(rootName string, fetch Fetch) (map[string]any, error) {
 		if err != nil {
 			return err
 		}
-		scanner := bufio.NewScanner(strings.NewReader(body))
+		limited := &io.LimitedReader{R: body, N: maxSourceBytes + 1}
+		scanner := bufio.NewScanner(limited)
 		scanner.Buffer(make([]byte, 64<<10), maxSourceBytes)
+		includes := make([]string, 0)
+		includedNames := make(map[string]bool)
+		defer body.Close()
 		lineNumber := 0
 		for scanner.Scan() {
 			lineNumber++
+			if !utf8.Valid(scanner.Bytes()) {
+				return errors.New("rule-set source is not valid UTF-8")
+			}
 			line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
 			if line == "" {
 				continue
@@ -212,8 +224,12 @@ func CompileDomainList(rootName string, fetch Fetch) (map[string]any, error) {
 				if included == "" {
 					return fmt.Errorf("empty include in %s:%d", name, lineNumber)
 				}
-				if err := visit(included); err != nil {
-					return err
+				if !includedNames[included] {
+					if len(includes) >= maxIncludedFiles {
+						return errors.New("rule-set include graph is invalid or too large")
+					}
+					includedNames[included] = true
+					includes = append(includes, included)
 				}
 				continue
 			}
@@ -242,7 +258,21 @@ func CompileDomainList(rootName string, fetch Fetch) (map[string]any, error) {
 				}
 			}
 		}
-		return scanner.Err()
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+		if limited.N == 0 {
+			return errors.New("rule-set source exceeds the size limit")
+		}
+		if err := body.Close(); err != nil {
+			return err
+		}
+		for _, included := range includes {
+			if err := visit(included); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if err := visit(rootName); err != nil {
 		return nil, err
@@ -331,19 +361,27 @@ func Validate(payload map[string]any) error {
 }
 
 func RefreshPack(pack ServicePack, root string, fetch Fetch) (map[string]any, error) {
+	return RefreshPackStream(pack, root, stringFetcher(fetch))
+}
+
+func RefreshPackStream(pack ServicePack, root string, fetch StreamFetch) (map[string]any, error) {
 	if (pack.UpdateMode != "catalog" && pack.UpdateMode != "geoip") || pack.UpstreamName == nil || *pack.UpstreamName == "" {
 		return nil, errors.New("this pack uses bundled official endpoints")
 	}
 	var payload map[string]any
 	var err error
 	if pack.UpdateMode == "geoip" {
-		var source string
+		var source io.ReadCloser
 		source, err = fetch(*pack.UpstreamName)
 		if err == nil {
-			payload, err = CompileGeoIPList(source)
+			payload, err = compileGeoIPReader(source)
+			closeErr := source.Close()
+			if err == nil {
+				err = closeErr
+			}
 		}
 	} else {
-		payload, err = CompileDomainList(*pack.UpstreamName, fetch)
+		payload, err = CompileDomainListStream(*pack.UpstreamName, fetch)
 	}
 	if err != nil {
 		return nil, err
@@ -374,12 +412,19 @@ func RefreshPack(pack ServicePack, root string, fetch Fetch) (map[string]any, er
 // CompileGeoIPList keeps country CIDRs as a bounded, portable JSON ruleset.
 // The JSON remains the portable source for DNS, RouterOS and binary Xray assets.
 func CompileGeoIPList(source string) (map[string]any, error) {
-	if len(source) > maxSourceBytes {
-		return nil, errors.New("GeoIP source exceeds the size limit")
-	}
+	return compileGeoIPReader(strings.NewReader(source))
+}
+
+func compileGeoIPReader(source io.Reader) (map[string]any, error) {
+	limited := &io.LimitedReader{R: source, N: maxSourceBytes + 1}
+	scanner := bufio.NewScanner(limited)
+	scanner.Buffer(make([]byte, 64<<10), maxSourceBytes)
 	seen := make(map[string]struct{})
-	for _, line := range strings.Split(source, "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	for scanner.Scan() {
+		if !utf8.Valid(scanner.Bytes()) {
+			return nil, errors.New("rule-set source is not valid UTF-8")
+		}
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -391,6 +436,12 @@ func CompileGeoIPList(source string) (map[string]any, error) {
 		if len(seen) > 50_000 {
 			return nil, errors.New("GeoIP source contains too many CIDRs")
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if limited.N == 0 {
+		return nil, errors.New("GeoIP source exceeds the size limit")
 	}
 	if len(seen) == 0 {
 		return nil, errors.New("GeoIP source has no CIDRs")
@@ -414,7 +465,7 @@ func RefreshAll(options Options, packs []ServicePack) (map[string]any, error) {
 	if err := removeObsoleteSRS(options.RulesetDir); err != nil {
 		return nil, err
 	}
-	fetch := HTTPFetch(options.Timeout)
+	fetch := HTTPStreamFetch(options.Timeout)
 	results := make(map[string]any, len(packs))
 	index := catalogIndex(catalog)
 	for _, pack := range packs {
@@ -426,7 +477,7 @@ func RefreshAll(options Options, packs []ServicePack) (map[string]any, error) {
 			}
 			continue
 		}
-		result, refreshErr := RefreshPack(pack, options.RulesetDir, fetch)
+		result, refreshErr := RefreshPackStream(pack, options.RulesetDir, fetch)
 		if refreshErr != nil {
 			results[pack.ID] = map[string]any{
 				"status": "stale", "checked_at": time.Now().UTC().Format(time.RFC3339Nano),

@@ -1,5 +1,5 @@
+import { readConsoleSourceSync } from "./console-source.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { qualitySheet } from "../app/node-quality.ts";
 import { normalizeLocalizedSource } from "./source-localization.mjs";
@@ -77,7 +77,7 @@ test("priority table follows configured order without promoting the active or st
 });
 
 test("route buttons are numeric in top-to-bottom policy order with accessible names", () => {
-  const page = normalizeLocalizedSource(readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8"));
+  const page = normalizeLocalizedSource(readConsoleSourceSync());
   const controls = page.match(/<div className="quality-periods quality-sheets"[\s\S]*?<\/div>/)?.[0];
   assert.ok(controls);
   assert.match(controls, /policyRows\.map\(\(policy, index\)/);

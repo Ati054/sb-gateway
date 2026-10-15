@@ -34,6 +34,7 @@ import (
 	"github.com/go-acme/lego/v5/registration"
 	"github.com/sb-gateway/sb-gateway/internal/acmedns"
 	"github.com/sb-gateway/sb-gateway/internal/acmejob"
+	"github.com/sb-gateway/sb-gateway/internal/memorybudget"
 	"github.com/sb-gateway/sb-gateway/internal/policydns"
 )
 
@@ -521,6 +522,7 @@ func configureWorkerLogging() {
 }
 
 func main() {
+	memorybudget.Configure(memorybudget.Worker, os.Getenv("GOMEMLIMIT"))
 	// Never log upstream errors: some DNS APIs echo their request credentials.
 	configureWorkerLogging()
 	os.Exit(run(context.Background(), os.Stdin, os.Stdout))

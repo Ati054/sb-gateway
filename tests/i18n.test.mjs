@@ -1,3 +1,4 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -45,7 +46,7 @@ test("English source catalog covers localized UI text and contains no Russian fa
   const pagePath = path.join(root, "app", "page.tsx");
   const catalogPath = path.join(root, "app", "i18n-text.ts");
   const [pageSource, catalogSource] = await Promise.all([
-    readFile(pagePath, "utf8"),
+    readConsoleSource(),
     readFile(catalogPath, "utf8"),
   ]);
   const page = parse(pagePath, pageSource, ts.ScriptKind.TSX);

@@ -64,23 +64,20 @@ try {
     if (@($releaseLines | Where-Object { $_ -match '^### (Проверка|Verification)(\s|$)' }).Count -ne 0) {
         throw "Public release notes must contain user-facing changes, not test reports."
     }
-    $changelogLines = @(Get-Content -Encoding UTF8 -LiteralPath (Join-Path $sourceRoot "CHANGELOG.md"))
-    $start = [Array]::IndexOf($changelogLines, "## $version")
-    if ($start -lt 0) { throw "CHANGELOG.md is missing release $version." }
-    $end = $changelogLines.Count
-    for ($index = $start + 1; $index -lt $changelogLines.Count; $index++) {
-        if ($changelogLines[$index] -match '^## \d+\.\d+\.\d+(?:-rc\.[1-9][0-9]*)?$') {
-            $end = $index
-            break
-        }
+    # This maintained history contains public product changes only. Never copy
+    # the complete internal changelog into an export or truncate older entries.
+    $publicChangelogPath = Join-Path $sourceRoot "docs/PUBLIC-CHANGELOG.md"
+    $publicChangelog = @(Get-Content -Encoding UTF8 -LiteralPath $publicChangelogPath)
+    $publicVersions = @($publicChangelog | ForEach-Object {
+        if ($_ -match '^## (\d+\.\d+\.\d+(?:-rc\.[1-9][0-9]*)?)$') { $Matches[1] }
+    })
+    if ($publicVersions.Count -eq 0 -or $publicVersions[0] -ne $version) {
+        throw "Public changelog must start with release $version."
     }
-    while ($end -gt $start + 1 -and [string]::IsNullOrWhiteSpace($changelogLines[$end - 1])) {
-        $end--
+    if (@($publicVersions | Sort-Object -Unique).Count -ne $publicVersions.Count) {
+        throw "Public changelog contains duplicate versions."
     }
-    if ($end -le $start + 1) { throw "CHANGELOG.md has no changes for release $version." }
-    $publicChangelog = @("# Changelog", "") + $changelogLines[$start..($end - 1)]
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllLines((Join-Path $sourceRoot "CHANGELOG.md"), $publicChangelog, $utf8NoBom)
+    [System.IO.File]::Copy($publicChangelogPath, (Join-Path $sourceRoot "CHANGELOG.md"), $true)
     Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs/releases') -File | Where-Object {
         $_.Name -ne "$version.md"
     } | Remove-Item -Force

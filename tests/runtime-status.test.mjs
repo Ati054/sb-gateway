@@ -1,11 +1,11 @@
+import { readConsoleSource } from "./console-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
 
 import { mergeRuntimeStatus, reverseAvailability } from "../app/runtime-status.ts";
 
 test("Reverse status clock refreshes with telemetry outside render", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readConsoleSource();
   const section = page.slice(page.indexOf("function ReverseVlessSettings("), page.indexOf("function WireGuard", page.indexOf("function ReverseVlessSettings(")));
   assert.match(section, /const reverseSampledAt = asText\(asObject\(runtime\?\.reverse_telemetry\)\.sampled_at, ""\)/);
   assert.match(section, /window\.setInterval\(refresh, 30_000\)/);

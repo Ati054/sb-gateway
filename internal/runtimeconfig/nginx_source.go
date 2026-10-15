@@ -593,6 +593,11 @@ func nginxRealityCoverServers(config map[string]any, defaultCert, defaultKey str
 }
 
 func nginxTransportLocation(entry nginxDeployment, deployments []map[string]any, readSecret SecretReader) (string, error) {
+	location, err := renderNginxTransportLocation(entry, deployments, readSecret)
+	return UpgradeNginxStreamingLimits(location), err
+}
+
+func renderNginxTransportLocation(entry nginxDeployment, deployments []map[string]any, readSecret SecretReader) (string, error) {
 	guard, err := nginxOriginHeaderGuard(deployments, readSecret)
 	if err != nil {
 		return "", err
