@@ -199,7 +199,19 @@ func plannedRuntimeActivationReady(operation map[string]any, liveApply bool) boo
 
 func (server *Server) liveApplyReadinessAllowed(operation map[string]any) bool {
 	return plannedRuntimeActivationReady(operation, server.plannedRuntimeApply.Load()) ||
-		plannedHotPolicyReadiness(operation, server.plannedHotPolicyApply.Load())
+		plannedHotPolicyReadiness(operation, server.plannedHotPolicyApply.Load()) ||
+		plannedUnchangedReadiness(operation, server.plannedUnchangedApply.Load())
+}
+
+// The previous runtime remains usable during preparation. The native store
+// clears this allowance under its publication lock before any artifact changes.
+// Only a no-change receipt can retain it during commit; process restart loses it.
+func plannedUnchangedReadiness(operation map[string]any, liveApply bool) bool {
+	state := operation["state"]
+	previousSource := text(operation["previous_routeros_source"])
+	return liveApply && operation["pending"] == true &&
+		(state == "prepared" || state == "runtime_activated" || state == "active_committed") &&
+		previousSource != "" && previousSource == text(operation["target_routeros_source"])
 }
 
 // Only the live native publication callback can set this flag, after proving
@@ -326,7 +338,12 @@ func (server *Server) status(response http.ResponseWriter, request *http.Request
 		server.writeJSON(response, http.StatusOK, map[string]any{"selector_health": compact, "runtime_revision": metadata["runtime_revision"]})
 		return
 	}
-	payload, err := server.statusPayload()
+	selector, err := server.repository.publicSelectorJSON()
+	if err != nil {
+		server.internalStateError(response, request, err)
+		return
+	}
+	payload, err := server.statusPayloadWithSelectors(selector)
 	if err != nil {
 		server.internalStateError(response, request, err)
 		return
@@ -335,6 +352,14 @@ func (server *Server) status(response http.ResponseWriter, request *http.Request
 }
 
 func (server *Server) statusPayload() (map[string]any, error) {
+	selector, err := server.repository.auxiliary("selector-health")
+	if err != nil {
+		return nil, err
+	}
+	return server.statusPayloadWithSelectors(publicSelectorHealth(selector))
+}
+
+func (server *Server) statusPayloadWithSelectors(selector any) (map[string]any, error) {
 	active, err := server.repository.activeRevision()
 	if err != nil {
 		return nil, err
@@ -347,11 +372,6 @@ func (server *Server) statusPayload() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	selector, err := server.repository.auxiliary("selector-health")
-	if err != nil {
-		return nil, err
-	}
-	selector = publicSelectorHealth(selector)
 	cdnState, err := server.repository.auxiliary("cdn-feeds")
 	if err != nil {
 		return nil, err

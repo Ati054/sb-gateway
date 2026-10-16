@@ -1228,6 +1228,8 @@ func runACMEWorker(ctx context.Context, request acmejob.Request) (acmejob.Result
 	return runACMEWorkerWithProgress(ctx, request, nil)
 }
 
+var acmeMemoryBudgetLease = memorybudget.AcquireACME
+
 // runACMEWorkerWithProgress keeps the worker's stdout protocol separate from
 // optional FD3 telemetry. A missing, closed, or malformed telemetry stream
 // never changes the issuance result.
@@ -1236,6 +1238,18 @@ func runACMEWorkerWithProgress(ctx context.Context, request acmejob.Request, pro
 	if err != nil {
 		return acmejob.Result{}, acmejob.ErrWorker
 	}
+	releaseMemory, err := acmeMemoryBudgetLease(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return acmejob.Result{}, acmejob.ErrWorkerCancel
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return acmejob.Result{}, acmejob.ErrWorkerTimeout
+		}
+		log.Printf("acme: worker memory admission rejected: %v", err)
+		return acmejob.Result{}, acmejob.ErrWorkerStart
+	}
+	defer releaseMemory()
 	command := acmeWorkerCommand(ctx, envOr("SB_ACME_BIN", "sb-acme"))
 	command.Stdin = bytes.NewReader(body)
 	command.Env = []string{"GOMAXPROCS=1", fmt.Sprintf("GOMEMLIMIT=%d", memorybudget.Current().Worker), "GOGC=50", "GODEBUG=disablethp=1", "PATH=/usr/local/bin:/usr/bin:/bin"}

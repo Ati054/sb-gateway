@@ -162,6 +162,7 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 func (server *Server) applyConfiguration(ctx context.Context, config map[string]any, actor string) (map[string]any, int, error) {
 	defer server.plannedRuntimeApply.Store(false)
 	defer server.plannedHotPolicyApply.Store(false)
+	defer server.plannedUnchangedApply.Store(false)
 	normalizeConfigCompatibility(config)
 	check := validateCurrentConfig(config)
 	if !check.Valid {
@@ -255,6 +256,11 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	if err := server.saveSubscriptionSnapshot(stagedRevision, desiredNodes); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	// Preparation still uses the old working runtime. Native publication revokes
+	// this live-only allowance before changing any artifact; stale journals never
+	// inherit it after a crash. An unchanged publication may keep it through commit.
+	_, nativeApply := server.runtime.(*nativeRuntime)
+	server.plannedUnchangedApply.Store(nativeApply && !routerOSChanged)
 	if err := server.beginApplyRecovery(activeRevision, recoveryRevision, stagedRevision, previousRouterOS, desiredRouterOS, candidate.Revision); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -297,6 +303,10 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 				}
 				server.plannedHotPolicyApply.Store(true)
 				return nil
+			}, func(changed []string) {
+				if len(changed) > 0 {
+					server.plannedUnchangedApply.Store(false)
+				}
 			})
 		} else {
 			receipt, activateErr = server.runtime.activate(operationContext, candidate)

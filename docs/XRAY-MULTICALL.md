@@ -15,6 +15,22 @@ replacing its config parsing, validation, signal handling or startup cleanup.
 The complete CLI is invoked only in the core process. Existing API services,
 ports, runtime generation proofs and atomic image update contracts are unchanged.
 
+## Dynamic Outbound API
+
+The multicall appliance compiles dynamic probe outbounds with its pinned Xray
+compiler and sends AddOutbound over the existing local gRPC connection. It does
+not start another engine process or write a temporary configuration per probe.
+Actual handlers and network connections are still created in the independent
+core process, not in the controller. Typed transport settings remain intact;
+ambiguous acknowledgements require inventory readback before retry or selection.
+Compiler errors and panics become a generic local failure without raw node data;
+they do not trigger a fallback CLI process or terminate the controller.
+AddOutbound retains a five-second RPC deadline and the existing API concurrency
+lanes.
+Standalone developer binaries retain the external CLI path. Functional and
+wire-contract tests do not establish a sustained multi-client CPU improvement;
+loaded artifact verification is required before enabling a release candidate.
+
 ## Build
 
 Ordinary gateway Go tests use the standalone build and do not import Xray.
@@ -24,6 +40,9 @@ root, run `scripts/prepare-xray-multicall.sh` with those two absolute source pat
 and a new, ignored output `.mod` path. Build/test with that `-modfile` and the
 `xray_multicall` build tag. The generated module files must not be committed.
 Docker performs this preparation within its build stage.
+Go regression sources are included in the build context; the build fails if
+gateway or agent test sources are absent. The runtime stage copies only the built
+executables and explicit runtime assets, not those test sources.
 Architecture-independent offline seed JSON is prepared on the build platform
 and copied into the image. Cross-architecture user-mode emulation is not a
 replacement for artifact checks on the target instruction set.
@@ -81,6 +100,23 @@ can therefore require a structural restart.
 Both roles must be distributed from the same immutable image. No dynamic Go
 library loader, external shared-library ABI or separately updated core executable
 is introduced. Keep the `xray` alias when invoking its version/config/API commands.
+
+## Telemetry API
+
+The agent owns one local gRPC connection shared by route health and telemetry;
+it closes that connection only after both workers stop. Traffic totals use
+`StatsService/QueryStats`, and online clients use `GetAllOnlineUsers`. These
+read-only calls never reset counters, start an Xray CLI child, or fall back to
+one after an API error. Each RPC has a four-second deadline and uses the bounded
+background lane, leaving the urgent active-path lane independent.
+
+Counter values remain integer-valued, including totals above 2^53. API failures
+retain the existing unavailable-source and baseline behavior; they are not
+reported as successful zero samples. Tests cover pinned upstream protobuf
+compatibility, online-name normalization, independent source errors, cancellation
+and operation while the active health lane is occupied. The nftables counter
+read remains a separate bounded `nft` command. Image-level CPU and telemetry
+verification is still required before claiming a measured improvement.
 
 ## Verification Status
 

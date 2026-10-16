@@ -3,12 +3,15 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,8 +42,11 @@ func controlRPCFixture(t *testing.T, handler func(context.Context, string, []byt
 			"/xray.app.router.command.RoutingService/GetBalancerInfo":        {"GetBalancerInfoRequest", "GetBalancerInfoResponse"},
 			"/xray.app.router.command.RoutingService/OverrideBalancerTarget": {"OverrideBalancerTargetRequest", "OverrideBalancerTargetResponse"},
 			"/xray.app.proxyman.command.HandlerService/ListOutbounds":        {"ListOutboundsRequest", "ListOutboundsResponse"},
+			"/xray.app.proxyman.command.HandlerService/AddOutbound":          {"AddOutboundRequest", "AddOutboundResponse"},
 			"/xray.app.proxyman.command.HandlerService/RemoveOutbound":       {"RemoveOutboundRequest", "RemoveOutboundResponse"},
 			"/xray.app.stats.command.StatsService/GetStatsOnline":            {"GetStatsRequest", "GetStatsResponse"},
+			"/xray.app.stats.command.StatsService/QueryStats":                {"QueryStatsRequest", "QueryStatsResponse"},
+			"/xray.app.stats.command.StatsService/GetAllOnlineUsers":         {"GetAllOnlineUsersRequest", "GetAllOnlineUsersResponse"},
 		}
 		name, exists := names[method]
 		if !exists {
@@ -66,6 +72,120 @@ func controlRPCFixture(t *testing.T, handler func(context.Context, string, []byt
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { client.close(); server.Stop(); _ = listener.Close() })
 	return client
+}
+
+func TestXrayControlRPCAddPreservesTypedSettings(t *testing.T) {
+	encoded := controlWireField(1, []byte("dynamic-fixture"))
+	encoded = append(encoded, controlWireField(2, []byte{10, 3, 't', 'c', 'p'})...)
+	encoded = append(encoded, controlWireField(3, []byte{10, 5, 'v', 'l', 'e', 's', 's'})...)
+	var calls atomic.Int32
+	client := controlRPCFixture(t, func(_ context.Context, method string, body []byte) ([]byte, error) {
+		calls.Add(1)
+		if !strings.HasSuffix(method, "/AddOutbound") || !bytes.Equal(body, controlWireField(1, encoded)) {
+			return nil, errors.New("typed outbound settings changed on the wire")
+		}
+		return nil, nil
+	})
+	if err := client.add(context.Background(), encoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range [][]byte{{255}, controlWireField(3, []byte("missing-tag"))} {
+		if err := client.add(context.Background(), invalid); err == nil {
+			t.Fatal("malformed outbound reached the API")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatal("invalid payload invoked HandlerService")
+	}
+}
+
+func TestXrayNativeAddRetainsLostAcknowledgementReadback(t *testing.T) {
+	for _, name := range []string{"success", "lost-present", "timeout-absent", "unknown-inventory", "failed-absent"} {
+		t.Run(name, func(t *testing.T) {
+			var adds atomic.Int32
+			var present atomic.Bool
+			encoded := controlWireField(1, []byte("dynamic"))
+			client := controlRPCFixture(t, func(_ context.Context, method string, body []byte) ([]byte, error) {
+				if strings.HasSuffix(method, "/AddOutbound") {
+					n := adds.Add(1)
+					if !bytes.Equal(body, controlWireField(1, encoded)) {
+						return nil, errors.New("wrong compiled outbound")
+					}
+					if name == "success" || (name == "timeout-absent" && n == 2) {
+						present.Store(true)
+						return nil, nil
+					}
+					if name == "lost-present" {
+						present.Store(true)
+					}
+					if name == "failed-absent" {
+						return nil, status.Error(codes.Unavailable, "fixture failure")
+					}
+					return nil, status.Error(codes.DeadlineExceeded, "fixture lost acknowledgement")
+				}
+				if strings.HasSuffix(method, "/ListOutbounds") {
+					if name == "unknown-inventory" {
+						return nil, status.Error(codes.Unavailable, "fixture inventory unavailable")
+					}
+					if present.Load() {
+						return controlWireField(1, controlWireField(1, []byte("dynamic"))), nil
+					}
+					return nil, nil
+				}
+				return nil, errors.New("unexpected operation")
+			})
+			runtime := newXraySelectorRuntime(Options{})
+			runtime.control = client
+			runtime.outboundEncoder = func(outbound map[string]any) ([]byte, error) {
+				if outbound["tag"] != "dynamic" {
+					return nil, errors.New("wrong dynamic tag")
+				}
+				return encoded, nil
+			}
+			runtime.command = func(context.Context, time.Duration, string, ...string) ([]byte, error) {
+				t.Error("native outbound addition started a CLI process")
+				return nil, errors.New("unexpected subprocess")
+			}
+			runtime.pool.Outbounds = map[string]json.RawMessage{"node": json.RawMessage(`{"protocol":"freedom"}`)}
+			err := runtime.ensureOutbound("node", "dynamic")
+			wantSuccess := name == "success" || name == "lost-present" || name == "timeout-absent"
+			if (err == nil) != wantSuccess || runtime.loadedDynamic["dynamic"] != wantSuccess {
+				t.Fatalf("unconfirmed addition state: err=%v loaded=%v", err, runtime.loadedDynamic["dynamic"])
+			}
+			wantAdds := int32(1)
+			if name == "timeout-absent" {
+				wantAdds = 2
+			}
+			if adds.Load() != wantAdds {
+				t.Fatalf("adds=%d want=%d", adds.Load(), wantAdds)
+			}
+		})
+	}
+}
+
+func TestXrayNativeCompilerFailureIsRecoveredAndRedacted(t *testing.T) {
+	for _, crash := range []bool{false, true} {
+		t.Run(fmt.Sprint(crash), func(t *testing.T) {
+			var calls atomic.Int32
+			client := controlRPCFixture(t, func(context.Context, string, []byte) ([]byte, error) {
+				calls.Add(1)
+				return nil, errors.New("unexpected RPC after compiler failure")
+			})
+			runtime := newXraySelectorRuntime(Options{})
+			runtime.control = client
+			runtime.pool.Outbounds = map[string]json.RawMessage{"node": json.RawMessage(`{"protocol":"freedom"}`)}
+			runtime.outboundEncoder = func(map[string]any) ([]byte, error) {
+				if crash {
+					panic("encoder-private-value")
+				}
+				return nil, errors.New("encoder-private-value")
+			}
+			err := runtime.ensureOutbound("node", "dynamic")
+			if err == nil || strings.Contains(err.Error(), "encoder-private-value") || runtime.loadedDynamic["dynamic"] || calls.Load() != 0 {
+				t.Fatalf("unsafe compiler failure: %v", err)
+			}
+		})
+	}
 }
 
 func TestRestoreXraySelectorsUsesRPCWithoutReverse(t *testing.T) {

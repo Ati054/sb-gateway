@@ -56,11 +56,17 @@ func newXrayControlClient(address string) (*xrayControlClient, error) {
 			message("OutboundTag", field("tag", 1, "", false)),
 			message("ListOutboundsRequest"),
 			message("ListOutboundsResponse", field("outbounds", 1, "OutboundTag", true)),
+			message("AddOutboundRequest", field("outbound", 1, "OutboundTag", false)),
+			message("AddOutboundResponse"),
 			message("RemoveOutboundRequest", field("tag", 1, "", false)),
 			message("RemoveOutboundResponse"),
 			message("GetStatsRequest", field("name", 1, "", false)),
 			message("Stat", field("name", 1, "", false), statValue),
 			message("GetStatsResponse", field("stat", 1, "Stat", false)),
+			message("QueryStatsRequest", field("pattern", 1, "", false)),
+			message("QueryStatsResponse", field("stat", 1, "Stat", true)),
+			message("GetAllOnlineUsersRequest"),
+			message("GetAllOnlineUsersResponse", field("users", 1, "", true)),
 		},
 	}, nil)
 	if err != nil {
@@ -94,7 +100,13 @@ func (client *xrayControlClient) invoke(parent context.Context, operation, servi
 	case <-parent.Done():
 		return parent.Err()
 	}
-	ctx, cancel := context.WithTimeout(parent, xrayControlRPCTimeout)
+	timeout := xrayControlRPCTimeout
+	if operation == "ado" {
+		timeout = 5 * time.Second
+	} else if operation == "statsquery" || operation == "statsgetallonlineusers" {
+		timeout = 4 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	err = client.conn.Invoke(ctx, "/xray.app."+service+".command."+method, request, response)
 	if err != nil && ctx.Err() != nil {
@@ -158,6 +170,21 @@ func (client *xrayControlClient) remove(parent context.Context, tag string) erro
 	request, response := client.message("RemoveOutboundRequest"), client.message("RemoveOutboundResponse")
 	setControlString(request, "tag", tag)
 	return client.invoke(parent, "rmo", "proxyman", "HandlerService/RemoveOutbound", request, response)
+}
+
+func (client *xrayControlClient) add(parent context.Context, encoded []byte) error {
+	outbound := client.message("OutboundTag")
+	// Preserve the encoder's typed sender/proxy fields as opaque protobuf.
+	// The projection owns only the tag; it must never rebuild transport data.
+	if err := proto.Unmarshal(encoded, outbound); err != nil {
+		return err
+	}
+	if outbound.Get(outbound.Descriptor().Fields().ByName("tag")).String() == "" {
+		return errors.New("Xray outbound tag is missing")
+	}
+	request, response := client.message("AddOutboundRequest"), client.message("AddOutboundResponse")
+	request.Set(request.Descriptor().Fields().ByName("outbound"), protoreflect.ValueOfMessage(outbound))
+	return client.invoke(parent, "ado", "proxyman", "HandlerService/AddOutbound", request, response)
 }
 
 func (client *xrayControlClient) online(parent context.Context, candidate string) (bool, error) {

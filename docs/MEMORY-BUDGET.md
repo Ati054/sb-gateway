@@ -40,17 +40,46 @@ covers configuration validation and the other ACME, so a long certificate
 operation does not need to block Apply. Validation subprocesses within the
 controller are serialized with a cancellable wait.
 
-These are arithmetic headroom allocations, not preallocated RAM. Combining the
-two helper slots would require serializing certificate issuance with validation;
-DNS challenge propagation could then delay Check/Apply for the whole issuance.
-Do not reclaim a helper slot without enforcing that exclusion across startup and
-controller subprocesses and measuring the operational delay. Any reclaimed
-budget would follow the same 65/35 split, not all go to Xray.
+These are arithmetic headroom allocations, not preallocated RAM. The two helper
+slots remain independent: certificate propagation must not monopolize validation.
 
 With high/max 224/256 MiB the planned soft limits are approximately 83.2 MiB
 Xray, 44.8 MiB gateway and 28 MiB for each helper, plus 40 MiB non-Go reserve.
 For 320/384 MiB they are 140.4, 75.6 and 32 MiB respectively, plus 40 MiB.
 Container limits themselves are never raised by this calculation.
+
+### Idle ACME Loan
+
+The packaged image enables `SB_MEMORY_BUDGET_ACME_LOAN=1`. The controller may
+use the idle ACME helper allowance without changing Xray, native limits or the
+permanent validation allowance.
+At 224/256 MiB its idle soft limit becomes 72.8 MiB; at 256/320 MiB it becomes
+85.2 MiB instead of 53.2 MiB. At 288/320 MiB it becomes 93.6 MiB instead of
+61.6 MiB. An explicitly lower `GOMEMLIMIT` still wins. Set
+`SB_MEMORY_BUDGET_ACME_LOAN=0` to retain the base controller budget.
+Readable usage and a finite cgroup ceiling matching the startup plan are required;
+fallback hints alone cannot enable lending. Otherwise the base limit stays.
+The visible cgroup root must contain the controller itself. An empty limited
+parent is also accepted when every empty ancestor has exactly one real child
+leading to the controller (for example RouterOS `/init`). Sibling groups,
+invisible task IDs and links in that chain are rejected. Traversal is bounded;
+unavailable or ambiguous ownership disables lending. A leaf-only usage counter
+cannot establish spare memory in a shared parent hierarchy.
+The startup log distinguishes `gateway_base` from the temporary `acme_idle_loan`;
+the borrowed allowance is not a third simultaneous helper reservation.
+
+Before starting ACME, the controller recalls the loan and serializes ACME workers.
+It verifies current cgroup usage leaves the helper allowance plus up to 16 MiB
+extra margin below the ceiling. Only if necessary, this rare admission path makes
+one explicit reclaim attempt and waits up to two further seconds for headroom.
+Unknown usage rejects the worker without forcing GC; insufficient headroom also
+rejects it safely after the bounded admission attempt. Cancellation,
+start failure, worker failure and progress-pipe completion restore the idle
+allowance. Validation does not wait on this ACME slot; Apply can proceed while
+DNS challenge propagation waits. No periodic forced collection is added.
+
+Use [controller runtime counters](CONTROLLER-RUNTIME-DIAGNOSTICS.md) to distinguish
+GC work from useful controller work; measure actual OS CPU separately.
 
 If neither cgroup value is available, the last finite RouterOS limits observed
 by the memory Settings endpoint are read from `memory-budget-limits.json` in

@@ -188,7 +188,7 @@ func (runtime *nativeRuntime) activate(ctx context.Context, candidate runtimecon
 }
 
 func (runtime *nativeRuntime) activateWithXrayRestartHook(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart func(context.Context) error) (runtimeconfig.ActivationReceipt, error) {
-	return runtime.activateWithHooks(ctx, candidate, beforeXrayRestart, nil)
+	return runtime.activateWithHooks(ctx, candidate, beforeXrayRestart, nil, nil)
 }
 
 const hotPolicyActivationTimeout = 90 * time.Second
@@ -209,13 +209,16 @@ func hotPolicyChange(changed []string) bool {
 	return len(changed) == 1 && changed[0] == "urltest-pool.json"
 }
 
-func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart, beforeHotPolicy func(context.Context) error) (runtimeconfig.ActivationReceipt, error) {
+func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart, beforeHotPolicy func(context.Context) error, beforePublication func([]string)) (runtimeconfig.ActivationReceipt, error) {
 	var policyScope hotRuntimeScope
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()
 	receipt, err := runtime.store.ActivateAfter(candidate, func(changed []string) error {
 		if err := runtime.validate(ctx, candidate, changed); err != nil {
 			return err
+		}
+		if beforePublication != nil {
+			beforePublication(changed)
 		}
 		// This proof is made under the store's publication lock. Only policy
 		// eligibility changed: Xray, listeners, DNS and routing stay untouched.

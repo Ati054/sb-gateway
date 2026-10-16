@@ -110,7 +110,7 @@ func readBounded(path string, maxBytes int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, maxBytes))
 }
 
-func Current() Plan {
+func currentCgroupRelative() string {
 	relative := "/"
 	if body, err := readBounded("/proc/self/cgroup", 4096); err == nil {
 		for _, line := range strings.Split(string(body), "\n") {
@@ -120,7 +120,15 @@ func Current() Plan {
 			}
 		}
 	}
-	limits := ReadV2("/sys/fs/cgroup", relative)
+	return relative
+}
+
+func detectedLimits() Limits {
+	return ReadV2("/sys/fs/cgroup", currentCgroupRelative())
+}
+
+func Current() Plan {
+	limits := detectedLimits()
 	if limits.High <= 0 && limits.Max <= 0 {
 		state := os.Getenv("SB_GATEWAY_STATE_DIR")
 		if state == "" {
@@ -147,7 +155,11 @@ func Configure(role Role, requested string) int64 {
 	if os.Getenv("SB_MEMORY_BUDGET") != "1" {
 		return 0
 	}
-	limit := Cap(Current().For(role), requested)
+	plan := Current()
+	limit := Cap(plan.For(role), requested)
+	if role == Gateway {
+		limit = configureACMELoan(plan, requested)
+	}
 	debug.SetMemoryLimit(limit)
 	return limit
 }

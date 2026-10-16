@@ -494,11 +494,13 @@ func candidateDelay(candidate string, medians map[string]*int) int {
 	return 0
 }
 
-func updateHistories(item *policyHealthState, candidates []string, measured map[string]probeEvidence, now time.Time) {
+func updateHistories(item *policyHealthState, candidates []string, measured map[string]probeEvidence, now time.Time) map[string]historyChange {
+	changes := make(map[string]historyChange)
 	cutoff := float64(now.Add(-24 * time.Hour).Unix())
 	oldestDay := now.UTC().AddDate(0, 0, -(historyRetentionDays - 1)).Format("2006-01-02")
 	for _, candidate := range candidates {
 		previous := item.DailySamples[candidate]
+		change := historyChange{daily: previous == nil}
 		history := previous[:0]
 		if history == nil {
 			history = []healthSample{}
@@ -513,6 +515,7 @@ func updateHistories(item *policyHealthState, candidates []string, measured map[
 		clear(previous[len(history):])
 		if evidence, ok := measured[candidate]; ok {
 			history = append(history, healthSample{At: float64(now.Unix()), OK: evidence.OK, DelayMS: evidence.DelayMS})
+			change.daily, change.period = true, true
 		}
 		if len(history) > 1440 {
 			copy(history, history[len(history)-1440:])
@@ -520,8 +523,10 @@ func updateHistories(item *policyHealthState, candidates []string, measured map[
 			history = history[:1440]
 		}
 		item.DailySamples[candidate] = history
+		change.daily = change.daily || len(history) != len(previous)
 		days := item.HistoryDays[candidate]
 		if days == nil {
+			change.period = true
 			days = make(map[string]dayBucket)
 			for _, sample := range history {
 				appendHistoryDay(days, sample)
@@ -532,10 +537,15 @@ func updateHistories(item *policyHealthState, candidates []string, measured map[
 		for key := range days {
 			if key < oldestDay {
 				delete(days, key)
+				change.period = true
 			}
 		}
 		item.HistoryDays[candidate] = days
+		if change.daily || change.period {
+			changes[candidate] = change
+		}
 	}
+	return changes
 }
 
 func appendHistoryDay(days map[string]dayBucket, sample healthSample) {
