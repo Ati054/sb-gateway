@@ -70,6 +70,7 @@ type Server struct {
 	trafficReadyAfter         time.Time
 	plannedRuntimeApply       atomic.Bool
 	plannedHotPolicyApply     atomic.Bool
+	plannedUnchangedApply     atomic.Bool
 	mu                        sync.RWMutex
 	passwordMu                sync.Mutex
 	mutationMu                sync.Mutex
@@ -90,6 +91,7 @@ type Server struct {
 	validationResult          configValidation
 	subscriptionMu            sync.Mutex
 	subscriptionWake          chan struct{}
+	subscriptionRuntimeIdle   subscriptionRuntimeIdle
 	routerOSScriptWake        chan struct{}
 	xrayLoggingWake           chan struct{}
 	syncSubscriptionEndpoints func(context.Context, map[string]any, []string, bool) error
@@ -354,6 +356,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("POST "+apiPrefix+"/tls-profiles/{entity}/export", server.exportTLSProfile)
 	server.mux.HandleFunc("POST "+apiPrefix+"/tls-profiles/import", server.importTLSProfile)
 	server.mux.HandleFunc("POST "+apiPrefix+"/diagnostics", server.diagnostics)
+	server.mux.HandleFunc("GET "+apiPrefix+"/diagnostics/runtime", server.runtimeMetrics)
 	server.mux.HandleFunc("GET "+apiPrefix+"/runtime/xray-logs", server.xrayLogs)
 	server.mux.HandleFunc("GET "+apiPrefix+"/runtime/system-logs", server.systemLogs)
 	server.mux.HandleFunc("POST "+apiPrefix+"/service-packs/resolve", server.resolveServicePack)

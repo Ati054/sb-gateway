@@ -140,7 +140,7 @@ func TestHotPolicyApplyWaitsForSelectorAndRollbackGeneration(t *testing.T) {
 			}
 			hookCalled <- struct{}{}
 			return nil
-		})
+		}, nil)
 		done <- activation{receipt, err}
 	}()
 	waitTestPool(t, runtime.options.XrayHealthPool, hotPolicyNewPool, previousStamp)

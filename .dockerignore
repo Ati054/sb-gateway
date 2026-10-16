@@ -47,7 +47,6 @@ routeros/*
 !routeros/watchdog.rsc
 !routeros/cloudflare-update.rsc
 tests
-**/*_test.go
 **/*.test.mjs
 **/*.spec.mjs
 config

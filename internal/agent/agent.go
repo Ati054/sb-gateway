@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 )
 
 type Options struct {
+	control             *xrayControlClient
 	StateRoot           string
 	InterestFile        string
 	XrayBinary          string
@@ -56,6 +58,12 @@ func OptionsFromEnvironment() Options {
 }
 
 func Run(ctx context.Context, opts Options) error {
+	control, err := newXrayControlClient(opts.XrayAPIServer)
+	if err != nil {
+		return fmt.Errorf("initialize Xray control API: %w", err)
+	}
+	defer control.close()
+	opts.control = control
 	return runAgentWorkers(ctx,
 		func(child context.Context) error { return runTelemetry(child, opts) },
 		func(child context.Context) error { return runHealth(child, opts) },

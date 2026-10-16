@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.63
+
+- Reduced background CPU work in telemetry, subscription reconciliation and node statistics.
+- Reused idle certificate-task memory in the controller without raising container limits.
+- Preserved traffic readiness during Apply when runtime artifacts remain unchanged.
+
 ## 1.6.62
 
 - Raised Nginx connection capacity and upgraded saved limits automatically at startup.

@@ -52,7 +52,8 @@ func main() {
 	if limit := memorybudget.Configure(role, os.Getenv("GOMEMLIMIT")); limit > 0 && role == memorybudget.Gateway {
 		plan := memorybudget.Current()
 		coreLimit := memorybudget.Cap(plan.Xray, os.Getenv("SB_XRAY_GOMEMLIMIT"))
-		log.Printf("memory: soft Go budgets gateway=%d xray=%d helper_max=%d ceiling=%d", limit, coreLimit, plan.Worker, plan.Ceiling)
+		baseLimit := memorybudget.Cap(plan.Gateway, os.Getenv("GOMEMLIMIT"))
+		log.Printf("memory: soft Go budgets gateway=%d xray=%d helper_max=%d ceiling=%d gateway_base=%d acme_idle_loan=%d", limit, coreLimit, plan.Worker, plan.Ceiling, baseLimit, max(0, limit-baseLimit))
 	}
 	switch os.Args[1] {
 	case "appliance":

@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,5 +77,73 @@ func TestACMEMemoryEnvironmentDoesNotInheritAmbientProxy(t *testing.T) {
 		if strings.HasPrefix(value, "HTTP_PROXY=") {
 			t.Fatal("ambient environment escaped worker isolation")
 		}
+	}
+}
+
+func TestACMEMemoryLeaseCoversWorkerAndReleasesOnStartFailure(t *testing.T) {
+	oldLease, oldCommand := acmeMemoryBudgetLease, acmeWorkerCommand
+	defer func() { acmeMemoryBudgetLease, acmeWorkerCommand = oldLease, oldCommand }()
+	active, releases := false, 0
+	acmeMemoryBudgetLease = func(context.Context) (func(), error) {
+		active = true
+		return func() { active = false; releases++ }, nil
+	}
+	acmeWorkerCommand = func(ctx context.Context, _ string) *exec.Cmd {
+		if !active {
+			t.Fatal("worker constructed before its budget was recalled")
+		}
+		return exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-acme-worker"))
+	}
+	if _, err := runACMEWorker(context.Background(), acmejob.Request{}); !errors.Is(err, acmejob.ErrWorkerStart) {
+		t.Fatalf("worker start failure: %v", err)
+	}
+	if active || releases != 1 {
+		t.Fatal("worker start failure leaked memory reservation")
+	}
+}
+
+func TestACMEMemoryLeaseCancellationPreventsWorkerStart(t *testing.T) {
+	oldLease, oldCommand := acmeMemoryBudgetLease, acmeWorkerCommand
+	defer func() { acmeMemoryBudgetLease, acmeWorkerCommand = oldLease, oldCommand }()
+	acmeMemoryBudgetLease = func(context.Context) (func(), error) { return nil, context.Canceled }
+	acmeWorkerCommand = func(context.Context, string) *exec.Cmd {
+		t.Fatal("worker started after rejected memory admission")
+		return nil
+	}
+	if _, err := runACMEWorker(context.Background(), acmejob.Request{}); !errors.Is(err, acmejob.ErrWorkerCancel) {
+		t.Fatalf("cancelled admission: %v", err)
+	}
+}
+
+func TestACMEMemoryLeaseDoesNotBlockValidation(t *testing.T) {
+	oldLease, oldCommand := acmeMemoryBudgetLease, acmeWorkerCommand
+	defer func() { acmeMemoryBudgetLease, acmeWorkerCommand = oldLease, oldCommand }()
+	var released atomic.Bool
+	entered, continueWorker := make(chan struct{}), make(chan struct{})
+	acmeMemoryBudgetLease = func(context.Context) (func(), error) {
+		return func() { released.Store(true) }, nil
+	}
+	acmeWorkerCommand = func(ctx context.Context, _ string) *exec.Cmd {
+		close(entered)
+		<-continueWorker
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=^TestACMEWorkerExitHelper$")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := runACMEWorker(context.Background(), acmejob.Request{})
+		done <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := runValidationCommand(ctx, filepath.Join(t.TempDir(), "missing-validation-command"))
+	validationContextErr := ctx.Err()
+	close(continueWorker)
+	workerErr := <-done
+	if err == nil || errors.Is(err, context.DeadlineExceeded) || validationContextErr != nil {
+		t.Fatalf("independent validation slot blocked by ACME: %v", err)
+	}
+	if !errors.Is(workerErr, acmejob.ErrCAValidation) || !released.Load() {
+		t.Fatalf("worker failure did not restore lease: %v", workerErr)
 	}
 }
