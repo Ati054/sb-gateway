@@ -17,15 +17,18 @@ import (
 )
 
 type stateRepository struct {
-	root        string
-	generations string
-	mu          sync.RWMutex
-	cache       map[string]cachedDocument
-	readiness   cachedSelectorReadiness
-	selectors   cachedSelectorStatus
+	root                string
+	generations         string
+	mu                  sync.RWMutex
+	cache               map[string]cachedDocument
+	readiness           cachedSelectorReadiness
+	selectors           cachedSelectorStatus
+	selectorPublicMu    sync.Mutex
+	selectorPublicCache cachedPublicSelectorJSON
 }
 
 type cachedDocument struct {
+	source   os.FileInfo
 	modified int64
 	size     int64
 	value    map[string]any
@@ -89,7 +92,7 @@ func (repository *stateRepository) readJSON(path string) (map[string]any, error)
 	}
 	repository.mu.RLock()
 	cached, ok := repository.cache[path]
-	if ok && cached.modified == info.ModTime().UnixNano() && cached.size == info.Size() {
+	if ok && cached.source != nil && os.SameFile(cached.source, info) && cached.modified == info.ModTime().UnixNano() && cached.size == info.Size() {
 		value := cloneJSONObject(cached.value)
 		repository.mu.RUnlock()
 		return value, nil
@@ -102,6 +105,7 @@ func (repository *stateRepository) readJSON(path string) (map[string]any, error)
 	}
 	repository.mu.Lock()
 	repository.cacheDocument(path, cachedDocument{
+		source:   info,
 		modified: info.ModTime().UnixNano(),
 		size:     info.Size(),
 		value:    value,
@@ -146,6 +150,7 @@ func (repository *stateRepository) writeJSON(path string, value map[string]any) 
 		return nil
 	}
 	repository.cacheDocument(path, cachedDocument{
+		source:   info,
 		modified: info.ModTime().UnixNano(),
 		size:     info.Size(),
 		value:    cloneJSONObject(value),

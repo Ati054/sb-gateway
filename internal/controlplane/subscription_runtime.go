@@ -45,6 +45,12 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 	defer server.subscriptionMu.Unlock()
 	server.configMu.Lock()
 	defer server.configMu.Unlock()
+	now := server.now()
+	if server.subscriptionRuntimeIdle.unchanged(now) {
+		return false, nil
+	}
+	server.subscriptionRuntimeIdle = subscriptionRuntimeIdle{}
+	sources, cacheable := server.repository.subscriptionRuntimePointers()
 	if err := server.repository.reconcileCommitPointers(); err != nil {
 		return false, err
 	}
@@ -56,11 +62,18 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 	if !safeRevision(revision) {
 		return false, nil
 	}
+	snapshotRevision := stringDefault(metadata["node_snapshot_revision"], revision)
+	if cacheable && safeRevision(snapshotRevision) {
+		extra, ok := subscriptionRuntimeSources(filepath.Join(server.repository.generations, revision+".json"), filepath.Join(server.repository.root, "subscription-nodes-"+snapshotRevision+".json"))
+		cacheable = ok
+		sources = append(sources, extra...)
+	} else {
+		cacheable = false
+	}
 	active, err := server.repository.loadGeneration(revision)
 	if err != nil {
 		return false, err
 	}
-	snapshotRevision := stringDefault(metadata["node_snapshot_revision"], revision)
 	snapshot, err := server.repository.auxiliary("subscription-nodes-" + snapshotRevision)
 	if err != nil {
 		return false, err
@@ -122,6 +135,7 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 	if err != nil {
 		return false, err
 	}
+	var retryAt time.Time
 	for _, raw := range collectionArray(active["subscriptions"]) {
 		subscription, ok := raw.(map[string]any)
 		if !ok || subscription["enabled"] == false {
@@ -145,6 +159,9 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 			}
 			next, _ := time.Parse(time.RFC3339Nano, subscriptionText(status["next_attempt"]))
 			if server.now().Before(next) {
+				if retryAt.IsZero() || next.Before(retryAt) {
+					retryAt = next
+				}
 				continue
 			}
 		}
@@ -156,7 +173,20 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 				desired = append(desired, node)
 			}
 		}
-		for _, node := range runtimeSubscriptionNodes(active, map[string]any{id: entry}) {
+		providerNodes := runtimeSubscriptionNodes(active, map[string]any{id: entry})
+		previousProvider := make([]map[string]any, 0, len(providerNodes))
+		for _, node := range previousNodes {
+			if subscriptionText(node["subscription_id"]) == id {
+				previousProvider = append(previousProvider, node)
+			}
+		}
+		// Apply already committed these nodes under the new configuration. Only
+		// acknowledge that generation; do not republish/reorder the same handlers.
+		if equalJSONObject(map[string]any{"nodes": previousProvider}, map[string]any{"nodes": providerNodes}) {
+			statuses[id] = map[string]any{"active_revision": revision, "fingerprint": fingerprint, "nodes_revision": nodesRevision, "last_attempt": now.UTC().Format(time.RFC3339Nano), "state": "active"}
+			return true, server.repository.saveAuxiliary("subscription-runtime-status", statuses)
+		}
+		for _, node := range providerNodes {
 			desired = append(desired, node)
 		}
 		operation, cancel := context.WithTimeout(ctx, subscriptionRuntimeActivationTimeout)
@@ -179,6 +209,9 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 		saveErr := server.repository.saveAuxiliary("subscription-runtime-status", statuses)
 		server.auditBackground("subscriptions.runtime", map[string]any{"id": id, "ok": activationErr == nil, "failure_stage": status["failure_stage"]})
 		return true, errors.Join(activationErr, saveErr)
+	}
+	if cacheable && subscriptionRuntimeSourcesUnchanged(sources) {
+		server.subscriptionRuntimeIdle = subscriptionRuntimeIdle{sources: sources, checked: now.UTC(), retryAt: retryAt}
 	}
 	return false, nil
 }

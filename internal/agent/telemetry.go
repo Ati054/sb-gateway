@@ -345,6 +345,9 @@ type remoteMeasurementResult struct {
 }
 
 func (collector *telemetryCollector) remoteMeasurements(ctx context.Context) remoteMeasurementResult {
+	if collector.opts.control != nil {
+		return collector.opts.control.remoteMeasurements(backgroundXrayCommandContext(ctx))
+	}
 	statsChannel := make(chan commandResult, 1)
 	onlineChannel := make(chan commandResult, 1)
 	go func() {
@@ -464,6 +467,11 @@ func parseXrayOnlineUsers(body []byte) (map[string]struct{}, error) {
 		}
 	}
 	visit(value, "")
+	normalizeOnlineUsers(result)
+	return result, nil
+}
+
+func normalizeOnlineUsers(result map[string]struct{}) {
 	for name := range result {
 		parts := strings.Split(name, ">>>")
 		if len(parts) == 1 {
@@ -474,7 +482,6 @@ func parseXrayOnlineUsers(body []byte) (map[string]struct{}, error) {
 			result[parts[1]] = struct{}{}
 		}
 	}
-	return result, nil
 }
 
 func parseNFTCounters(body []byte) (map[string]int64, error) {

@@ -123,6 +123,7 @@ type policyHealthState struct {
 	OutageBatchStartedAt   time.Time                         `json:"-"`
 	LastPreflightAt        float64                           `json:"-"`
 	PreflightClosed        map[string]bool                   `json:"-"`
+	historyStatsCache      *historyStatistics                `json:"-"`
 }
 
 type healthSample struct {
@@ -256,11 +257,15 @@ type healthController struct {
 }
 
 func runHealth(ctx context.Context, opts Options) error {
-	control, err := newXrayControlClient(opts.XrayAPIServer)
-	if err != nil {
-		return fmt.Errorf("initialize Xray control API: %w", err)
+	control := opts.control
+	if control == nil {
+		var err error
+		control, err = newXrayControlClient(opts.XrayAPIServer)
+		if err != nil {
+			return fmt.Errorf("initialize Xray control API: %w", err)
+		}
+		defer control.close()
 	}
-	defer control.close()
 	signals, closeSignals, signalErr := listenXrayFailureSignals(ctx, opts.XrayFailureSocket)
 	if signalErr != nil {
 		log.Printf("agent: Xray failure signals unavailable; periodic health checks remain active: %v", signalErr)
@@ -1034,15 +1039,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 			measured[candidate] = evidence
 		}
 	}
-	updateHistories(item, candidates, measured, now)
-	dailyStats := make(map[string]healthStats)
-	period7 := make(map[string]healthStats)
-	period30 := make(map[string]healthStats)
-	for _, candidate := range candidates {
-		dailyStats[candidate] = summarizeSamples(item.DailySamples[candidate])
-		period7[candidate] = summarizeDays(item.HistoryDays[candidate], 7, now)
-		period30[candidate] = summarizeDays(item.HistoryDays[candidate], historyRetentionDays, now)
-	}
+	dailyStats, period7, period30 := refreshHistoryStatistics(item, candidates, measured, now)
 
 	qualityOK := make(map[string]bool)
 	availabilityOK := make(map[string]bool)

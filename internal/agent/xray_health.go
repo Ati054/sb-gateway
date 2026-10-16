@@ -49,6 +49,7 @@ type xraySelectorRuntime struct {
 	probeSelector     string
 	probeContext      context.Context
 	control           *xrayControlClient
+	outboundEncoder   xrayOutboundEncoder
 }
 
 type pendingOutbound struct {
@@ -96,6 +97,7 @@ func newXraySelectorRuntime(opts Options) *xraySelectorRuntime {
 	return &xraySelectorRuntime{
 		opts:            opts,
 		command:         runXrayCommand,
+		outboundEncoder: newXrayOutboundEncoder(),
 		poolCache:       &healthPoolCache{},
 		loadedDynamic:   make(map[string]bool),
 		verifiedDynamic: make(map[string]time.Time),
@@ -702,29 +704,13 @@ func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
 		return err
 	}
 	outbound["tag"] = tag
-	body, err := json.Marshal(map[string]any{"outbounds": []any{outbound}})
+	add, cleanup, err := runtime.prepareOutboundAddition(outbound)
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp("", "sb-urltest-*.json")
-	if err != nil {
-		return err
-	}
-	path := temporary.Name()
-	defer os.Remove(path)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(body, '\n')); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
+	defer cleanup()
 	for attempt := 0; attempt < 2; attempt++ {
-		_, commandErr := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "ado", "--server="+runtime.opts.XrayAPIServer, path)
+		commandErr := add()
 		if !repair && attempt == 0 && commandErr == nil {
 			break
 		}
@@ -735,7 +721,7 @@ func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
 		if present {
 			break
 		}
-		// A timed-out CLI may never have reached HandlerService. Read back
+		// A timed-out call may never have reached HandlerService. Read back
 		// absence before one bounded retry; never duplicate an uncertain add.
 		if attempt == 0 && errors.Is(commandErr, context.DeadlineExceeded) && runtime.requestContext().Err() == nil {
 			continue
@@ -746,6 +732,62 @@ func (runtime *xraySelectorRuntime) ensureOutbound(nodeID, tag string) error {
 	delete(runtime.unknownDynamic, tag)
 	runtime.verifiedDynamic[tag] = time.Now()
 	return nil
+}
+
+type xrayOutboundEncoder func(map[string]any) ([]byte, error)
+
+func encodeXrayOutboundSafely(encode xrayOutboundEncoder, outbound map[string]any) (body []byte, err error) {
+	// Preserve the old CLI's fault boundary when compiling untrusted node data.
+	// Never attach compiler/panic text that can include credentials or UUIDs.
+	defer func() {
+		if recover() != nil {
+			body = nil
+			err = errors.New("Xray dynamic outbound configuration is invalid")
+		}
+	}()
+	body, err = encode(outbound)
+	if err != nil {
+		return nil, errors.New("Xray dynamic outbound configuration is invalid")
+	}
+	return body, nil
+}
+
+func (runtime *xraySelectorRuntime) prepareOutboundAddition(outbound map[string]any) (func() error, func(), error) {
+	if runtime.control != nil && runtime.outboundEncoder != nil {
+		encoded, err := encodeXrayOutboundSafely(runtime.outboundEncoder, outbound)
+		if err != nil {
+			return nil, nil, err
+		}
+		return func() error { return runtime.control.add(runtime.requestContext(), encoded) }, func() {}, nil
+	}
+	body, err := json.Marshal(map[string]any{"outbounds": []any{outbound}})
+	if err != nil {
+		return nil, nil, err
+	}
+	temporary, err := os.CreateTemp("", "sb-urltest-*.json")
+	if err != nil {
+		return nil, nil, err
+	}
+	path := temporary.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		cleanup()
+		return nil, nil, err
+	}
+	if _, err := temporary.Write(append(body, '\n')); err != nil {
+		temporary.Close()
+		cleanup()
+		return nil, nil, err
+	}
+	if err := temporary.Close(); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return func() error {
+		_, commandErr := runtime.command(runtime.requestContext(), 5*time.Second, runtime.opts.XrayBinary, "api", "ado", "--server="+runtime.opts.XrayAPIServer, path)
+		return commandErr
+	}, cleanup, nil
 }
 
 func (runtime *xraySelectorRuntime) outboundPresent(tag string) (bool, error) {
