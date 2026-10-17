@@ -23,7 +23,7 @@ type subscriptionRuntimeIdle struct {
 func subscriptionRuntimeSources(paths ...string) ([]subscriptionRuntimeSource, bool) {
 	result := make([]subscriptionRuntimeSource, 0, len(paths))
 	for _, path := range paths {
-		info, err := os.Stat(path)
+		info, err := statFileIdentity(path)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, false
 		}

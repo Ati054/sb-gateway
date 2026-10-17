@@ -80,7 +80,7 @@ func revisionFor(value any) (string, error) {
 }
 
 func (repository *stateRepository) readJSON(path string) (map[string]any, error) {
-	info, err := os.Stat(path)
+	info, err := statFileIdentity(path)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func (repository *stateRepository) writeJSON(path string, value map[string]any) 
 	if err := writeAtomic(path, body, 0o600, true); err != nil {
 		return err
 	}
-	info, err := os.Stat(path)
+	info, err := statFileIdentity(path)
 	if err != nil {
 		delete(repository.cache, path)
 		return err
