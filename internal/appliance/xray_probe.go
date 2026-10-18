@@ -11,6 +11,20 @@ import (
 	"github.com/sb-gateway/sb-gateway/internal/runtimeproof"
 )
 
+// /run may survive a container restart. Clear proofs before any component,
+// including the watchdog, can mistake the previous startup for this one.
+func resetXrayStartupProof(options Options) error {
+	for _, path := range []string{options.XrayReadyFile, options.XrayValidatedFile} {
+		if path == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // An open API port precedes selector restoration and transparent routing.
 // Keep Apply guarded until startup has finished for this exact core/config.
 func xrayStartupProbe(options Options, procRoot string) func(context.Context) error {

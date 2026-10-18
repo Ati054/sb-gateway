@@ -161,6 +161,9 @@ func Configure(role Role, requested string) int64 {
 		limit = configureACMELoan(plan, requested)
 	}
 	debug.SetMemoryLimit(limit)
+	if role == Gateway {
+		startACMEPressureMonitor()
+	}
 	return limit
 }
 

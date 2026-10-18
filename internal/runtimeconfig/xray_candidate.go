@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -111,6 +112,14 @@ func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandida
 	if textDefault(networking["remote_ipv6_mode"], "proxy_only") == "proxy_only" {
 		queryStrategy = "UseIP"
 	}
+	levels := map[string]any{"0": map[string]any{
+		"statsUserUplink": true, "statsUserDownlink": true, "statsUserOnline": true,
+	}}
+	if len(dnsArtifacts.Runtime.Lanes) != 0 {
+		// DNS forwarding must not retain each completed UDP exchange for the
+		// ordinary five-minute connection idle. Active exchanges refresh this timer.
+		levels[strconv.Itoa(policyDNSUserLevel)] = map[string]any{"connIdle": policyDNSConnectionIdleSeconds}
+	}
 	xray := map[string]any{
 		"log": map[string]any{
 			"access": "none", "error": "/logs/xray-error.log",
@@ -124,9 +133,7 @@ func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandida
 			"servers": []string{internalServer}, "queryStrategy": queryStrategy, "disableCache": false,
 		},
 		"policy": map[string]any{
-			"levels": map[string]any{"0": map[string]any{
-				"statsUserUplink": true, "statsUserDownlink": true, "statsUserOnline": true,
-			}},
+			"levels": levels,
 			"system": map[string]any{
 				"statsInboundUplink": false, "statsInboundDownlink": false,
 				"statsOutboundUplink": false, "statsOutboundDownlink": false,

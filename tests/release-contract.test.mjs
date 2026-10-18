@@ -99,3 +99,14 @@ test("public security documentation excludes private acceptance reports", async 
   assert.ok(verifier.includes('"$revision" -- docs'));
   assert.ok(verifier.includes("private acceptance report exists in public documentation history"));
 });
+
+test("operational documentation contains procedures rather than internal receipts", async () => {
+  const receipt = /На CHR .* составил|При первоначальной проверке|Chrome \d+\/\d+ px|\d{4}-\d{2}-\d{2} реальные ответы|конкретного failover на CHR|ранее наблюдавшегося/;
+  for (const name of ["OPERATIONS", "TROUBLESHOOTING", "cdn-origin-feeds", "shared-tcp-ingress"]) {
+    const source = await readFile(new URL(`../docs/${name}.md`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, receipt, name);
+  }
+  const verifier = await readFile(new URL("../scripts/verify-public-tree.sh", import.meta.url), "utf8");
+  assert.ok(verifier.includes('"$private_report_pattern" -- docs'));
+  assert.ok(verifier.includes("internal verification receipt exists in current public documentation"));
+});

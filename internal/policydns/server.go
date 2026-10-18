@@ -55,6 +55,7 @@ type service struct {
 	runtimeMu  sync.RWMutex
 	runtime    *runtime
 	limit      chan struct{}
+	pending    chan struct{}
 	tcpLimit   chan struct{}
 	closers    []io.Closer
 	wait       sync.WaitGroup
@@ -69,9 +70,11 @@ func Serve(ctx context.Context, path string, options Options) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	service := &service{
-		ctx:      ctx,
-		runtime:  current,
-		limit:    make(chan struct{}, options.Workers),
+		ctx:     ctx,
+		runtime: current,
+		limit:   make(chan struct{}, options.Workers),
+		// Bound burst buffering without increasing concurrent upstream work.
+		pending:  make(chan struct{}, options.Workers*4),
 		tcpLimit: make(chan struct{}, options.TCPSessions),
 	}
 	service.udpBuffers.New = func() any { return new([maxDNSMessage]byte) }
@@ -171,12 +174,11 @@ func (service *service) releaseTCP() {
 	<-service.tcpLimit
 }
 
-func (service *service) resolve(laneID string, query []byte) ([]byte, error) {
-	service.runtimeMu.RLock()
-	defer service.runtimeMu.RUnlock()
-	ctx, cancel := context.WithTimeout(service.context(), service.runtime.timeout)
-	defer cancel()
-	return service.runtime.resolve(ctx, laneID, query)
+func (service *service) overloadResponse(laneID string, query []byte) []byte {
+	if answer, local := service.localAnswer(laneID, query); local {
+		return answer
+	}
+	return refusal(query, true)
 }
 
 func (service *service) context() context.Context {
@@ -202,21 +204,23 @@ func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 			return
 		}
 		query := buffer[:size]
-		if !service.acquire() {
-			_, _ = connection.WriteTo(refusal(query, true), address)
+		admission := service.admitQuery(laneID, query)
+		if admission.immediate {
+			if len(admission.answer) > 0 {
+				_, _ = connection.WriteTo(admission.answer, address)
+			}
 			service.udpBuffers.Put(buffer)
 			continue
 		}
 		service.wait.Add(1)
-		go func(query []byte, buffer *[maxDNSMessage]byte, address net.Addr) {
+		go func(admission queryAdmission, query []byte, buffer *[maxDNSMessage]byte, address net.Addr) {
 			defer service.wait.Done()
-			defer service.release()
 			defer service.udpBuffers.Put(buffer)
-			response, resolveErr := service.resolve(laneID, query)
+			response, resolveErr := service.resolveAdmitted(admission, laneID, query)
 			if resolveErr == nil && len(response) > 0 {
 				_, _ = connection.WriteTo(response, address)
 			}
-		}(query, buffer, address)
+		}(admission, query, buffer, address)
 	}
 }
 
@@ -257,18 +261,9 @@ func (service *service) serveTCP(laneID string, listener net.Listener) {
 				if _, err := io.ReadFull(connection, query); err != nil {
 					return
 				}
-				if !service.acquire() {
-					answer := refusal(query, true)
-					frame := make([]byte, 2+len(answer))
-					binary.BigEndian.PutUint16(frame[:2], uint16(len(answer)))
-					copy(frame[2:], answer)
-					if err := writeAll(connection, frame); err != nil {
-						return
-					}
-					continue
-				}
-				answer, err := service.resolve(laneID, query)
-				service.release()
+				admission := service.admitQuery(laneID, query)
+				_ = connection.SetDeadline(admission.deadline)
+				answer, err := service.resolveAdmitted(admission, laneID, query)
 				if err != nil || len(answer) > maxDNSMessage {
 					return
 				}

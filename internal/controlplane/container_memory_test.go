@@ -56,6 +56,10 @@ func TestContainerMemoryRejectsUnsafeLiveState(t *testing.T) {
 		{"ambiguous", `[{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root"},{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root"}]`, 320, 384, 409},
 		{"unowned", `[{"comment":"other","root-dir":"/usb1/sb-gateway/root"}]`, 320, 384, 409},
 		{"unchanged", `[{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","stopped":"false","memory-high":"224MiB","memory-max":"256MiB","memory-current":"140MiB"}]`, 224, 256, 200},
+		{"unchanged-omitted-false-flag", `[{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","memory-high":"224MiB","memory-max":"256MiB","memory-current":"140MiB"}]`, 224, 256, 200},
+		{"missing-live-usage", `[{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","memory-high":"224MiB","memory-max":"256MiB"}]`, 224, 256, 409},
+		{"zero-live-usage", `[{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","memory-high":"224MiB","memory-max":"256MiB","memory-current":"0"}]`, 224, 256, 409},
+		{"stopped-with-stale-usage", `[{"comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","stopped":"true","memory-high":"224MiB","memory-max":"256MiB","memory-current":"140MiB"}]`, 224, 256, 409},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			router := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,101 +93,111 @@ func TestContainerMemoryReadbackRequiresRootLimitsAndHealth(t *testing.T) {
 		{"queued", "/usb1/sb-gateway/root", "320MiB", "true", "future", "scheduled"},
 		{"queued-expired", "/usb1/sb-gateway/root", "320MiB", "true", "past", "unconfirmed"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			router := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "GET" && r.URL.Path == "/rest/system/scheduler" {
-					w.Header().Set("Content-Type", "application/json")
-					if strings.HasPrefix(tc.name, "queued") {
-						_, _ = w.Write([]byte(`[{"name":"SB-GATEWAY-container-memory-once"}]`))
-					} else {
-						_, _ = w.Write([]byte(`[]`))
+		for _, operationRoot := range []string{"/usb1/sb-gateway/root", "usb1/sb-gateway/root"} {
+			t.Run(tc.name+"/"+operationRoot, func(t *testing.T) {
+				router := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == "GET" && r.URL.Path == "/rest/system/scheduler" {
+						w.Header().Set("Content-Type", "application/json")
+						if strings.HasPrefix(tc.name, "queued") {
+							_, _ = w.Write([]byte(`[{"name":"SB-GATEWAY-container-memory-once"}]`))
+						} else {
+							_, _ = w.Write([]byte(`[]`))
+						}
+						return
 					}
-					return
+					if r.Method != "GET" || r.URL.Path != "/rest/container" {
+						t.Errorf("unexpected call: %s %s", r.Method, r.URL.Path)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode([]map[string]any{{"comment": "SB-GATEWAY container", "root-dir": tc.root, "memory-high": tc.high, "memory-max": "384MiB", "healthy": tc.healthy}})
+				}))
+				defer router.Close()
+				server := newTestServer(t)
+				cookie, _ := bootstrapSession(t, server)
+				activateMemoryTestRouter(t, server, router)
+				deadline := server.now().Add(time.Minute)
+				if tc.deadline == "past" {
+					deadline = server.now().Add(-time.Minute)
 				}
-				if r.Method != "GET" || r.URL.Path != "/rest/container" {
-					t.Errorf("unexpected call: %s %s", r.Method, r.URL.Path)
-					return
+				if err := server.repository.saveAuxiliary(containerMemoryOperation, map[string]any{"pending": true, "state": "scheduled", "root_dir": operationRoot, "high_bytes": 320 << 20, "max_bytes": 384 << 20, "deadline": deadline.UTC().Format(time.RFC3339Nano)}); err != nil {
+					t.Fatal(err)
 				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode([]map[string]any{{"comment": "SB-GATEWAY container", "root-dir": tc.root, "memory-high": tc.high, "memory-max": "384MiB", "healthy": tc.healthy}})
-			}))
-			defer router.Close()
-			server := newTestServer(t)
-			cookie, _ := bootstrapSession(t, server)
-			activateMemoryTestRouter(t, server, router)
-			deadline := server.now().Add(time.Minute)
-			if tc.deadline == "past" {
-				deadline = server.now().Add(-time.Minute)
-			}
-			if err := server.repository.saveAuxiliary(containerMemoryOperation, map[string]any{"pending": true, "state": "scheduled", "root_dir": "/usb1/sb-gateway/root", "high_bytes": 320 << 20, "max_bytes": 384 << 20, "deadline": deadline.UTC().Format(time.RFC3339Nano)}); err != nil {
-				t.Fatal(err)
-			}
-			r := performRequest(t, server, http.MethodGet, apiPrefix+"/routeros/container/memory", nil, nil, cookie)
-			if r.Code != 200 {
-				t.Fatalf("status %d: %s", r.Code, r.Body.String())
-			}
-			op, err := server.repository.auxiliary(containerMemoryOperation)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if op["state"] != tc.state || op["pending"] != (tc.state == "scheduled" || strings.HasPrefix(tc.name, "queued")) {
-				t.Fatalf("unexpected operation: %#v", op)
-			}
-		})
+				r := performRequest(t, server, http.MethodGet, apiPrefix+"/routeros/container/memory", nil, nil, cookie)
+				if r.Code != 200 {
+					t.Fatalf("status %d: %s", r.Code, r.Body.String())
+				}
+				op, err := server.repository.auxiliary(containerMemoryOperation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if op["state"] != tc.state || op["pending"] != (tc.state == "scheduled" || strings.HasPrefix(tc.name, "queued")) {
+					t.Fatalf("unexpected operation: %#v", op)
+				}
+			})
+		}
 	}
 }
 
 func TestContainerMemorySchedulesOwnedOneShotWithoutLivePatch(t *testing.T) {
-	var worker string
-	var scheduled bool
-	router := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == "GET" && r.URL.Path == "/rest/container":
-			_, _ = w.Write([]byte(`[{".id":"*1","comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","stopped":"false","memory-high":"224.0MiB","memory-max":"256.0MiB","memory-current":"140.0MiB"}]`))
-		case r.Method == "GET" && (r.URL.Path == "/rest/system/script" || r.URL.Path == "/rest/system/scheduler"):
-			_, _ = w.Write([]byte(`[]`))
-		case r.Method == "PUT" && r.URL.Path == "/rest/system/script":
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			worker = text(body["source"])
-			_, _ = w.Write([]byte(`{".id":"*2"}`))
-		case r.Method == "PUT" && r.URL.Path == "/rest/system/scheduler":
-			scheduled = true
-			_, _ = w.Write([]byte(`{".id":"*3"}`))
-		default:
-			t.Errorf("unexpected RouterOS call: %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected", 404)
-		}
-	}))
-	defer router.Close()
-	server := newTestServer(t)
-	cookie, csrf := bootstrapSession(t, server)
-	configureLifecycleRouter(t, server, router)
-	config, err := server.getDraft()
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, err := server.repository.stageGeneration(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "memory-test", CommittedAt: server.now()}); err != nil {
-		t.Fatal(err)
-	}
-	body := map[string]any{"memory_high_mib": 320, "memory_max_mib": 384, "confirmation": "ПЕРЕЗАПУСТИТЬ"}
-	r := performRequest(t, server, http.MethodPost, apiPrefix+"/routeros/container/memory", body, map[string]string{csrfHeader: csrf}, cookie)
-	if r.Code != 202 || !scheduled || !strings.Contains(worker, "memory-high=335544320 memory-max=402653184") {
-		t.Fatalf("memory change not scheduled: %d %s", r.Code, r.Body.String())
-	}
-	hint, err := server.repository.auxiliary("memory-budget-limits")
-	hintHigh, _ := numberToInt64(hint["high_bytes"])
-	hintMax, _ := numberToInt64(hint["max_bytes"])
-	if err != nil || hintHigh != 224<<20 || hintMax != 256<<20 {
-		t.Fatalf("unconfirmed increase changed fallback: %v %v", hint, err)
-	}
-	retry := performRequest(t, server, http.MethodPost, apiPrefix+"/routeros/container/memory", body, map[string]string{csrfHeader: csrf}, cookie)
-	if retry.Code != 409 {
-		t.Fatalf("duplicate change accepted: %d", retry.Code)
+	for _, state := range []string{"explicit-false", "omitted-false"} {
+		t.Run(state, func(t *testing.T) {
+			var worker string
+			var scheduled bool
+			router := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == "GET" && r.URL.Path == "/rest/container":
+					row := `[{".id":"*1","comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root","stopped":"false","memory-high":"224.0MiB","memory-max":"256.0MiB","memory-current":"140.0MiB"}]`
+					if state == "omitted-false" {
+						row = strings.Replace(row, `"stopped":"false",`, "", 1)
+					}
+					_, _ = w.Write([]byte(row))
+				case r.Method == "GET" && (r.URL.Path == "/rest/system/script" || r.URL.Path == "/rest/system/scheduler"):
+					_, _ = w.Write([]byte(`[]`))
+				case r.Method == "PUT" && r.URL.Path == "/rest/system/script":
+					var body map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					worker = text(body["source"])
+					_, _ = w.Write([]byte(`{".id":"*2"}`))
+				case r.Method == "PUT" && r.URL.Path == "/rest/system/scheduler":
+					scheduled = true
+					_, _ = w.Write([]byte(`{".id":"*3"}`))
+				default:
+					t.Errorf("unexpected RouterOS call: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected", 404)
+				}
+			}))
+			defer router.Close()
+			server := newTestServer(t)
+			cookie, csrf := bootstrapSession(t, server)
+			configureLifecycleRouter(t, server, router)
+			config, err := server.getDraft()
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision, err := server.repository.stageGeneration(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "memory-test", CommittedAt: server.now()}); err != nil {
+				t.Fatal(err)
+			}
+			body := map[string]any{"memory_high_mib": 320, "memory_max_mib": 384, "confirmation": "ПЕРЕЗАПУСТИТЬ"}
+			r := performRequest(t, server, http.MethodPost, apiPrefix+"/routeros/container/memory", body, map[string]string{csrfHeader: csrf}, cookie)
+			if r.Code != 202 || !scheduled || !strings.Contains(worker, "memory-high=335544320 memory-max=402653184") {
+				t.Fatalf("memory change not scheduled: %d %s", r.Code, r.Body.String())
+			}
+			hint, err := server.repository.auxiliary("memory-budget-limits")
+			hintHigh, _ := numberToInt64(hint["high_bytes"])
+			hintMax, _ := numberToInt64(hint["max_bytes"])
+			if err != nil || hintHigh != 224<<20 || hintMax != 256<<20 {
+				t.Fatalf("unconfirmed increase changed fallback: %v %v", hint, err)
+			}
+			retry := performRequest(t, server, http.MethodPost, apiPrefix+"/routeros/container/memory", body, map[string]string{csrfHeader: csrf}, cookie)
+			if retry.Code != 409 {
+				t.Fatalf("duplicate change accepted: %d", retry.Code)
+			}
+		})
 	}
 }

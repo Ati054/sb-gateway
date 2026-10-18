@@ -213,6 +213,7 @@ func TestRecoveryArchiveSkipsReconstructedRuntimeState(t *testing.T) {
 		"rulesets-update.json",
 		"runtime-status.json",
 		"selector-health.json",
+		"selector-runtime.json",
 		"subscription-refresh-status.json",
 		"subscription-runtime-operation.json",
 		"subscription-runtime-status.json",

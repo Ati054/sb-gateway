@@ -118,13 +118,13 @@ func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
 	for _, fragment := range []string{
 		`:if ([:len $dnsNat] != 1) do={ :return false }`,
 		`find where dst-address~":53\$"`,
-		`($dnsFlows, [/ip/firewall/connection/find where dst-port=53])`,
+		`($dnsFlows, [/ip/firewall/connection/find where dst-port=53 and dstnat=no])`,
 		`:foreach flow in=$dnsFlows do={`,
 		`:if ([:typeof $sourceColon] = "num") do={ :set source [:pick $source 0 $sourceColon] }`,
 		`:if ([:typeof $destinationColon] = "num") do={ :set destinationIP [:pick $destinationIP 0 $destinationColon] }`,
 		`:local sourceIP [:toip $source]`,
 		`:local connectionMark [/ip/firewall/connection/get $flow connection-mark]`,
-		`:if ([:len [:tostr $connectionMark]] = 0) do={`,
+		`:if (([:len [:tostr $connectionMark]] = 0) && ([/ip/firewall/connection/get $flow dstnat] = false)) do={`,
 		`($protocol = "udp") || ($protocol = "tcp")`,
 		`($localDestination = true) && ([:tostr $sourceIP] != [:tostr $containerIP])`,
 		`list="SB_MANAGED_CLIENTS"`,
@@ -134,5 +134,30 @@ func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
 		if !strings.Contains(source, fragment) {
 			t.Fatalf("missing DNS cleanup scope: %s", fragment)
 		}
+	}
+}
+
+func TestWatchdogSerializesRecoveryAndPurgesOnlyOnTransition(t *testing.T) {
+	source := HealthWatchdogSource()
+	guard := strings.Index(source, `:if ([/system/script/job/print count-only as-value where script=[:jobname]] <= 1) do={`)
+	if guard < 0 || guard > strings.Index(source, `/system/script/run SB-GATEWAY-watchdog-config`) {
+		t.Fatal("concurrent health jobs must exit without changing state")
+	}
+	enable := strings.Index(source, `/ip/firewall/mangle/enable $gate`)
+	cleanup := strings.Index(source, "      $clearRecoveredDNS")
+	if state := strings.Index(source[enable:], `:set sbFailOpen false`); state < 0 || enable+state > cleanup {
+		t.Fatal("recovery state must commit before DNS maintenance")
+	}
+	transition := strings.Index(source, `:if (($gateWasEnabled = true) || ($sbFailOpen = false)) do={`)
+	if transition < 0 || !strings.Contains(source[transition:], `/ip/firewall/connection/remove [find where connection-mark="sb-managed"]`) {
+		t.Fatal("outage cleanup must be limited to the state transition")
+	}
+	flow := strings.Index(source, `:foreach flow in=$dnsFlows do={`)
+	if flow < 0 || strings.Contains(source[flow:cleanup], `/ip/address/find`) ||
+		strings.Contains(source[flow:cleanup], `/ip/firewall/address-list/find`) {
+		t.Fatal("router addresses and managed prefixes must be read once, not per flow")
+	}
+	if strings.Count(source, "and dstnat=no") != 2 {
+		t.Fatal("already translated DNS flows must be excluded before enumeration")
 	}
 }

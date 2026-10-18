@@ -13,11 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
+	"github.com/sb-gateway/sb-gateway/internal/runtimeproof"
 )
 
 var apiCollections = map[string]string{
@@ -157,14 +157,9 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 	marker := envOr("SB_ROUTER_READY_MARKER", "/run/sb-gateway/router-ready")
 	age := -1
 	ready := false
-	if body, readErr := os.ReadFile(marker); readErr == nil {
-		text := strings.TrimSpace(string(body))
-		if len(text) <= 12 {
-			if issued, parseErr := strconv.ParseInt(text, 10, 64); parseErr == nil {
-				age = int(server.now().Unix() - issued)
-				ready = active != nil && age >= 0 && age <= ttl
-			}
-		}
+	if leaseAge, valid := runtimeproof.ReadinessLeaseAge(marker, server.now()); valid {
+		age = int(leaseAge)
+		ready = active != nil && age <= ttl
 	}
 	mountsWritable, blockedMounts := server.checkPersistentMounts()
 	applyOperation, _ := server.repository.auxiliary("apply-operation")
@@ -228,9 +223,9 @@ func plannedHotPolicyReadiness(operation map[string]any, liveApply bool) bool {
 
 // trafficReadiness is deliberately stricter than the image probation health
 // endpoint. A new container may be healthy enough to keep while its selected
-// full-tunnel exits are still being restored. RouterOS keeps the diversion
-// gate disabled (ordinary WAN or the configured fail-closed rule) until every
-// enabled local full-tunnel policy has a confirmed, non-blocking selector.
+// exits are still being restored. Every local policy needs a fresh confirmed
+// selector. A confirmed blackhole is a policy outage, not a container outage:
+// keep unrelated policies active and enforce that policy's fail-closed route.
 func (server *Server) trafficReadiness(response http.ResponseWriter, request *http.Request) {
 	active, err := server.repository.loadActive()
 	if errors.Is(err, os.ErrNotExist) {
@@ -282,7 +277,7 @@ func trafficReadyPolicies(active, selector map[string]any, notBefore time.Time) 
 		selected := strings.TrimSpace(text(item["runtime_selected"]))
 		observed, observedErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(text(item["runtime_observed_at"])))
 		fresh := notBefore.IsZero() || (observedErr == nil && !observed.Before(notBefore))
-		if item["runtime_confirmed"] != true || selected == "" || selected == "block" || !fresh {
+		if item["runtime_confirmed"] != true || selected == "" || !fresh {
 			pending = append(pending, policyID)
 		}
 	}
@@ -296,14 +291,7 @@ func routerReadinessLeaseTTL(active map[string]any) int {
 	// lease; RouterOS still applies its own failure threshold before fail-open.
 	// Keeping the two hysteresis layers independent avoids the former 45s lease
 	// multiplying into roughly a minute before ordinary WAN access returned.
-	ttl := interval*2 + 5
-	if ttl < 15 {
-		ttl = 15
-	}
-	if ttl > 900 {
-		ttl = 900
-	}
-	return ttl
+	return runtimeproof.ReadinessLeaseTTL(interval)
 }
 
 func (server *Server) status(response http.ResponseWriter, request *http.Request) {

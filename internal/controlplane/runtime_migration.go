@@ -21,7 +21,8 @@ const maxRuntimeMigrationArtifactBytes = 32 << 20
 var ErrProbeContractMigration = errors.New("startup probe contract reconciliation failed")
 
 // MigrateLegacyDynamicRuntime reconciles legacy outbounds, probe contracts and
-// active GeoIP rules from the committed generation before Xray starts.
+// active GeoIP rules and DNS idle policies from the committed generation before
+// Xray starts.
 func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bool, result error) {
 	probeMigration := false
 	defer func() {
@@ -92,7 +93,11 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 	if err != nil {
 		return false, err
 	}
-	if !legacy && !probeMigration && !domainMigration {
+	dnsIdleMigration, err := legacyDNSIdleRuntime(opts.Runtime.XrayConfig)
+	if err != nil {
+		return false, err
+	}
+	if !legacy && !probeMigration && !domainMigration && !dnsIdleMigration {
 		return false, nil
 	}
 	if !safeRevision(revision) {
@@ -157,6 +162,14 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 		return false, fmt.Errorf("record migrated runtime revision: %w", err)
 	}
 	return true, nil
+}
+
+func legacyDNSIdleRuntime(path string) (bool, error) {
+	body, err := readRuntimeMigrationArtifact(path)
+	if err != nil || len(body) == 0 {
+		return false, err
+	}
+	return runtimeconfig.LegacyPolicyDNSIdle(body)
 }
 
 func legacyDomainRuntime(path string) (bool, error) {

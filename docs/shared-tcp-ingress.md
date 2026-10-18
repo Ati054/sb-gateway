@@ -128,9 +128,9 @@ SNI не маршрутизируется. Индивидуальная прив
 
 Профильные Go-тесты покрывают конфликты SNI, резервирование портов, отдельные
 слушатели, PROXY settings всех трёх Reality-транспортов, восстановление CIDR,
-порядок рестартов и pre-apply guard. UI: TypeScript, Node contract tests,
-изолированный React fixture из production Toggle/JSX/CSS на 1440 и 390 px,
-переключение с клавиатуры и отсутствие горизонтального переполнения.
+порядок рестартов и pre-apply guard. Проверка UI должна включать TypeScript,
+Node contract tests, переключение с клавиатуры и отсутствие горизонтального
+переполнения на мобильном и настольном экранах.
 
 `SB_SHARED_LIVE_NGINX=1 go test ./internal/runtimeconfig -run
 TestSharedIngressLiveNginx -v` запускается только в изолированном Linux-контейнере

@@ -2,6 +2,7 @@ package runtimeconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,6 +24,29 @@ func TestCompilePolicyDNSEmptySource(t *testing.T) {
 	}
 	if len(artifacts.XrayInbounds) != 0 || len(artifacts.XrayOutbounds) != 0 || len(artifacts.XrayRules) != 0 {
 		t.Fatal("empty policy DNS source produced Xray wiring")
+	}
+}
+
+func TestLegacyPolicyDNSIdle(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		body    string
+		legacy  bool
+		invalid bool
+	}{
+		{"no lanes", `{"outbounds":[{"tag":"direct","protocol":"freedom"}]}`, false, false},
+		{"old lane", `{"outbounds":[{"tag":"dns-policy-lane-0","protocol":"freedom","settings":{}}]}`, true, false},
+		{"missing policy", `{"outbounds":[{"tag":"dns-policy-lane-0","protocol":"freedom","settings":{"userLevel":100}}]}`, true, false},
+		{"wrong idle", `{"policy":{"levels":{"100":{"connIdle":300}}},"outbounds":[{"tag":"dns-policy-lane-0","protocol":"freedom","settings":{"userLevel":100}}]}`, true, false},
+		{"current", `{"policy":{"levels":{"100":{"connIdle":30}}},"outbounds":[{"tag":"dns-policy-lane-0","protocol":"freedom","settings":{"userLevel":100}}]}`, false, false},
+		{"invalid", `{"outbounds":`, false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			legacy, err := LegacyPolicyDNSIdle([]byte(test.body))
+			if legacy != test.legacy || (err != nil) != test.invalid {
+				t.Fatalf("legacy=%t err=%v", legacy, err)
+			}
+		})
 	}
 }
 
@@ -73,6 +97,19 @@ func TestCompilePolicyDNSMatchesCurrentArtifactContract(t *testing.T) {
 
 	if len(artifacts.XrayInbounds) != 1 || artifacts.XrayInbounds[0]["tag"] != "dns-upstream-1" {
 		t.Fatalf("unexpected tunnel inbounds: %#v", artifacts.XrayInbounds)
+	}
+	if len(artifacts.XrayOutbounds) != len(artifacts.Runtime.Lanes) {
+		t.Fatal("DNS forwarding outbounds must correspond to lanes")
+	}
+	for index, outbound := range artifacts.XrayOutbounds {
+		settings := objectValue(outbound["settings"])
+		if outbound["protocol"] != "freedom" || settings["userLevel"] != policyDNSUserLevel ||
+			settings["redirect"] != "127.0.0.1:"+fmt.Sprint(artifacts.Runtime.Lanes[index].Port) {
+			t.Fatalf("DNS lane lost its isolated forwarding policy: %#v", outbound)
+		}
+	}
+	if policyDNSConnectionIdleSeconds <= 15 {
+		t.Fatal("DNS forwarding idle must exceed the maximum resolver query timeout")
 	}
 	if got := artifacts.XrayRules[0]["balancerTag"]; got != "europe" {
 		t.Fatalf("encrypted resolver did not retain selectable detour: %#v", artifacts.XrayRules[0])

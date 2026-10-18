@@ -54,6 +54,8 @@
 # with `test` is required to see and update the admin-owned global hysteresis
 # state. This fixed project script receives neither `password` nor `sensitive`.
 /system/script/add name="SB-GATEWAY-health-watchdog" policy=ftp,read,write,policy,test source={
+  # A slow fetch or recovery must not overlap the next scheduler invocation.
+  :if ([/system/script/job/print count-only as-value where script=[:jobname]] <= 1) do={
   :local configLoaded true
   :do { /system/script/run SB-GATEWAY-watchdog-config } on-error={ :set configLoaded false }
   :global "SB_HEALTH_URL"
@@ -105,13 +107,34 @@
     :if ([:len $dnsNat] != 1) do={ :return false }
     :local containerIP [/ip/firewall/nat/get $dnsNat to-addresses]
     # Conntrack exposes an absent mark as empty, not the rule keyword no-mark.
-    :local dnsFlows [/ip/firewall/connection/find where dst-address~":53\$"]
+    :local dnsFlows [/ip/firewall/connection/find where dst-address~":53\$" and dstnat=no]
     # Newer RouterOS exposes endpoint ports separately; support both forms.
-    :do { :set dnsFlows ($dnsFlows, [/ip/firewall/connection/find where dst-port=53]) } on-error={}
+    :do { :set dnsFlows ($dnsFlows, [/ip/firewall/connection/find where dst-port=53 and dstnat=no]) } on-error={}
+    :if ([:len $dnsFlows] = 0) do={ :return true }
+    :local localIPs [:toarray ""]
+    :foreach address in=[/ip/address/find] do={
+      :local prefix [:tostr [/ip/address/get $address address]]
+      :set localIPs ($localIPs, [:pick $prefix 0 [:find $prefix "/"]])
+    }
+    :local networks [:toarray ""]
+    :local networkBits [:toarray ""]
+    :foreach entry in=[/ip/firewall/address-list/find where list="SB_MANAGED_CLIENTS"] do={
+      :local prefix [:tostr [/ip/firewall/address-list/get $entry address]]
+      :local slash [:find $prefix "/"]
+      :local bits 32
+      :local network $prefix
+      :if ([:typeof $slash] != "nil") do={ :set network [:pick $prefix 0 $slash]; :set bits [:tonum [:pick $prefix ($slash + 1) [:len $prefix]]] }
+      :local networkIP [:toip $network]
+      :if (([:typeof $networkIP] = "ip") && ([:typeof $bits] = "num") && ($bits >= 0) && ($bits <= 32)) do={
+        :set networks ($networks, $networkIP)
+        :set networkBits ($networkBits, $bits)
+      }
+    }
+    :if ([:len $networks] = 0) do={ :return true }
     :foreach flow in=$dnsFlows do={
       :do {
       :local connectionMark [/ip/firewall/connection/get $flow connection-mark]
-      :if ([:len [:tostr $connectionMark]] = 0) do={
+      :if (([:len [:tostr $connectionMark]] = 0) && ([/ip/firewall/connection/get $flow dstnat] = false)) do={
       :local protocol [/ip/firewall/connection/get $flow protocol]
       :if (($protocol = "udp") || ($protocol = "tcp")) do={
         :local source [:tostr [/ip/firewall/connection/get $flow src-address]]
@@ -122,20 +145,15 @@
         :if ([:typeof $destinationColon] = "num") do={ :set destinationIP [:pick $destinationIP 0 $destinationColon] }
         :local sourceIP [:toip $source]
         :local localDestination false
-        :foreach address in=[/ip/address/find] do={
-          :local prefix [/ip/address/get $address address]
-          :if ([:pick $prefix 0 [:find $prefix "/"]] = $destinationIP) do={ :set localDestination true }
+        :foreach localIP in=$localIPs do={
+          :if ($localIP = $destinationIP) do={ :set localDestination true }
         }
         :if (($localDestination = true) && ([:tostr $sourceIP] != [:tostr $containerIP])) do={
           :local managed false
-          :foreach entry in=[/ip/firewall/address-list/find where list="SB_MANAGED_CLIENTS"] do={
-            :local prefix [:tostr [/ip/firewall/address-list/get $entry address]]
-            :local slash [:find $prefix "/"]
-            :local bits 32
-            :local network $prefix
-            :if ([:typeof $slash] != "nil") do={ :set network [:pick $prefix 0 $slash]; :set bits [:tonum [:pick $prefix ($slash + 1) [:len $prefix]]] }
-            :local networkIP [:toip $network]
-            :if (([:typeof $networkIP] = "ip") && ([:typeof $sourceIP] = "ip") && ([:typeof $bits] = "num") && ($bits >= 0) && ($bits <= 32)) do={
+          :for index from=0 to=([:len $networks] - 1) do={
+            :local bits [:pick $networkBits $index]
+            :local networkIP [:pick $networks $index]
+            :if (([:typeof $sourceIP] = "ip") && ($managed = false)) do={
               :if ($bits = 0) do={ :set managed true } else={
                 :if (($sourceIP >> (32 - $bits)) = ($networkIP >> (32 - $bits))) do={ :set managed true }
               }
@@ -177,11 +195,11 @@
     # from a live outage keeps the configured hysteresis.
     :if (($gateDisabled = true) && (($sbStartupSafety = true) || ($sbFailOpen = false) || (($sbHealthSuccesses >= $"SB_HEALTH_RECOVERY_THRESHOLD") && ($sbRecoveryTicks >= $"SB_HEALTH_COOLDOWN_TICKS")))) do={
       /ip/firewall/mangle/enable $gate
-      $clearRecoveredDNS
       :set sbFailOpen false
       :set sbStartupSafety false
       :set sbRecoveryTicks 0
       :log info "SB-GATEWAY: container stably ready; managed-client diversion enabled"
+      $clearRecoveredDNS
     }
     :if ($gateDisabled = false) do={ :set sbFailOpen false; :set sbRecoveryTicks 0 }
     :set sbWatchdogStage "healthy"
@@ -190,12 +208,16 @@
     :set sbRecoveryTicks 0
     :set sbHealthFailures ($sbHealthFailures + 1)
     :if ($sbHealthFailures >= $"SB_HEALTH_FAILURE_THRESHOLD") do={
-      /ip/firewall/mangle/disable $gate
-      /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
-      :if ($sbFailOpen = false) do={ :log warning "SB-GATEWAY: container unhealthy; only SB_MANAGED_CLIENTS failed open to normal WAN" }
+      :local gateWasEnabled ([/ip/firewall/mangle/get $gate disabled] = false)
+      :if (($gateWasEnabled = true) || ($sbFailOpen = false)) do={
+        /ip/firewall/mangle/disable $gate
+        /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+        :log warning "SB-GATEWAY: container unhealthy; only SB_MANAGED_CLIENTS failed open to normal WAN"
+      }
       :set sbFailOpen true
     }
     :set sbWatchdogStage "unhealthy"
+  }
   }
   }
   }

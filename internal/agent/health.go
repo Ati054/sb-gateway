@@ -613,7 +613,7 @@ func (controller *healthController) Tick(now time.Time) error {
 					snapshot[id] = value
 				}
 			}
-			if err := writeJSONAtomic(stateFile, snapshot); err != nil {
+			if err := publishHealthState(stateFile, snapshot); err != nil {
 				failures = append(failures, fmt.Errorf("publish policy %s switch: %w", policyID, err))
 			}
 		}
@@ -636,7 +636,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		}
 	}
 	if dirty {
-		if err := writeJSONAtomic(stateFile, managed); err != nil {
+		if err := publishHealthState(stateFile, managed); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -810,7 +810,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	// Publish confirmed membership before quality probes. This is
 	// one extra atomic write on startup/change, not another polling cache.
 	if !controller.warmStarted[policyID] || !previousConfirmed || previousSelected != item.RuntimeSelected || item.CandidateSignature != signature || len(changedOutbounds) > 0 {
-		if err := writeJSONAtomic(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
+		if err := publishHealthState(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
 			return err
 		}
 	}

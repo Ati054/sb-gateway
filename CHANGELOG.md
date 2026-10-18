@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.6.72-rc.4
+
+- Reduce CPU and temporary memory use in traffic-readiness checks.
+- Return valid DNS failure responses for EDNS requests.
+- Use 288/320 MiB for new installations without changing existing memory limits.
+
+## 1.6.72-rc.3
+
+- Prevent false loss of traffic readiness while UDP connections are being created and closed.
+
+## 1.6.72-rc.2
+
+- Reduce periodic readiness-check overhead without weakening firewall validation.
+
+## 1.6.72-rc.1
+
+- Keep traffic readiness responsive during slow local system checks.
+- Limit cached readiness to the current runtime and a bounded lifetime.
+
+## 1.6.71
+
+- Keep a failed route from disabling unrelated routes.
+- Prevent command warnings from invalidating machine-readable readiness checks.
+
+## 1.6.70
+
+- Prevent unnecessary traffic interruptions after a transient local readiness check.
+
+## 1.6.69
+
+- Handle short DNS request bursts without immediately rejecting uncached queries.
+- Prevent overlapping RouterOS health recovery jobs.
+- Avoid repeated connection resets during fail-open operation.
+- Preserve translated DNS connections during recovery.
+
+## 1.6.68
+
+- Reduced memory retained by completed DNS requests.
+- Apply the DNS forwarding improvement automatically after image updates without changing saved settings.
+
+## 1.6.67
+
+- Keep cached DNS answers available while upstream queries are busy.
+- Reduced DNS memory use while preserving existing domain-rule matching.
+- Fixed native memory-limit changes and completion status.
+- Return borrowed certificate-task memory when other container memory needs headroom.
+- Clear old Xray startup readiness before starting services.
+
+## 1.6.66
+
+- Reduced DNS memory and garbage-collector scanning by reusing Xray's compact domain matcher.
+- Preserved matching order and compatibility with existing domain rules.
+- Fixed memory-limit changes and completion status across RouterOS state and path representations.
+
 ## 1.6.63
 
 - Reduced background CPU work in telemetry, subscription reconciliation and node statistics.

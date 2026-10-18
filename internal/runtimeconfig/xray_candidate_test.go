@@ -2,6 +2,7 @@ package runtimeconfig
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,6 +88,20 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 	levelZero := objectValue(objectValue(policy["levels"])["0"])
 	if _, overridden := levelZero["bufferSize"]; overridden {
 		t.Fatalf("connection buffer must use the core architecture default: %#v", levelZero)
+	}
+	if _, overridden := levelZero["connIdle"]; overridden {
+		t.Fatal("DNS-specific idle must not change ordinary traffic timeouts")
+	}
+	dnsLevel := objectValue(objectValue(policy["levels"])[strconv.Itoa(policyDNSUserLevel)])
+	if dnsLevel["connIdle"] != policyDNSConnectionIdleSeconds || len(dnsLevel) != 1 {
+		t.Fatalf("unexpected DNS-only idle policy: %#v", dnsLevel)
+	}
+	for _, outbound := range outbounds {
+		if !strings.HasPrefix(textValue(outbound["tag"]), "dns-policy-lane-") {
+			if _, overridden := objectValue(outbound["settings"])["userLevel"]; overridden {
+				t.Fatalf("DNS idle leaked to a non-DNS outbound: %#v", outbound)
+			}
+		}
 	}
 	for _, field := range []string{"statsUserUplink", "statsUserDownlink", "statsUserOnline"} {
 		if levelZero[field] != true {

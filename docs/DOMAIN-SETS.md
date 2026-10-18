@@ -26,6 +26,22 @@ artifacts without changing the saved draft or requiring another Apply.
 Resolver documents are bounded at 32 MiB; listener readiness reads only lane
 addresses and does not rebuild the membership index.
 
+Packaged `xray_multicall` builds reuse the pinned Xray `MphMatcherGroup` for
+the DNS membership index. Its compact arena and numeric hash tables avoid
+per-domain string/slice pointers in retained memory. A numeric membership array
+preserves all set IDs and duplicate memberships. Matching returns all exact
+matches, followed by suffixes from nearest to furthest, before each lane applies
+its own rule precedence. Leading-dot legacy exact names remain literal rather
+than acquiring Xray's subdomain behavior. Compilation uses the group directly,
+not the value-matcher builder that explicitly forces garbage collection.
+Successful lookups allocate Xray's result slice; misses do not. Non-multicall
+development builds retain the map implementation without an Xray dependency.
+If MPH construction fails (for example, on a hash collision between legacy
+noncanonical names), the index falls back to the previous map implementation
+rather than rejecting a previously accepted configuration. That exceptional
+generation does not receive the MPH memory savings.
+This does not change Xray's routing matcher or the persisted configuration.
+
 Trusted catalog updates parse bounded HTTP readers line by line, including
 GeoIP text. Parent responses close before following includes. Limits remain
 4 MiB per source, 96 included files and 250,000 distinct domain values; invalid
@@ -44,6 +60,20 @@ decisions, missing sets, immutable updates and safe cleanup.
 `go test ./internal/policydns -run '^$' -bench BenchmarkDNSMembershipCompilation
 -benchmem` compares eight lanes sharing 10,000 suffixes with separate tables.
 This component benchmark is not a full-container memory or CPU measurement.
+
+`go test ./internal/domainset -run '^$' -bench BenchmarkDomain -benchmem`
+compares lookup latency, retained heap and GC-scannable heap for a map and a
+sorted compact-array prototype on a synthetic 100,000-name catalog. Add
+`-modfile=<prepared-multicall.mod> -tags=xray_multicall` to include the actual
+packaged MPH adapter in the same comparison. The array prototype is test-only.
+Storage results include forced collections only in the benchmark, never in
+production.
+`go test ./internal/domainset -run '^$' -fuzz FuzzIndexMatchesReference
+-fuzztime=45s` checks membership and callback order against that reference.
+Run the domainset and policydns tests with `-race` and with both build variants.
+These are component checks; they do not establish a whole-router CPU reduction
+or CHR acceptance.
+
 Before releasing, test schema migration, repeated Apply, DNS over TCP/UDP,
 actual matched and unmatched traffic, rollback/restart and sustained VLESS
 transfers on CHR. Keep lab topology, measurements and credentials private.

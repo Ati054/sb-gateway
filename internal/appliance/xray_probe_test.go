@@ -11,6 +11,71 @@ import (
 	"testing"
 )
 
+func TestResetXrayStartupProofRemovesOnlyPreviousReadyMarkers(t *testing.T) {
+	root := t.TempDir()
+	options := Options{XrayReadyFile: filepath.Join(root, "custom-ready"), XrayValidatedFile: filepath.Join(root, "custom-proof")}
+	retained := []string{filepath.Join(root, "xray.json"), filepath.Join(root, "xray-prevalidated.sha256")}
+	for _, path := range append(retained, options.XrayReadyFile, options.XrayValidatedFile) {
+		if err := os.WriteFile(path, []byte("previous startup"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if err := resetXrayStartupProof(options); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{options.XrayReadyFile, options.XrayValidatedFile} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("previous readiness proof remains: %s: %v", path, err)
+			}
+		}
+	}
+	for _, path := range retained {
+		if body, err := os.ReadFile(path); err != nil || string(body) != "previous startup" {
+			t.Fatalf("unrelated runtime input changed: %s: %v", path, err)
+		}
+	}
+	if err := resetXrayStartupProof(Options{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunClearsPreviousProofBeforeAnyStartupWork(t *testing.T) {
+	root := t.TempDir()
+	options := Options{XrayReadyFile: filepath.Join(root, "ready"), XrayValidatedFile: filepath.Join(root, "proof"), NginxConfig: root}
+	for _, path := range []string{options.XrayReadyFile, options.XrayValidatedFile} {
+		if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory cannot be read as a Nginx config. No program may start.
+	if err := Run(context.Background(), options); err == nil {
+		t.Fatal("invalid Nginx config was accepted")
+	}
+	for _, path := range []string{options.XrayReadyFile, options.XrayValidatedFile} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("startup work preceded proof cleanup: %s: %v", path, err)
+		}
+	}
+}
+
+func TestResetXrayStartupProofRejectsUnremovableMarker(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "ready")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "keep"), []byte("unrelated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetXrayStartupProof(Options{XrayReadyFile: blocked}); err == nil {
+		t.Fatal("startup continued with an uncleared marker")
+	}
+	if body, err := os.ReadFile(filepath.Join(blocked, "keep")); err != nil || string(body) != "unrelated" {
+		t.Fatalf("marker cleanup recursively removed data: %v", err)
+	}
+}
+
 func TestXrayProbeRequiresCompletedStartupNotJustOpenAPI(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -8,22 +8,31 @@ prove a leak or an OOM. Check native restart history and cgroup memory events.
 
 ## Native Limits
 
-The installation defaults remain `memory-high=224M` and `memory-max=256M`.
+New installations default to `memory-high=288M` and `memory-max=320M`.
 Settings reads and edits both actual RouterOS values separately from Apply.
 `memory-high` is a soft reclaim threshold; `memory-max` is a hard limit.
 Existing limits are preserved during ordinary configuration and image updates.
+An existing 224/256 MiB setting is not migrated automatically. Repeated reclaim
+events together with DNS or local API delays are a reason to review the limits
+in Settings and the router's available RAM. Higher limits do not preallocate RAM.
 
 Supported finite values are integer MiB, 16 <= high <= max <= 8192.
 Missing or unlimited inventory is not replaced with template values. Lowering
 the hard limit requires at least 16 MiB above current container usage, checked
 again at execution; this snapshot cannot guarantee that later workloads fit.
+RouterOS may omit a false `stopped` flag. The panel accepts that representation
+only with readable finite limits and positive live memory usage; an explicitly
+stopped container, missing usage or zero usage cannot schedule a change.
 
 **Apply and restart** requires explicit confirmation. A durable operation and
 native one-shot worker exclude concurrent Apply, recovery and image updates.
 Traffic diversion remains disabled until the watchdog confirms readiness.
 Readback checks both limits, the same root and native control-plane health.
+RouterOS paths with or without a surrounding slash identify the same root;
+different roots, unhealthy containers and queued operations remain unconfirmed.
 An unconfirmed operation is not automatically retried or reported as success.
-Reopening Settings resumes reconciliation. Changing limits is not optimization.
+Reopening Settings resumes reconciliation. Changing limits alone does not
+guarantee capacity or improve the efficiency of a workload.
 
 ## Go Process Budgets
 
@@ -45,6 +54,8 @@ slots remain independent: certificate propagation must not monopolize validation
 
 With high/max 224/256 MiB the planned soft limits are approximately 83.2 MiB
 Xray, 44.8 MiB gateway and 28 MiB for each helper, plus 40 MiB non-Go reserve.
+For the default 288/320 MiB they are 114.4, 61.6 and 32 MiB respectively,
+plus 40 MiB. The working ceiling is 280 MiB, below the native reclaim threshold.
 For 320/384 MiB they are 140.4, 75.6 and 32 MiB respectively, plus 40 MiB.
 Container limits themselves are never raised by this calculation.
 
@@ -77,6 +88,28 @@ rejects it safely after the bounded admission attempt. Cancellation,
 start failure, worker failure and progress-pipe completion restore the idle
 allowance. Validation does not wait on this ACME slot; Apply can proceed while
 DNS challenge propagation waits. No periodic forced collection is added.
+
+### Physical Headroom For The Idle Loan
+
+The packaged image also enables `SB_MEMORY_PRESSURE_BUDGET=1`. Every two seconds
+the controller checks its owned cgroup usage, clean unmapped file cache and its
+own Go memory counters. The idle loan is reduced when other container memory,
+including Xray and kernel socket buffers, consumes the available headroom. Mapped
+code, dirty files and a 4-MiB file working set are not treated as disposable cache.
+Up to 24 MiB below the working ceiling is kept out of the loan calculation.
+
+Only the borrowed ACME allowance changes: the controller base floor, Xray budget,
+two independent helper allowances and native limits remain unchanged. A live-heap
+floor avoids asking GC to reclaim still-referenced objects. Unknown counters
+recall the loan to its base floor; they do not grant more memory. After pressure
+subsides, borrowing grows by at most 4 MiB per check, up to the existing idle cap.
+An active ACME worker always retains its slot. Release rechecks physical headroom
+instead of unconditionally restoring the full loan. Monitoring changes only the
+soft Go limit, never calls `runtime.GC`/`FreeOSMemory`, and runs no subprocesses.
+
+`SB_MEMORY_PRESSURE_BUDGET=0` disables this headroom monitor for controlled
+comparisons; ordinary ACME admission/recall still applies. This is not an RSS
+hard cap or a guarantee that every traffic load fits in the configured container.
 
 Use [controller runtime counters](CONTROLLER-RUNTIME-DIAGNOSTICS.md) to distinguish
 GC work from useful controller work; measure actual OS CPU separately.
@@ -141,8 +174,27 @@ compare CPU, latency, throughput and cgroup pressure under the same workload.
   publication, activation, rollback and obsolete-file cleanup.
 
 Connection buffers remain at the architecture default. No periodic forced GC,
-production profiler or artificial memory reset is introduced. Connection idle
-timeouts are unchanged; reducing them requires evidence and long-session tests.
+production profiler or artificial memory reset is introduced. Ordinary traffic
+and tunnel idle timeouts are unchanged. Only the internal DNS-lane Freedom
+outbounds use a separate policy level (100) with a 30-second inactivity timer,
+instead of retaining completed UDP exchanges for the ordinary 300 seconds.
+This exceeds the resolver's maximum 15-second query budget; ongoing exchanges
+refresh the timer. It does not shorten persistent DoH connections or change
+TCP/UDP, VLESS or Reverse traffic policies. A pinned-core loopback regression
+checks both idle-session release and continued activity on the same session.
+The image build runs this regression together with the runtime renderer tests;
+its Go test stage includes the maintained rendering templates.
+Image startup regenerates older DNS forwarding policies from the committed
+configuration through the existing validation and activation transaction. This
+does not edit drafts or require an extra Apply; an already current policy is
+left unchanged.
+
+Policy DNS retains its bounded upstream worker and TCP-session counts. When
+upstream workers are busy, UDP and accepted TCP sessions can still receive fresh
+cached answers and local rejection decisions. This path uses the same lane,
+question and routing validation, opens no upstream connection and does not serve
+expired data as fresh. Uncached queries retain the overload response; no unbounded
+queue or new goroutine pool is introduced.
 
 ## Operational Limits
 
