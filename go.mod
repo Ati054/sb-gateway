@@ -6,6 +6,8 @@ toolchain go1.27.2
 
 require (
 	github.com/go-acme/lego/v5 v5.4.1
+	github.com/google/nftables v0.3.0
+	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42
 	github.com/miekg/dns v1.1.73
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
@@ -17,9 +19,11 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
+	github.com/mdlayher/socket v0.5.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/yandex-cloud/go-genproto v0.117.0 // indirect
 	github.com/yandex-cloud/go-sdk/services/dns v0.0.94 // indirect

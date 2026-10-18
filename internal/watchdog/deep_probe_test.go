@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestDeepProbeDoesNotLaunchXrayValidation(t *testing.T) {
@@ -58,9 +57,10 @@ esac
 	write(dns, fmt.Sprintf(`{"lanes":[{"port":%d}]}`, port), 0600)
 	r := &runner{opts: Options{XrayConfig: config, PolicyDNSConfig: dns,
 		RulePriority: "1100", RouteTable: "1002", TProxyMark: "1", TProxyPort: "12345"}}
+	r.probeNFT = func(context.Context, string) (bool, error) { return hasTransparentRules(nft, "12345"), nil }
 	for n := range 3 {
 		write(config, fmt.Sprintf(`{"inbounds":[{"protocol":"dokodemo-door","port":%d,"settings":{"network":"tcp,udp"}}],"routing":{"rules":[{"ip":["ext:missing-%d.dat:ru"]}]}}`, port, n), 0600)
-		r.runDeepProbe(context.Background(), settings{deepInterval: time.Second}, time.Now())
+		r.runDeepProbe(context.Background())
 		if !r.deepHealthy {
 			t.Fatalf("routing-only change failed live readiness: %v", r.deepReasons)
 		}
@@ -69,7 +69,7 @@ esac
 		t.Fatalf("watchdog launched the configuration validator: %v", err)
 	}
 	_ = tcp.Close()
-	r.runDeepProbe(context.Background(), settings{}, time.Now())
+	r.runDeepProbe(context.Background())
 	if r.deepHealthy || !strings.Contains(strings.Join(r.deepReasons, ","), "tcp_listener") {
 		t.Fatalf("missing TCP listener was ignored: %v", r.deepReasons)
 	}
@@ -78,8 +78,20 @@ esac
 		t.Fatal(err)
 	}
 	_ = udp.Close()
-	r.runDeepProbe(context.Background(), settings{}, time.Now())
+	r.runDeepProbe(context.Background())
 	if r.deepHealthy || !strings.Contains(strings.Join(r.deepReasons, ","), "udp_listener") {
 		t.Fatalf("missing UDP listener was ignored: %v", r.deepReasons)
+	}
+	r.probeListener = func(context.Context, string, int) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+	r.runDeepProbe(context.Background())
+	if r.deepHealthy || !r.deepUncertain {
+		t.Fatalf("unavailable listener confirmation became a definite closure: %v", r.deepReasons)
+	}
+	r.probeListener = func(context.Context, string, int) (bool, error) { return true, nil }
+	r.runDeepProbe(context.Background())
+	if !r.deepHealthy {
+		t.Fatalf("independently confirmed listener was rejected: %v", r.deepReasons)
 	}
 }

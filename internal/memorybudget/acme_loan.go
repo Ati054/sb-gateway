@@ -15,12 +15,16 @@ import (
 // Only the controller may lend its idle ACME slot. Validation keeps its own
 // independent slot, so certificate propagation never blocks an Apply.
 type acmeLoan struct {
+	mu            sync.Mutex
 	slot          chan struct{}
 	base, idle    int64
 	worker, limit int64
+	current       int64
 	setLimit      func(int64) int64
 	usage         func() (int64, bool)
 	reclaim       func()
+	pressure      func() (loanPressure, bool)
+	stopPressure  func()
 }
 
 var controllerLoan struct {
@@ -32,6 +36,9 @@ func configureACMELoan(plan Plan, requested string) int64 {
 	base := Cap(plan.Gateway, requested)
 	controllerLoan.Lock()
 	defer controllerLoan.Unlock()
+	if previous := controllerLoan.loan; previous != nil && previous.stopPressure != nil {
+		previous.stopPressure()
+	}
 	controllerLoan.loan = nil
 	if os.Getenv("SB_MEMORY_BUDGET_ACME_LOAN") != "1" {
 		return base
@@ -44,11 +51,18 @@ func configureACMELoan(plan Plan, requested string) int64 {
 	if idle <= base {
 		return base
 	}
-	controllerLoan.loan = &acmeLoan{
+	loan := &acmeLoan{
 		slot: make(chan struct{}, 1), base: base, idle: idle,
-		worker: plan.Worker, limit: plan.Ceiling,
+		worker: plan.Worker, limit: plan.Ceiling, current: idle,
 		setLimit: debug.SetMemoryLimit, usage: currentUsage, reclaim: debug.FreeOSMemory,
 	}
+	if os.Getenv("SB_MEMORY_PRESSURE_BUDGET") == "1" {
+		loan.pressure = controllerPressure
+		if _, ok := loan.pressure(); !ok {
+			return base
+		}
+	}
+	controllerLoan.loan = loan
 	return idle
 }
 
@@ -84,11 +98,15 @@ func (loan *acmeLoan) acquire(ctx context.Context) (func(), error) {
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			loan.setLimit(loan.idle)
+			loan.mu.Lock()
+			defer loan.mu.Unlock()
 			<-loan.slot
+			loan.applyLimit(loan.idleLimit())
 		})
 	}
-	loan.setLimit(loan.base)
+	loan.mu.Lock()
+	loan.applyLimit(loan.base)
+	loan.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		release()
 		return nil, err

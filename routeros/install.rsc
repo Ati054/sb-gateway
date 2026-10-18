@@ -60,8 +60,8 @@
 
 :local containerMemoryHigh $"SB_CONTAINER_MEMORY_HIGH"
 :local containerMemoryMax $"SB_CONTAINER_MEMORY_MAX"
-:if ([:len $containerMemoryHigh] = 0) do={ :set containerMemoryHigh "224M" }
-:if ([:len $containerMemoryMax] = 0) do={ :set containerMemoryMax "256M" }
+:if ([:len $containerMemoryHigh] = 0) do={ :set containerMemoryHigh "288M" }
+:if ([:len $containerMemoryMax] = 0) do={ :set containerMemoryMax "320M" }
 
 # Re-imports also start fail-open.  Only the exact project gate/connections are
 # touched while trusted ingress and policy rules are reconciled.

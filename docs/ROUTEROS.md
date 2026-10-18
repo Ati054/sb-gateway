@@ -174,15 +174,15 @@ Forward guard также останавливает публичный TCP/UDP, 
 не попал в TPROXY; watchdog требует guard для readiness. При отказе контейнера
 по-прежнему действует выбранный `container_outage` (direct либо block).
 
-Watchdog проверяет таблицу через `nft -j`: реальные hooks, оба TPROXY-протокола
-с нужным портом и ingress-scoped ICMP reject. Текстовый формат `nft list`
-может отличаться от исходной записи правил и не используется как контракт
-готовности; один comment без reject не считается защитой.
+В Linux watchdog читает управляемые nft-chain через netlink: реальные hooks,
+оба TPROXY-протокола с нужным портом и ingress-scoped ICMP reject. Текстовый
+формат `nft list` не используется как контракт готовности; один comment без
+reject не считается защитой. Проверка не изменяет таблицу.
 Успешный ping публичного адреса проверяет WAN, не VLESS: проверяйте DNS
 и TCP/UDP-запросы. См. [ограничение ядра Xray](https://xtls.github.io/en/config/routing.html).
 
 Для устройства с 1 ГБ RAM installer по умолчанию задаёт контейнеру
-`memory-high=224M` и `memory-max=256M`. Первый порог допускает bounded RAM-кэши,
+`memory-high=288M` и `memory-max=320M`. Первый порог допускает bounded RAM-кэши,
 но начинает reclaim до исчерпания памяти RouterOS; второй ограничивает аварию
 процесса и оставляет запас для самого роутера и временного update candidate.
 Лимиты можно переопределить через `SB_CONTAINER_MEMORY_HIGH` и

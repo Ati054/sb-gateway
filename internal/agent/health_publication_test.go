@@ -35,6 +35,11 @@ func TestConfirmedMembershipPublishedBeforeQualityProbes(t *testing.T) {
 		if len(item.DailyStats) != 0 {
 			t.Fatal("fabricated historical measurements")
 		}
+		var proof map[string]map[string]any
+		if err := readJSON(filepath.Join(root, "selector-runtime.json"), &proof); err != nil ||
+			proof["europe"]["runtime_confirmed"] != true || proof["europe"]["runtime_selected"] != "de" {
+			t.Fatalf("live proof not published before quality probes: %#v, %v", proof, err)
+		}
 	}}
 	controller := &healthController{opts: Options{StateRoot: root}, runtime: runtime, warmStarted: map[string]bool{}}
 	if err := controller.Tick(time.Now()); err != nil {

@@ -78,7 +78,7 @@ func (server *Server) containerMemoryStatus(response http.ResponseWriter, reques
 		wantHigh, _ := numberToInt64(operation["high_bytes"])
 		wantMax, _ := numberToInt64(operation["max_bytes"])
 		deadline, deadlineErr := time.Parse(time.RFC3339Nano, text(operation["deadline"]))
-		if !queued && highOK && maxOK && high == wantHigh && maximum == wantMax && text(container["root_dir"]) == text(operation["root_dir"]) && container["healthy"] == true {
+		if !queued && highOK && maxOK && high == wantHigh && maximum == wantMax && strings.Trim(text(container["root_dir"]), "/") == strings.Trim(text(operation["root_dir"]), "/") && container["healthy"] == true {
 			operation["pending"], operation["state"] = false, "completed"
 		} else if deadlineErr == nil && !server.now().Before(deadline) {
 			operation["pending"], operation["state"] = queued, "unconfirmed"
@@ -164,14 +164,16 @@ func (server *Server) updateContainerMemory(response http.ResponseWriter, reques
 			current = row
 		}
 	}
-	if optionalRestBool(current["stopped"]) != false {
+	// RouterOS can omit false flags. Live nonzero usage below is also required;
+	// an omitted stopped flag alone must not reject a running container.
+	if restBool(current["stopped"]) {
 		server.writeErrorResponse(response, request, 409, "container_memory_not_running", "The managed container must be running before scheduling a memory restart.")
 		return
 	}
 	oldHigh, highOK := routerOSByteSize(current["memory-high"])
 	oldMax, maxOK := routerOSByteSize(current["memory-max"])
 	used, usedOK := routerOSByteSize(current["memory-current"])
-	if !highOK || !maxOK || !usedOK {
+	if !highOK || !maxOK || !usedOK || used <= 0 {
 		server.writeErrorResponse(response, request, 409, "container_memory_unavailable", "Live memory limits and usage must be available before changing them.")
 		return
 	}

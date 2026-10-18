@@ -531,6 +531,7 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 		"rulesets-update.json":                true,
 		"runtime-status.json":                 true,
 		"selector-health.json":                true,
+		"selector-runtime.json":               true,
 		"subscription-refresh-status.json":    true,
 		"subscription-runtime-operation.json": true,
 		"subscription-runtime-status.json":    true,

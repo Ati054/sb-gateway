@@ -32,6 +32,7 @@ const (
 	defaultStartupGrace      = 210
 	controlPlaneThreshold    = 24
 	statusHeartbeat          = 30 * time.Second
+	deepProbeTimeout         = 15 * time.Second
 )
 
 type Options struct {
@@ -70,13 +71,16 @@ type runner struct {
 	lastPostAt          time.Time
 	deepHealthy         bool
 	deepReasons         []string
-	nextDeepProbe       time.Time
 	configFileSignature string
 	listenerSignature   string
 	dnsFileSignature    string
 	dnsSignature        string
 	listeners           []listener
 	dnsPorts            []int
+	deepUncertain       bool
+	postQueue           chan statusPayload
+	probeNFT            func(context.Context, string) (bool, error)
+	probeListener       func(context.Context, string, int) (bool, error)
 }
 
 type listener struct {
@@ -142,6 +146,10 @@ func Run(ctx context.Context, opts Options) error {
 		opts: opts,
 		http: &http.Client{Timeout: 10 * time.Second},
 	}
+	stopReporter := r.startStateReporter(ctx)
+	defer stopReporter()
+	deep := newDeepChecks(opts)
+	defer deep.close()
 	defer r.clearLease()
 	r.clearLease()
 	current := r.loadSettings()
@@ -163,6 +171,7 @@ func Run(ctx context.Context, opts Options) error {
 	var coreRecovery coreRecoveryWindow
 	for {
 		now := time.Now()
+		cycleStarted := now
 		if err := r.pruneRestarts(now); err != nil {
 			log.Printf("watchdog: could not refresh restart history: %v", err)
 		}
@@ -171,7 +180,7 @@ func Run(ctx context.Context, opts Options) error {
 			leasePublished = false
 			failures, successes = 0, 0
 			activeFailureClass = ""
-			r.nextDeepProbe = time.Time{}
+			deep.reset()
 			r.postState(ctx, current, "applying", true, 0, "apply_in_progress")
 			if !wait(ctx, current.interval) {
 				return nil
@@ -185,7 +194,7 @@ func Run(ctx context.Context, opts Options) error {
 			leasePublished = false
 			failures, successes = 0, 0
 			activeFailureClass = ""
-			r.nextDeepProbe = time.Time{}
+			deep.reset()
 			r.postState(ctx, current, "recovery_pending", false, 0, "routeros_rollback_guard")
 			if !wait(ctx, current.interval) {
 				return nil
@@ -193,6 +202,7 @@ func Run(ctx context.Context, opts Options) error {
 			continue
 		}
 		if err == nil && !ready.Configured {
+			deep.reset()
 			r.clearLease()
 			leasePublished = false
 			failures, successes = 0, 0
@@ -225,30 +235,37 @@ func Run(ctx context.Context, opts Options) error {
 			// A new core cannot reuse an earlier generation's deep readiness.
 			r.clearLease()
 			leasePublished = false
-			r.deepHealthy = false
-			r.nextDeepProbe = time.Time{}
 		}
 		now = time.Now()
-		if !r.deepHealthy || r.nextDeepProbe.IsZero() || !now.Before(r.nextDeepProbe) {
-			r.runDeepProbe(ctx, current, now)
+		identity := deepProbeIdentity(generation, opts)
+		if identity != deep.identity {
+			r.clearLease()
+			leasePublished = false
 		}
-		if !r.deepHealthy {
-			if len(r.deepReasons) == 0 {
+		deepHealthy, deepReasons, initialProbe := deep.observe(ctx, identity, current, now)
+		if !deepHealthy {
+			// A definite failure or expired proof cannot borrow the lease's TTL
+			// as another extension. Inconclusive checks use only the bounded cache.
+			if !initialProbe {
+				r.clearLease()
+			}
+			if len(deepReasons) == 0 {
 				reasons = append(reasons, "deep_probe")
 			} else {
-				reasons = append(reasons, r.deepReasons...)
+				reasons = append(reasons, deepReasons...)
 			}
-			r.nextDeepProbe = time.Time{}
 		}
 
-		if len(reasons) == 0 {
+		if initialProbe && len(reasons) == 1 && reasons[0] == "deep_probe" {
+			r.postState(ctx, current, "starting", false, 0, "deep_probe_pending")
+		} else if len(reasons) == 0 {
 			coreRecovery.verified(generation)
 			failures = 0
 			activeFailureClass = ""
 			successes++
-			recoveryThreshold := recoverySuccessThreshold(current.recoveryThreshold, leasePublished)
+			recoveryThreshold := recoverySuccessThreshold(current.recoveryThreshold, leasePublished, r.liveLease(current, time.Now()))
 			if successes >= recoveryThreshold {
-				if err := publishLease(opts.MarkerFile, now); err != nil {
+				if err := r.publishReadyLease(); err != nil {
 					log.Printf("watchdog: could not publish readiness lease: %v", err)
 				} else {
 					leasePublished = true
@@ -297,7 +314,7 @@ func Run(ctx context.Context, opts Options) error {
 			}
 		}
 
-		if !wait(ctx, current.interval) {
+		if !deep.wait(ctx, time.Until(cycleStarted.Add(current.interval))) {
 			return nil
 		}
 	}
@@ -325,13 +342,28 @@ func waitForStartupReady(ctx context.Context, marker string, maximum time.Durati
 	}
 }
 
-func recoverySuccessThreshold(configured int, leasePublished bool) int {
+func recoverySuccessThreshold(configured int, leasePublished, liveLease bool) int {
+	if leasePublished && liveLease {
+		// Renew an admitted dataplane on every successful check. Re-admission
+		// hysteresis must not silently expire a still-valid heartbeat.
+		return 1
+	}
 	if !leasePublished {
 		// The first comprehensive success follows the process-bound Xray
 		// startup marker, so repeating it only delays restored traffic.
 		return 1
 	}
 	return configured
+}
+
+func (r *runner) liveLease(current settings, now time.Time) bool {
+	age, valid := runtimeproof.ReadinessLeaseAge(r.opts.MarkerFile, now)
+	return valid && age <= int64(runtimeproof.ReadinessLeaseTTL(int(current.interval/time.Second)))
+}
+
+func (r *runner) publishReadyLease() error {
+	// Deep probes can take time: date the lease at publication, not at their start.
+	return publishLease(r.opts.MarkerFile, time.Now())
 }
 
 // A temporarily starved management API must not tear down healthy proxy
@@ -455,7 +487,15 @@ func (r *runner) readiness(ctx context.Context) (readiness, error) {
 
 func (r *runner) postState(ctx context.Context, current settings, state string, healthy bool, failures int, action string) {
 	payload := statusPayload{state, healthy, failures, r.restarts, current.restartBudget, action}
-	signature := fmt.Sprintf("%s:%t:%d:%d:%d:%s", state, healthy, failures, r.restarts, current.restartBudget, action)
+	if r.postQueue != nil {
+		queueLatestState(r.postQueue, payload)
+		return
+	}
+	r.postPayload(ctx, payload)
+}
+
+func (r *runner) postPayload(ctx context.Context, payload statusPayload) {
+	signature := fmt.Sprintf("%s:%t:%d:%d:%d:%s", payload.State, payload.ContainerHealthy, payload.FailureCount, payload.Restarts, payload.MaxRestartsPerHour, payload.LastAction)
 	now := time.Now()
 	if signature == r.lastPostSignature && now.Sub(r.lastPostAt) >= 0 && now.Sub(r.lastPostAt) < statusHeartbeat {
 		return
@@ -486,9 +526,18 @@ func (r *runner) postState(ctx context.Context, current settings, state string, 
 	}
 }
 
-func (r *runner) runDeepProbe(ctx context.Context, current settings, now time.Time) {
+func (r *runner) runDeepProbe(ctx context.Context) {
 	reasons := make([]string, 0, 12)
+	uncertain := 0
 	mark := func(reason string) { reasons = append(reasons, reason) }
+	markCommand := func(reason string, err error, valid bool) {
+		if err != nil || !valid {
+			mark(reason)
+			if err != nil {
+				uncertain++
+			}
+		}
+	}
 	configFileSignature, configSignature, err := fileSignature(
 		r.opts.XrayConfig,
 		r.configFileSignature,
@@ -511,19 +560,36 @@ func (r *runner) runDeepProbe(ctx context.Context, current settings, now time.Ti
 	tcpPorts, tcpErr := procListeningPorts("tcp")
 	udpPorts, udpErr := procListeningPorts("udp")
 	if tcpErr != nil {
-		mark("tcp_listener_inventory")
+		markCommand("tcp_listener_inventory", tcpErr, false)
 	}
 	if udpErr != nil {
-		mark("udp_listener_inventory")
+		markCommand("udp_listener_inventory", udpErr, false)
+	}
+	probeListener := r.probeListener
+	if probeListener == nil {
+		probeListener = probeListeningPort
+	}
+	listenerCtx, cancelListeners := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelListeners()
+	checkListener := func(protocol string, port int, reason string) {
+		ports := tcpPorts
+		if protocol == "udp" {
+			ports = udpPorts
+		}
+		present, err := verifyMissingListener(listenerCtx, protocol, port, ports, probeListener)
+		if err == nil && present {
+			return
+		}
+		mark(reason)
+		class := "missing"
+		if err != nil {
+			uncertain++
+			class = "read_failed"
+		}
+		log.Printf("watchdog: listener verification failed protocol=%s port=%d class=%s", protocol, port, class)
 	}
 	for _, item := range r.listeners {
-		if item.protocol == "udp" {
-			if _, ok := udpPorts[item.port]; !ok {
-				mark("udp_listener")
-			}
-		} else if _, ok := tcpPorts[item.port]; !ok {
-			mark("tcp_listener")
-		}
+		checkListener(item.protocol, item.port, item.protocol+"_listener")
 	}
 
 	dnsFileSignature, dnsSignature, err := fileSignature(
@@ -546,27 +612,32 @@ func (r *runner) runDeepProbe(ctx context.Context, current settings, now time.Ti
 		r.dnsFileSignature = dnsFileSignature
 	}
 	for _, port := range r.dnsPorts {
-		if _, ok := tcpPorts[port]; !ok {
-			mark("dns_lane_tcp")
-		}
-		if _, ok := udpPorts[port]; !ok {
-			mark("dns_lane_udp")
-		}
+		checkListener("tcp", port, "dns_lane_tcp")
+		checkListener("udp", port, "dns_lane_udp")
 	}
 
-	if output, err := commandOutput(ctx, 5*time.Second, "ip", "rule", "show"); err != nil || !hasPolicyRule(string(output), r.opts.RulePriority, r.opts.RouteTable, r.opts.TProxyMark) {
-		mark("tproxy_policy_rule")
+	output, commandErr := commandOutput(ctx, 5*time.Second, "ip", "rule", "show")
+	markCommand("tproxy_policy_rule", commandErr, hasPolicyRule(string(output), r.opts.RulePriority, r.opts.RouteTable, r.opts.TProxyMark))
+	output, commandErr = commandOutput(ctx, 5*time.Second, "ip", "route", "show", "table", r.opts.RouteTable)
+	markCommand("tproxy_local_route", commandErr, strings.Contains(string(output), "local default dev lo"))
+	probeNFT := r.probeNFT
+	if probeNFT == nil {
+		probeNFT = probeTransparentNFT
 	}
-	if output, err := commandOutput(ctx, 5*time.Second, "ip", "route", "show", "table", r.opts.RouteTable); err != nil || !strings.Contains(string(output), "local default dev lo") {
-		mark("tproxy_local_route")
+	started := time.Now()
+	valid, commandErr := probeNFT(ctx, r.opts.TProxyPort)
+	if commandErr != nil || !valid {
+		class := "invalid_state"
+		if commandErr != nil {
+			class = "read_failed"
+		}
+		log.Printf("watchdog: deep check failed check=transparent_nft class=%s elapsed_ms=%d", class, time.Since(started).Milliseconds())
 	}
-	if output, err := commandOutput(ctx, 5*time.Second, "nft", "-j", "list", "table", "inet", "sb_gateway_transparent"); err != nil || !hasTransparentRules(string(output), r.opts.TProxyPort) {
-		mark("transparent_nft")
-	}
+	markCommand("transparent_nft", commandErr, valid)
 
 	r.deepReasons = reasons
 	r.deepHealthy = len(reasons) == 0
-	r.nextDeepProbe = now.Add(current.deepInterval)
+	r.deepUncertain = len(reasons) > 0 && uncertain == len(reasons)
 }
 
 func parseXrayListeners(path string) ([]listener, error) {
@@ -904,14 +975,87 @@ func atomicWrite(path string, body []byte, mode os.FileMode) error {
 }
 
 func commandOutput(parent context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	output, _, err := captureCommand(parent, timeout, name, args...)
+	return output, err
+}
+
+type commandStderr struct {
+	count  int
+	prefix [1024]byte
+	used   int
+}
+
+func (stderr *commandStderr) Write(body []byte) (int, error) {
+	stderr.count += len(body)
+	stderr.used += copy(stderr.prefix[stderr.used:], body)
+	return len(body), nil
+}
+
+func (stderr *commandStderr) class() string {
+	text := strings.ToLower(string(stderr.prefix[:stderr.used]))
+	switch {
+	case strings.Contains(text, "no buffer space available"), strings.Contains(text, "cannot allocate memory"),
+		strings.Contains(text, "out of memory"), strings.Contains(text, "resource temporarily unavailable"):
+		return "resource_exhausted"
+	case strings.Contains(text, "operation not permitted"), strings.Contains(text, "permission denied"):
+		return "permission_denied"
+	case strings.Contains(text, "no such file"), strings.Contains(text, "does not exist"):
+		return "missing_state"
+	case stderr.count == 0:
+		return "empty"
+	}
+	return "other"
+}
+
+func captureCommand(parent context.Context, timeout time.Duration, name string, args ...string) ([]byte, commandStderr, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, name, args...)
-	output, err := command.CombinedOutput()
-	if command.Process != nil && ctx.Err() != nil {
-		return output, ctx.Err()
+	var output bytes.Buffer
+	var stderr commandStderr
+	command.Stdout, command.Stderr = &output, &stderr
+	err := command.Run()
+	return output.Bytes(), stderr, commandResultError(err, ctx.Err())
+}
+
+func commandResultError(processErr, contextErr error) error {
+	if processErr == nil {
+		return nil
 	}
-	return output, err
+	return errors.Join(processErr, contextErr)
+}
+
+func checkDeepCommand(ctx context.Context, check string, valid func([]byte) bool, name string, args ...string) bool {
+	accepted, _ := inspectDeepCommand(ctx, check, valid, name, args...)
+	return accepted
+}
+
+func inspectDeepCommand(ctx context.Context, check string, valid func([]byte) bool, name string, args ...string) (bool, error) {
+	started := time.Now()
+	output, stderr, err := captureCommand(ctx, 5*time.Second, name, args...)
+	class := "invalid_response"
+	if err == nil && valid(output) {
+		return true, nil
+	}
+	if err != nil {
+		class = "command_failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			class = "deadline"
+		} else if errors.Is(err, context.Canceled) {
+			class = "canceled"
+		}
+	}
+	exitCode := -1
+	if err == nil {
+		exitCode = 0
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		exitCode = exitError.ExitCode()
+	}
+	log.Printf("watchdog: deep check failed check=%s class=%s elapsed_ms=%d stdout_bytes=%d stderr_bytes=%d stderr_class=%s exit_code=%d",
+		check, class, time.Since(started).Milliseconds(), len(output), stderr.count, stderr.class(), exitCode)
+	return false, err
 }
 
 func readJSON(path string, destination any) error {

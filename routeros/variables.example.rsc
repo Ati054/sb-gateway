@@ -6,7 +6,7 @@
 # Files.  Set SB_IMAGE_SOURCE="registry" only when an OCI registry is
 # deliberately used; the RouterOS version/channel is unrelated to this choice.
 :global "SB_IMAGE_SOURCE" "file"
-:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.63-linux-arm64.tar"
+:global "SB_IMAGE_FILE" "usb1/sb-gateway/sb-gateway-1.6.72-rc.4-linux-arm64.tar"
 :global "SB_IMAGE" ""
 :global "SB_BRIDGE" "bridge-sb"
 :global "SB_VETH" "veth-sb"
@@ -23,15 +23,15 @@
 
 # These paths must resolve to an external USB SSD, never internal flash/NAND.
 :global "SB_STORAGE_ROOT" "usb1/sb-gateway"
-:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.63"
+:global "SB_ROOT_DIR" "usb1/sb-gateway/root-1.6.72-rc.4"
 :global "SB_CONFIG_DIR" "usb1/sb-gateway/config"
 :global "SB_DATA_DIR" "usb1/sb-gateway/data"
 :global "SB_LOGS_DIR" "usb1/sb-gateway/logs"
 :global "SB_STATE_DIR" "usb1/sb-gateway/state"
 # 1 GiB RouterOS profile: keep enough headroom for RAM-backed caches without
 # starving RouterOS or a temporary update candidate.
-:global "SB_CONTAINER_MEMORY_HIGH" "224M"
-:global "SB_CONTAINER_MEMORY_MAX" "256M"
+:global "SB_CONTAINER_MEMORY_HIGH" "288M"
+:global "SB_CONTAINER_MEMORY_MAX" "320M"
 
 # Exact client and network CIDRs; examples are documentation addresses.
 :global "SB_MANAGED_CLIENTS" {"192.168.88.25/32";"10.20.0.2/32"}

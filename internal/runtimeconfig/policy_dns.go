@@ -10,12 +10,48 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sb-gateway/sb-gateway/internal/domainset"
 )
 
-const maxPolicyDNSRulesetBytes = 16 << 20
+// LegacyPolicyDNSIdle detects persisted forwarding lanes needing regeneration.
+// Only DNS-owned outbounds participate; ordinary traffic policies are ignored.
+func LegacyPolicyDNSIdle(body []byte) (bool, error) {
+	var config struct {
+		Policy struct {
+			Levels map[string]struct {
+				ConnectionIdle int `json:"connIdle"`
+			} `json:"levels"`
+		} `json:"policy"`
+		Outbounds []struct {
+			Tag      string `json:"tag"`
+			Protocol string `json:"protocol"`
+			Settings struct {
+				UserLevel int `json:"userLevel"`
+			} `json:"settings"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal(body, &config); err != nil {
+		return false, err
+	}
+	for _, outbound := range config.Outbounds {
+		if strings.HasPrefix(outbound.Tag, "dns-policy-lane-") {
+			if outbound.Protocol != "freedom" || outbound.Settings.UserLevel != policyDNSUserLevel ||
+				config.Policy.Levels[strconv.Itoa(policyDNSUserLevel)].ConnectionIdle != policyDNSConnectionIdleSeconds {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+const (
+	maxPolicyDNSRulesetBytes       = 16 << 20
+	policyDNSUserLevel             = 100
+	policyDNSConnectionIdleSeconds = 30
+)
 
 // PolicyDNSSource is the validated DNS portion of the renderer source model.
 // It intentionally models only the current schema; legacy aliases belong to
@@ -300,7 +336,8 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 		artifacts.XrayOutbounds = append(artifacts.XrayOutbounds, map[string]any{
 			"tag": tag, "protocol": "freedom",
 			"settings": map[string]any{
-				"redirect": fmt.Sprintf("127.0.0.1:%d", port),
+				"redirect":  fmt.Sprintf("127.0.0.1:%d", port),
+				"userLevel": policyDNSUserLevel,
 				"finalRules": []any{map[string]any{
 					"action": "allow", "network": "tcp,udp", "ip": []string{"127.0.0.0/8"}, "port": fmt.Sprint(port),
 				}},

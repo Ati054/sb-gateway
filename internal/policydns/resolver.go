@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 type upstream interface {
@@ -583,38 +585,50 @@ func (upstream *dohUpstream) close() {
 	}
 }
 
-func (runtime *runtime) resolve(
-	ctx context.Context,
-	laneID string,
-	query []byte,
-) ([]byte, error) {
+type queryPlan struct {
+	server upstream
+	key    string
+	answer []byte
+	local  bool
+}
+
+// Local decisions, including cache hits, must not need an upstream worker.
+// Keep routing validation shared with the ordinary resolution path.
+func (runtime *runtime) planQuery(laneID string, query []byte) (queryPlan, error) {
 	lane := runtime.lanes[laneID]
 	if lane == nil {
-		return nil, fmt.Errorf("unknown policy DNS lane %q", laneID)
+		return queryPlan{}, fmt.Errorf("unknown policy DNS lane %q", laneID)
 	}
 	name, err := questionName(query)
 	if err != nil {
-		return refusal(query, false), nil
+		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
 	target, rejected := lane.target(name)
 	if rejected {
-		return refusal(query, false), nil
+		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
 	server := runtime.servers[target]
 	if server == nil {
-		return refusal(query, false), nil
+		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
 	key, err := normalizedQueryKey(laneID, query)
 	if err != nil {
-		return refusal(query, false), nil
+		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
-	now := time.Now()
-	if response, ok := runtime.cache.get(key, query[:2], now); ok {
-		return response, nil
+	if response, ok := runtime.cache.get(key, query[:2], time.Now()); ok {
+		return queryPlan{answer: response, local: true}, nil
 	}
-	stale, hasStale := runtime.cache.getStale(key, query[:2], now)
-	normalized, err := runtime.flights.do(ctx, key, func() ([]byte, error) {
-		response, exchangeErr := server.exchange(ctx, query)
+	return queryPlan{server: server, key: key}, nil
+}
+
+func (runtime *runtime) resolve(ctx context.Context, laneID string, query []byte) ([]byte, error) {
+	plan, err := runtime.planQuery(laneID, query)
+	if err != nil || plan.local {
+		return plan.answer, err
+	}
+	stale, hasStale := runtime.cache.getStale(plan.key, query[:2], time.Now())
+	normalized, err := runtime.flights.do(ctx, plan.key, func() ([]byte, error) {
+		response, exchangeErr := plan.server.exchange(ctx, query)
 		if exchangeErr != nil {
 			return nil, exchangeErr
 		}
@@ -626,7 +640,7 @@ func (runtime *runtime) resolve(
 		}
 		ttl := responseTTL(response)
 		response[0], response[1] = 0, 0
-		runtime.cache.putOwned(key, response, ttl, time.Now())
+		runtime.cache.putOwned(plan.key, response, ttl, time.Now())
 		return response, nil
 	})
 	if err != nil {
@@ -703,17 +717,29 @@ func refusal(query []byte, serverFailure bool) []byte {
 	if len(query) < 12 {
 		return nil
 	}
-	response := append([]byte(nil), query...)
-	flags := binary.BigEndian.Uint16(response[2:4])
-	flags = (flags | 0x8080) &^ 0x000f
+	code := dns.RcodeRefused
 	if serverFailure {
-		flags |= 2
-	} else {
-		flags |= 5
+		code = dns.RcodeServerFailure
 	}
-	binary.BigEndian.PutUint16(response[2:4], flags)
-	for index := 6; index < 12; index++ {
-		response[index] = 0
+	flags := binary.BigEndian.Uint16(query[2:4])
+	response := dns.Msg{MsgHdr: dns.MsgHdr{
+		Id: binary.BigEndian.Uint16(query), Response: true, Opcode: int(flags>>11) & 15,
+		RecursionDesired: flags&0x0100 != 0, RecursionAvailable: true,
+		CheckingDisabled: flags&0x0010 != 0, Rcode: code,
+	}}
+	// Only the question belongs in an error reply; do not parse client sections.
+	if binary.BigEndian.Uint16(query[4:6]) == 1 {
+		name, end, err := dns.UnpackDomainName(query, 12)
+		if err == nil && end+4 <= len(query) {
+			response.Question = []dns.Question{{
+				Name: name, Qtype: binary.BigEndian.Uint16(query[end : end+2]),
+				Qclass: binary.BigEndian.Uint16(query[end+2 : end+4]),
+			}}
+		}
 	}
-	return response
+	wire, err := response.Pack()
+	if err != nil {
+		return nil
+	}
+	return wire
 }

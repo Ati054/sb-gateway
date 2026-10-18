@@ -592,7 +592,7 @@ func (controller *healthController) checkDuringProbe(now time.Time, pool healthP
 		}
 	}
 	if dirty {
-		if err := writeJSONAtomic(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
+		if err := publishHealthState(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
 			return errHealthYield
 		}
 	}

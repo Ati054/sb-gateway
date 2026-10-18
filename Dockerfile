@@ -65,7 +65,7 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
 ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
-ARG SB_GATEWAY_VERSION=1.6.63
+ARG SB_GATEWAY_VERSION=1.6.72-rc.4
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -76,14 +76,17 @@ COPY cmd ./cmd
 COPY internal ./internal
 COPY routeros ./routeros
 COPY scripts ./scripts
+COPY templates/client-profile.json.j2 templates/nginx-api-decoy.inc templates/nginx-decoy.inc templates/nginx.conf.j2 templates/xray-source-model.json.j2 ./templates/
+COPY templates/decoy ./templates/decoy
 RUN set -eux; \
     case "${SB_GATEWAY_GO_TAGS}" in xray_multicall|xray_multicall,sb_cpu_lab) ;; *) exit 1 ;; esac; \
     sh scripts/prepare-xray-multicall.sh /opt/xray-source /opt/xray-source/reality /src/multicall.mod; \
-    for package in ./cmd/sb-gateway ./internal/agent; do \
+    for package in ./cmd/sb-gateway ./internal/agent ./internal/domainset ./internal/policydns ./internal/runtimeconfig; do \
       test "$(go list -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" -f '{{if or .TestGoFiles .XTestGoFiles}}yes{{end}}' "$package")" = yes; \
     done; \
     go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./cmd/sb-gateway; \
     go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/agent; \
+    go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/domainset ./internal/policydns ./internal/runtimeconfig; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/app/router -run '^TestSB'; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/common/mux \
       github.com/xtls/xray-core/app/reverse \
@@ -112,7 +115,7 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
 ARG XRAY_VERSION=26.10.10
-ARG SB_GATEWAY_VERSION=1.6.63
+ARG SB_GATEWAY_VERSION=1.6.72-rc.4
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -152,7 +155,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.10.10
 ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.63
+ARG SB_GATEWAY_VERSION=1.6.72-rc.4
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \
@@ -180,6 +183,7 @@ ENV SB_GATEWAY_VERSION=${SB_GATEWAY_VERSION} \
     GOGC=150 \
     SB_MEMORY_BUDGET=1 \
     SB_MEMORY_BUDGET_ACME_LOAN=1 \
+    SB_MEMORY_PRESSURE_BUDGET=1 \
     SB_GATEWAY_API_HOST=127.0.0.1 \
     SB_GATEWAY_API_PORT=8080 \
     SB_GATEWAY_STATE_DIR=/state/control-plane \

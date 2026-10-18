@@ -107,6 +107,12 @@ if git grep -Il -E -- \
   exit 1
 fi
 
+private_report_pattern='внутренних отч[её]тах при[её]мки|фактическая при[её]мка|Windows / Node [0-9]|На CHR .* составил|При первоначальной проверке|Chrome [0-9]+/[0-9]+ px|[0-9]{4}-[0-9]{2}-[0-9]{2} реальные ответы|конкретного failover на CHR|ранее наблюдавшегося'
+if git grep -Il -E -- "$private_report_pattern" -- docs | grep -q .; then
+  printf '%s\n' "internal verification receipt exists in current public documentation" >&2
+  exit 1
+fi
+
 if git rev-list --objects --all \
   | cut -d' ' -f2- \
   | grep -E '(^|/)(\.lab|\.agents|\.codex|\.openai)(/|$)|^docs/(research/|.*(-VERIFICATION|-RESEARCH)\.md$|GEOIP-BINARY-EXPERIMENT\.md$|URLTEST-TRAFFIC-ACCOUNTING\.md$|XRAY-PAYLOAD-SNAPSHOT\.md$)|^internal/(appliance/image_artifact_test|routeros/(image_transfer_chr_test|logging_native_test))\.go$' \
@@ -117,7 +123,7 @@ fi
 
 for revision in $(git rev-list --all); do
   if git grep -Il -E -- \
-    'внутренних отч[её]тах при[её]мки|фактическая при[её]мка|Windows / Node [0-9]' \
+    "$private_report_pattern" \
     "$revision" -- docs | grep -q .; then
     printf '%s\n' "private acceptance report exists in public documentation history" >&2
     exit 1

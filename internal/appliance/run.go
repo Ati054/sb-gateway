@@ -53,6 +53,9 @@ func OptionsFromEnvironment() Options {
 }
 
 func Run(ctx context.Context, options Options) error {
+	if err := resetXrayStartupProof(options); err != nil {
+		return fmt.Errorf("reset startup readiness: %w", err)
+	}
 	if options.Monitor.GeoIPState == nil {
 		options.Monitor.GeoIPState = geoiprefresh.NewState(options.Monitor.GeoIP)
 	}

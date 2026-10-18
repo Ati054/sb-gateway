@@ -141,10 +141,10 @@ func TestStartupGraceRemainsABoundedFallback(t *testing.T) {
 }
 
 func TestFirstHealthyDataplaneDoesNotPayRecoveryHysteresis(t *testing.T) {
-	if got := recoverySuccessThreshold(3, false); got != 1 {
+	if got := recoverySuccessThreshold(3, false, false); got != 1 {
 		t.Fatalf("first readiness threshold=%d, want 1", got)
 	}
-	if got := recoverySuccessThreshold(3, true); got != 3 {
+	if got := recoverySuccessThreshold(3, true, false); got != 3 {
 		t.Fatalf("live recovery threshold=%d, want configured 3", got)
 	}
 }

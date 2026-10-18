@@ -50,8 +50,8 @@ func TestTrafficReadyPoliciesPreserveModesAndLocalAssignments(t *testing.T) {
 	if len(required) != 3 || required[0] != "all" || required[1] != "pc" || required[2] != "wan" {
 		t.Fatalf("required policies = %#v", required)
 	}
-	if len(pending) != 1 || pending[0] != "pc" {
-		t.Fatalf("pending policies = %#v", pending)
+	if len(pending) != 0 {
+		t.Fatalf("confirmed policy blackhole withdrew unrelated routes: %#v", pending)
 	}
 	selector["pc"] = map[string]any{"runtime_selected": "fr", "runtime_confirmed": true, "runtime_observed_at": "2026-09-19T10:00:01Z"}
 	_, pending = trafficReadyPolicies(active, selector, notBefore)
@@ -62,6 +62,38 @@ func TestTrafficReadyPoliciesPreserveModesAndLocalAssignments(t *testing.T) {
 	_, pending = trafficReadyPolicies(active, selector, notBefore)
 	if len(pending) != 1 || pending[0] != "pc" {
 		t.Fatalf("stale pre-restart selector evidence was accepted: %#v", pending)
+	}
+}
+
+func TestTrafficReadyBlockedPolicyStillRequiresFreshRuntimeProof(t *testing.T) {
+	active := map[string]any{
+		"policies":      []any{map[string]any{"id": "route", "enabled": true}},
+		"local_clients": []any{map[string]any{"id": "client", "enabled": true, "policy_id": "route"}},
+	}
+	notBefore := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		confirmed bool
+		selected  string
+		observed  string
+		pending   bool
+	}{
+		{"confirmed outage", true, "block", "2026-01-01T12:00:01Z", false},
+		{"unconfirmed block", false, "block", "2026-01-01T12:00:01Z", true},
+		{"old generation", true, "block", "2026-01-01T11:59:59Z", true},
+		{"missing date", true, "block", "", true},
+		{"missing selection", true, "", "2026-01-01T12:00:01Z", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selector := map[string]any{"route": map[string]any{
+				"runtime_confirmed": test.confirmed, "runtime_selected": test.selected,
+				"runtime_observed_at": test.observed,
+			}}
+			_, pending := trafficReadyPolicies(active, selector, notBefore)
+			if (len(pending) != 0) != test.pending {
+				t.Fatalf("pending=%v, want pending=%t", pending, test.pending)
+			}
+		})
 	}
 }
 
