@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.72-rc.5
+
+- Reuse TLS sessions for encrypted DNS reconnections.
+
 ## 1.6.72-rc.4
 
 - Reduce CPU and temporary memory use in traffic-readiness checks.

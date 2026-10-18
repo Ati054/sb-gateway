@@ -142,9 +142,10 @@ func newDoHUpstream(config serverConfig, timeout time.Duration) (upstream, error
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: config.ServerName,
-			NextProtos: []string{"h2", "http/1.1"},
+			MinVersion:         tls.VersionTLS12,
+			ServerName:         config.ServerName,
+			NextProtos:         []string{"h2", "http/1.1"},
+			ClientSessionCache: tls.NewLRUClientSessionCache(4),
 		},
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "tcp", dialAddress)
