@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.72
+
+- Reduce CPU and temporary memory use in traffic-readiness checks with bounded socket and netlink diagnostics.
+- Keep deep diagnostics off the live heartbeat path and invalidate cached evidence on runtime changes.
+- Return valid DNS failure responses for EDNS requests and reuse TLS sessions for encrypted DNS reconnections.
+- Use 288/320 MiB for new installations without changing existing memory limits.
+
 ## 1.6.72-rc.5
 
 - Reuse TLS sessions for encrypted DNS reconnections.
