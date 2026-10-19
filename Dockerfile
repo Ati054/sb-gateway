@@ -50,6 +50,7 @@ RUN git init \
     && git apply /tmp/xray-grpc-context-regression.patch \
     && git apply --check /tmp/xray-feature-warning-once.patch \
     && git apply /tmp/xray-feature-warning-once.patch \
+    && go test ./main \
     && go test ./common/errors -run '^TestSB' \
     && go test ./app/router -run '^TestSB' \
     && go test ./common/mux ./app/reverse ./proxy/vless/inbound \

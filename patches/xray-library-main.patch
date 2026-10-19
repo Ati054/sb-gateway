@@ -45,6 +45,13 @@ diff --git a/main/run_test.go b/main/run_test.go
  
  import (
  	"context"
+@@ -16,5 +16,5 @@ func TestRunConfigCommands(t *testing.T) {
+ 	if os.Getenv("XRAY_TEST_CONFIG_COMMAND") == "1" {
+ 		os.Args = append([]string{os.Args[0]}, flag.Args()...)
+-		main()
++		Main()
+ 		return
+ 	}
 diff --git a/main/main_test.go b/main/main_test.go
 --- a/main/main_test.go
 +++ b/main/main_test.go
