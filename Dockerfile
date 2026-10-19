@@ -9,8 +9,8 @@ FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build
 ARG TARGETARCH
 # The server can use the current validated core. Xray's simplified Reverse
 # regression is bridge-side; exported reverse clients are pinned separately.
-ARG XRAY_VERSION=26.10.10
-ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
+ARG XRAY_VERSION=26.10.17
+ARG XRAY_COMMIT=92ccc939aaf4f8965f369cf0b142e005aeaa11d5
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
 RUN test "${TARGETARCH}" = "arm64"
 RUN apk add --no-cache git patch
@@ -68,8 +68,8 @@ RUN set -eux; \
     go mod edit -replace github.com/xtls/reality=/src/reality
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
-ARG SB_GATEWAY_VERSION=1.6.73
+ARG XRAY_COMMIT=92ccc939aaf4f8965f369cf0b142e005aeaa11d5
+ARG SB_GATEWAY_VERSION=1.6.74
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -119,8 +119,8 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
-ARG XRAY_VERSION=26.10.10
-ARG SB_GATEWAY_VERSION=1.6.73
+ARG XRAY_VERSION=26.10.17
+ARG SB_GATEWAY_VERSION=1.6.74
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -157,10 +157,10 @@ RUN set -eux; \
     if ! grep -q '^www-data:' /etc/group; then addgroup -S www-data; fi; \
     if ! grep -q '^www-data:' /etc/passwd; then adduser -S -D -H -s /sbin/nologin -G www-data www-data; fi; \
     rm -f /etc/nginx/http.d/default.conf
-ARG XRAY_VERSION=26.10.10
-ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
+ARG XRAY_VERSION=26.10.17
+ARG XRAY_COMMIT=92ccc939aaf4f8965f369cf0b142e005aeaa11d5
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.73
+ARG SB_GATEWAY_VERSION=1.6.74
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \

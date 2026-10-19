@@ -472,6 +472,7 @@ func (controller *healthController) Tick(now time.Time) error {
 			item.OutageBatchStartedAt = time.Time{}
 		}
 	}
+	previousGeneration := controller.processedGeneration
 	pool, runtimeReset, err := controller.runtime.Reload()
 	if err != nil {
 		return err
@@ -525,6 +526,12 @@ func (controller *healthController) Tick(now time.Time) error {
 		policyIDs = append(policyIDs, policyID)
 	}
 	sort.Strings(policyIDs)
+	if runtimeReset && controller.processedGeneration.XrayPID > 0 &&
+		controller.processedGeneration.XrayPID != previousGeneration.XrayPID {
+		if err := controller.publishStartupReadbacks(pool, policyIDs); err != nil {
+			return fmt.Errorf("publish startup selector readbacks: %w", err)
+		}
+	}
 	controller.beginProbeBudget(pool, policyIDs)
 	sort.SliceStable(policyIDs, func(i, j int) bool {
 		if policyIDs[i] == controller.priorityPolicy || policyIDs[j] == controller.priorityPolicy {

@@ -141,7 +141,7 @@ index 07b8f6d..6077f96 100644
  	"time"
  
  	"github.com/apernet/quic-go"
-@@ -20,8 +21,9 @@ type interConn struct {
+@@ -20,10 +21,11 @@ type interConn struct {
  	local  net.Addr
  	remote net.Addr
  
@@ -150,19 +150,18 @@ index 07b8f6d..6077f96 100644
 +	client  bool
 +	user    *protocol.MemoryUser
 +	onClose func()
+ 	lock   chan struct{}
+ 	mu     sync.Mutex
  }
  
- func (c *interConn) User() *protocol.MemoryUser {
-@@ -45,6 +47,9 @@ func (c *interConn) Write(b []byte) (int, error) {
- }
- 
+ func (c *interConn) unlock() {
+@@ -51,3 +53,6 @@
  func (c *interConn) Close() error {
 +	if c.onClose != nil {
 +		defer c.onClose()
 +	}
- 	c.stream.CancelRead(0)
- 	return c.stream.Close()
- }
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
 @@ -77,11 +82,12 @@ type InterConn struct {
  	ch     chan []byte
  	time   time.Time
@@ -264,13 +263,14 @@ index 1d7b8a9..38517b4 100644
  	select {
  	case <-ctx.Done():
  		return nil, ctx.Err()
-@@ -256,11 +256,12 @@ func (c *client) tcp(ctx context.Context) (stat.Connection, error) {
+@@ -256,12 +256,13 @@ func (c *client) tcp(ctx context.Context) (stat.Connection, error) {
  		local:  c.conn.LocalAddr(),
  		remote: c.conn.RemoteAddr(),
  
 -		client: true,
 +		client:  true,
 +		onClose: release,
+ 		lock:   make(chan struct{}, 1),
  	}, nil
  }
  

@@ -319,11 +319,17 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 
 ## Pinned Core Upgrade
 
-The server pins the Xray 26.10.10 development snapshot through 2026-10-14 at
-`0888beb38a9ba45440557175e71ce21cf8ba3b13`, with REALITY
+The server pins upstream Xray v26.10.17 (an upstream pre-release) at
+`92ccc939aaf4f8965f369cf0b142e005aeaa11d5`, with REALITY
 `83f621788ca88b83179810b12baa7ae518aacb83`. This is not a stable upstream tag;
 promotion still requires renderer, Reverse and external data-plane acceptance.
 Exported Reverse bridge versions remain independently pinned.
+
+The v26.10.17 rebase preserves upstream Hysteria write/close cancellation and
+adds retirement callbacks without replacing its new per-stream locks. The VLESS
+failure hint patch follows the new import layout; Vision's Go 1.27.3+ changes
+remain intact. Build toolchains are pinned independently. Patch application,
+renderer validation and transport lifetime tests must pass before promotion.
 
 The upstream gRPC dialer now uses the shared channel's reconnect context, not
 the first stream's context. `xray-grpc-context-regression.patch` adds tests only:

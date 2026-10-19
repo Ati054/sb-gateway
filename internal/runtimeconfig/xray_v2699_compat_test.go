@@ -20,19 +20,19 @@ import (
 )
 
 // TestXrayPinnedRendererCompatibility runs only when XRAY_TEST_BINARY names the
-// pinned Xray 26.10.10 executable. It verifies syntax of complete renderer
+// pinned Xray 26.10.17 executable. It verifies syntax of complete renderer
 // output; it deliberately does not claim a Hysteria or Reverse data-plane
 // handshake.
 func TestXrayPinnedRendererCompatibility(t *testing.T) {
 	binary := strings.TrimSpace(os.Getenv("XRAY_TEST_BINARY"))
 	if binary == "" {
-		t.Skip("set XRAY_TEST_BINARY to the pinned Xray 26.10.10 binary")
+		t.Skip("set XRAY_TEST_BINARY to the pinned Xray 26.10.17 binary")
 	}
 	contextWithDeadline, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	version, err := exec.CommandContext(contextWithDeadline, binary, "version").CombinedOutput()
-	if err != nil || !strings.Contains(string(version), "Xray 26.10.10") {
-		t.Fatalf("XRAY_TEST_BINARY must be Xray 26.10.10: %v: %s", err, version)
+	if err != nil || !strings.Contains(string(version), "Xray 26.10.17") {
+		t.Fatalf("XRAY_TEST_BINARY must be Xray 26.10.17: %v: %s", err, version)
 	}
 
 	certificatePath, keyPath := writeXrayCompatCertificate(t)
@@ -102,7 +102,7 @@ func TestXrayPinnedRendererCompatibility(t *testing.T) {
 			}
 			output, runErr := exec.CommandContext(contextWithDeadline, binary, "run", "-test", "-config", configPath).CombinedOutput()
 			if runErr != nil {
-				t.Fatalf("Xray 26.10.10 rejected renderer output: %v: %s", runErr, output)
+				t.Fatalf("Xray 26.10.17 rejected renderer output: %v: %s", runErr, output)
 			}
 		})
 	}
@@ -135,7 +135,7 @@ func TestXrayPinnedRendererCompatibility(t *testing.T) {
 	}
 	output, err := exec.CommandContext(contextWithDeadline, binary, "run", "-test", "-config", configPath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("Xray 26.10.10 rejected UDP hopping client profile: %v: %s", err, output)
+		t.Fatalf("Xray 26.10.17 rejected UDP hopping client profile: %v: %s", err, output)
 	}
 }
 

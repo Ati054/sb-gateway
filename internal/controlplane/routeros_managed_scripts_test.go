@@ -6,6 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -29,6 +32,8 @@ func TestManagedScriptSyncMigratesWithoutBrowserAndRecoversJournal(t *testing.T)
 					_ = json.NewEncoder(w).Encode([]map[string]any{container})
 				case r.Method == http.MethodGet && r.URL.Path == "/rest/system/scheduler":
 					_ = json.NewEncoder(w).Encode(schedules)
+				case r.Method == http.MethodGet && r.URL.Path == "/rest/ip/firewall/mangle":
+					_, _ = w.Write([]byte(`[{"comment":"SB-GATEWAY diversion-gate","disabled":false}]`))
 				case r.Method == http.MethodGet && r.URL.Path == "/rest/system/script":
 					_ = json.NewEncoder(w).Encode(scripts)
 				case r.Method == http.MethodGet && r.URL.Path == "/rest/system/script/job":
@@ -72,11 +77,18 @@ func TestManagedScriptSyncMigratesWithoutBrowserAndRecoversJournal(t *testing.T)
 				t.Fatal(err)
 			}
 			config["transports"] = []any{}
+			config["local_clients"] = []any{}
 			revision, err := server.repository.stageGeneration(config)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := server.repository.setActiveRevision(revision); err != nil {
+			if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+				t.Fatal(err)
+			}
+			server.checkPersistentMounts = func() (bool, []string) { return true, nil }
+			marker := filepath.Join(t.TempDir(), "ready")
+			t.Setenv("SB_ROUTER_READY_MARKER", marker)
+			if err := os.WriteFile(marker, []byte(strconv.FormatInt(server.now().Unix(), 10)), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err := server.repository.saveAuxiliary("lifecycle-operation", map[string]any{"kind": "image-update", "state": "probation", "candidate_root": "usb1/sb-gateway/root-1.7.2", "previous_root": "usb1/sb-gateway/root"}); err != nil {

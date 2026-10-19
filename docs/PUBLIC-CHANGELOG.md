@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.74
+
+- Publish confirmed route selections before background quality surveys after a cold start.
+- Finish image updates only after route readiness and RouterOS traffic admission are confirmed.
+- Update the pinned server core to upstream Xray v26.10.17 with maintained gateway patches.
+- Preserve existing memory limits and the independent exported Reverse bridge compatibility pin.
+
 ## 1.6.73
 
 - Restore traffic after container restarts without the live-outage recovery pause.
