@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.73
+
+- Restore traffic after container restarts without the live-outage recovery pause.
+- Complete URLTest confirmations when fast reserves trade places in the latency ranking.
+- Report recurring Xray transport deprecation notices once per process.
+
 ## 1.6.72
 
 - Reduce CPU and temporary memory use in traffic-readiness checks with bounded socket and netlink diagnostics.

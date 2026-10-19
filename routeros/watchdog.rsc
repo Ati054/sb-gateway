@@ -69,6 +69,7 @@
   :global sbStartupSafety
   :global sbWatchdogStage
   :global sbLastHealthStatus
+  :global sbReadyGeneration
   :set sbWatchdogStage "started"
 
   :local exactGates [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]
@@ -172,18 +173,35 @@
   }
 
   :local healthy false
+  :local readyGeneration ""
   :set sbWatchdogStage "fetching"
   :set sbLastHealthStatus "checking"
   :onerror sbFetchError in={
     :local response [/tool/fetch url=$"SB_HEALTH_URL" output=user as-value idle-timeout=4s]
     :set sbLastHealthStatus [:tostr ($response->"status")]
-    :if (($response->"status") = "finished") do={ :set healthy true }
+    :if (($response->"status") = "finished") do={
+      :local readiness [:deserialize from=json value=($response->"data")]
+      :if (($readiness->"traffic_ready") = true) do={
+        :set healthy true
+        :local generation ($readiness->"runtime_started_at")
+        :if (([:typeof $generation] = "str") && ([:len $generation] > 0) && ([:len $generation] <= 64)) do={ :set readyGeneration $generation }
+      }
+    }
   } do={
     :set sbLastHealthStatus ("error:" . [:tostr $sbFetchError])
     :set healthy false
   }
 
   :if ($healthy = true) do={
+    # A new controller must first prove current-process selectors and a live
+    # readiness lease. Do not apply a live-outage cooldown to that restart.
+    # Consume the generation only on success; failed polls cannot arm admission.
+    :if ([:len $readyGeneration] > 0) do={
+      :if (([:typeof $sbReadyGeneration] != "str") || ($sbReadyGeneration != $readyGeneration)) do={
+        :set sbReadyGeneration $readyGeneration
+        :set sbStartupSafety true
+      }
+    }
     :local gateDisabled [/ip/firewall/mangle/get $gate disabled]
     :set sbHealthFailures 0
     :set sbHealthSuccesses ($sbHealthSuccesses + 1)

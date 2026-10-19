@@ -1,0 +1,95 @@
+diff --git a/common/errors/feature_errors.go b/common/errors/feature_errors.go
+--- a/common/errors/feature_errors.go
++++ b/common/errors/feature_errors.go
+@@ -2,11 +2,21 @@ package errors
+ 
+ import (
+ 	"context"
++	"sync"
+ )
+ 
++// These keys are static feature names, not outbound tags or user configuration.
++var nonRemovalDeprecatedWarnings sync.Map
++
+ // PrintNonRemovalDeprecatedFeatureWarning prints a warning of the deprecated feature that won't be removed in the near future.
+ // Do not remove this function even there is no reference to it.
+ func PrintNonRemovalDeprecatedFeatureWarning(sourceFeature string, targetFeature string) {
++	// Library callers compile temporary outbounds repeatedly in the same process.
++	// Keep the first notice without flooding the controller's diagnostic stream.
++	key := [2]string{sourceFeature, targetFeature}
++	if _, loaded := nonRemovalDeprecatedWarnings.LoadOrStore(key, struct{}{}); loaded {
++		return
++	}
+ 	LogWarning(context.Background(), "The feature "+sourceFeature+" is deprecated, not recommended for using and might be removed. Please migrate to "+targetFeature+" as soon as possible.")
+ }
+ 
+diff --git a/common/errors/sb_feature_warning_test.go b/common/errors/sb_feature_warning_test.go
+new file mode 100644
+--- /dev/null
++++ b/common/errors/sb_feature_warning_test.go
+@@ -0,0 +1,65 @@
++package errors
++
++import (
++	"context"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/xtls/xray-core/common/log"
++)
++
++type sbFeatureWarningLog struct {
++	sync.Mutex
++	messages []string
++}
++
++func (handler *sbFeatureWarningLog) Handle(message log.Message) {
++	handler.Lock()
++	defer handler.Unlock()
++	handler.messages = append(handler.messages, message.String())
++}
++
++func TestSBNonRemovalFeatureWarningOnce(t *testing.T) {
++	nonRemovalDeprecatedWarnings = sync.Map{}
++	handler := &sbFeatureWarningLog{}
++	log.RegisterHandler(handler)
++	t.Cleanup(func() {
++		log.RegisterHandler(log.NewLogger(log.CreateStdoutLogWriter()))
++		nonRemovalDeprecatedWarnings = sync.Map{}
++	})
++	var workers sync.WaitGroup
++	for range 64 {
++		workers.Add(1)
++		go func() {
++			defer workers.Done()
++			PrintNonRemovalDeprecatedFeatureWarning("fixture", "replacement")
++		}()
++	}
++	workers.Wait()
++	PrintNonRemovalDeprecatedFeatureWarning("fixture", "other replacement")
++	PrintNonRemovalDeprecatedFeatureWarning("other fixture", "replacement")
++	for range 2 {
++		LogWarning(context.Background(), "ordinary-warning")
++		LogError(context.Background(), "connection-error")
++		PrintDeprecatedFeatureWarning("urgent-fixture", "replacement")
++		if PrintRemovedFeatureError("removed-fixture", "replacement") == nil {
++			t.Fatal("removed feature did not return an error")
++		}
++	}
++	counts := make(map[string]int)
++	for _, message := range handler.messages {
++		for _, fragment := range []string{"The feature ", "ordinary-warning", "connection-error", "urgent-fixture"} {
++			if strings.Contains(message, fragment) {
++				counts[fragment]++
++			}
++		}
++	}
++	for fragment, want := range map[string]int{
++		"The feature ": 3, "ordinary-warning": 2, "connection-error": 2, "urgent-fixture": 2,
++	} {
++		if got := counts[fragment]; got != want {
++			t.Errorf("%s: got %d log records, want %d", fragment, got, want)
++		}
++	}
++}

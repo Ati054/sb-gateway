@@ -1,9 +1,51 @@
 package controlplane
 
 import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
+
+func TestTrafficReadinessDatesEachControllerWithoutBypassingProof(t *testing.T) {
+	server := newTestServer(t)
+	config := routerOSReadyConfig(t)
+	config["local_clients"] = []any{}
+	revision, err := server.repository.stageGeneration(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "router-ready")
+	t.Setenv("SB_ROUTER_READY_MARKER", marker)
+	server.checkPersistentMounts = func() (bool, []string) { return true, nil }
+	wantGeneration := server.trafficReadyAfter.UTC().Format(time.RFC3339Nano)
+	for _, healthy := range []bool{false, true, true, false} {
+		if healthy {
+			if err := os.WriteFile(marker, []byte(strconv.FormatInt(server.now().Unix(), 10)), 0600); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		response := performRequest(t, server, http.MethodGet, "/api/health/traffic-ready", nil, nil)
+		body := decodeResponse(t, response)
+		if body["runtime_started_at"] != wantGeneration || body["traffic_ready"] != healthy {
+			t.Fatalf("startup identity bypassed readiness or changed between polls: %s", response.Body.String())
+		}
+		if (response.Code == http.StatusOK) != healthy {
+			t.Fatalf("incorrect readiness HTTP status: %d", response.Code)
+		}
+	}
+	other := newTestServer(t)
+	if other.trafficReadyAfter.Equal(server.trafficReadyAfter) {
+		t.Fatal("new controller reused the previous startup identity")
+	}
+}
 
 func TestRouterReadinessLeaseTTLFavorsFastFailOpen(t *testing.T) {
 	tests := []struct {

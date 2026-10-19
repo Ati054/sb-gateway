@@ -103,6 +103,28 @@ func TestWatchdogReconcilesActualGateAfterFreshHealth(t *testing.T) {
 	}
 }
 
+func TestWatchdogConsumesRestartIdentityOnlyAfterFreshTrafficReadiness(t *testing.T) {
+	source := HealthWatchdogSource()
+	fetch := strings.Index(source, `:local response [/tool/fetch`)
+	parse := strings.Index(source, `:local readiness [:deserialize from=json value=($response->"data")]`)
+	proof := strings.Index(source, `:if (($readiness->"traffic_ready") = true)`)
+	healthy := strings.Index(source, `:if ($healthy = true)`)
+	consume := strings.Index(source, `:set sbReadyGeneration $readyGeneration`)
+	if consume < 0 {
+		t.Fatal("watchdog does not track successful startup identity")
+	}
+	startup := strings.Index(source[consume:], `:set sbStartupSafety true`)
+	enable := strings.Index(source, `/ip/firewall/mangle/enable $gate`)
+	if fetch < 0 || parse < fetch || proof < parse || healthy < proof || consume < healthy || startup < 0 || enable < consume+startup {
+		t.Fatal("new startup identity must be consumed only after a successful current-process readiness proof")
+	}
+	for _, required := range []string{`($readiness->"runtime_started_at")`, `($sbReadyGeneration != $readyGeneration)`, `[:len $generation] <= 64`, `SB_HEALTH_RECOVERY_THRESHOLD`, `SB_HEALTH_COOLDOWN_TICKS`} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("missing bounded startup identity or ordinary outage hysteresis: %s", required)
+		}
+	}
+}
+
 func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
 	source := HealthWatchdogSource()
 	cleanup := strings.Index(source, "      $clearRecoveredDNS")

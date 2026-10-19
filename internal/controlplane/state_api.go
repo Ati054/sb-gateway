@@ -244,6 +244,7 @@ func (server *Server) trafficReadiness(response http.ResponseWriter, request *ht
 	ready := baseReady && len(pending) == 0
 	payload["ready"] = ready
 	payload["traffic_ready"] = ready
+	payload["runtime_started_at"] = server.trafficReadyAfter.UTC().Format(time.RFC3339Nano)
 	payload["required_local_policies"] = required
 	payload["pending_local_policies"] = pending
 	status := http.StatusOK

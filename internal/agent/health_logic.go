@@ -314,6 +314,15 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 					measuredStable = append(measuredStable, candidate)
 				}
 			}
+			// Finish an independent confirmation before nominating another fast
+			// reserve. Otherwise small rank changes can pin a much slower active.
+			pending := item.OptimizationCandidate
+			if item.OptimizationChecks > 0 && item.OptimizationBaseline == selected &&
+				freshComparisonAt(now, item.OptimizationLastResult, p) && contains(measuredStable, pending) {
+				if better := meaningfullyBetter(selected, []string{pending}, medians, p); better != "" {
+					return better, "meaningfully-faster"
+				}
+			}
 			if better := meaningfullyBetter(selected, measuredStable, medians, p); better != "" {
 				desired, reason = better, "meaningfully-faster"
 			}
