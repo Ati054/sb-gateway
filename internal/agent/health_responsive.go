@@ -297,6 +297,22 @@ func (runtime *responsiveSelectorRuntime) UnderlayStatus() underlayEvidence {
 	return underlayEvidence{}
 }
 
+func (runtime *responsiveSelectorRuntime) reverseOnlineStatus(candidate string) (bool, error) {
+	stamp := generationStamp(runtime.generationPaths)
+	if stamp != runtime.generation || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+		return false, errHealthYield
+	}
+	observer, ok := runtime.selectorRuntime.(reverseSessionRuntime)
+	if !ok {
+		return false, errProbeSelectorUnavailable
+	}
+	online, err := observer.reverseOnlineStatus(candidate)
+	if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
+		return false, errHealthYield
+	}
+	return online, err
+}
+
 func (runtime *responsiveSelectorRuntime) ProbeAvailabilityParallel(candidates []string, onResult func(string, probeEvidence) bool) map[string]probeEvidence {
 	return runtime.probeAvailabilityParallel(candidates, onResult, true)
 }

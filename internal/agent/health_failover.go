@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type probeFailureClass string
 
@@ -37,6 +40,38 @@ type rankedEmergencyAvailabilityRuntime interface {
 
 type emergencyCandidateRuntime interface {
 	ProbeEmergencyAvailability(string) probeEvidence
+}
+
+type reverseSessionRuntime interface {
+	reverseOnlineStatus(string) (bool, error)
+}
+
+func (controller *healthController) retainTimedOutSelection(selected string, candidates []string, contract healthPolicyContract, item *policyHealthState) (bool, error) {
+	if !item.RuntimeConfirmed || selected == "" || selected == "block" ||
+		!contains(candidates, selected) || item.FailureClass[selected] != string(probeFailureTimeout) {
+		return false, nil
+	}
+	switch contract.Nodes[selected].Protocol {
+	case "vless", "reality":
+		return true, nil
+	case "xray-reverse":
+		// Handler presence alone can outlive a bridge. Never reuse a saved
+		// online observation to retain a Reverse path after an HTTP timeout.
+		runtime, ok := controller.runtime.(reverseSessionRuntime)
+		if !ok {
+			return false, nil
+		}
+		online, err := runtime.reverseOnlineStatus(selected)
+		if err != nil {
+			if errors.Is(err, errHealthYield) {
+				return false, err
+			}
+			return false, errProbeSelectorUnavailable
+		}
+		return online, nil
+	default:
+		return false, nil
+	}
 }
 
 const emergencyPreferenceWait = time.Second

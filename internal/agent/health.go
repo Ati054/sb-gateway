@@ -1135,6 +1135,17 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	}
 
 	desired, reason := selectDesired(now, contract.Mode, selected, candidates, groupIndex, dailyStats, medians, measured, qualityOK, availabilityOK, item, p)
+	if desired == "block" && reason == "all-candidates-unavailable" {
+		retain, err := controller.retainTimedOutSelection(selected, candidates, contract, item)
+		if err != nil {
+			return err
+		}
+		if retain {
+			// A probe timeout is not proof that existing or new user traffic
+			// cannot pass. Keep the permitted encrypted path, not its health.
+			desired, reason = selected, ""
+		}
+	}
 	if coldSelection && contract.Mode == "best" && !emergencySwitched {
 		// Choose the lowest successful first-batch latency, not a tolerated
 		// inventory default. Restarts with working history keep their selection.
