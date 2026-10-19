@@ -25,6 +25,7 @@ COPY patches/xray-library-main.patch /tmp/xray-library-main.patch
 COPY patches/xray-health-probe-lifetime.patch /tmp/xray-health-probe-lifetime.patch
 COPY patches/xray-reverse-backpressure-selection.patch /tmp/xray-reverse-backpressure-selection.patch
 COPY patches/xray-grpc-context-regression.patch /tmp/xray-grpc-context-regression.patch
+COPY patches/xray-feature-warning-once.patch /tmp/xray-feature-warning-once.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -47,6 +48,9 @@ RUN git init \
     && git apply /tmp/xray-reverse-backpressure-selection.patch \
     && git apply --check /tmp/xray-grpc-context-regression.patch \
     && git apply /tmp/xray-grpc-context-regression.patch \
+    && git apply --check /tmp/xray-feature-warning-once.patch \
+    && git apply /tmp/xray-feature-warning-once.patch \
+    && go test ./common/errors -run '^TestSB' \
     && go test ./app/router -run '^TestSB' \
     && go test ./common/mux ./app/reverse ./proxy/vless/inbound \
     && go test ./proxy ./proxy/vless/outbound ./app/proxyman/outbound \
@@ -65,7 +69,7 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
 ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
-ARG SB_GATEWAY_VERSION=1.6.72
+ARG SB_GATEWAY_VERSION=1.6.73
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -88,6 +92,7 @@ RUN set -eux; \
     go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/agent; \
     go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/domainset ./internal/policydns ./internal/runtimeconfig; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/app/router -run '^TestSB'; \
+    go test -modfile=/src/multicall.mod github.com/xtls/xray-core/common/errors -run '^TestSB'; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/common/mux \
       github.com/xtls/xray-core/app/reverse \
       github.com/xtls/xray-core/proxy/vless/inbound \
@@ -115,7 +120,7 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
 ARG XRAY_VERSION=26.10.10
-ARG SB_GATEWAY_VERSION=1.6.72
+ARG SB_GATEWAY_VERSION=1.6.73
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -155,7 +160,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.10.10
 ARG XRAY_COMMIT=0888beb38a9ba45440557175e71ce21cf8ba3b13
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.72
+ARG SB_GATEWAY_VERSION=1.6.73
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \

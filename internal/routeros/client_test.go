@@ -212,6 +212,7 @@ func TestManagedScriptUsesDedicatedActionTimeout(t *testing.T) {
 func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testing.T) {
 	var requests []string
 	var patchedSource string
+	var patchedWatchdog string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests = append(requests, request.Method+" "+request.URL.RequestURI())
 		response.Header().Set("Content-Type", "application/json")
@@ -219,7 +220,8 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script":
 			_, _ = response.Write([]byte(`[
 				{".id":"*10","name":"SB-GATEWAY-watchdog-config","comment":"SB-GATEWAY watchdog persisted config","source":":global \"SB_HEALTH_URL\" \"http://172.31.255.2:9080/healthz\";"},
-				{".id":"*11","name":"SB-GATEWAY-startup-fail-open","comment":"SB-GATEWAY startup fail-open","source":"safe"}
+				{".id":"*11","name":"SB-GATEWAY-startup-fail-open","comment":"SB-GATEWAY startup fail-open","source":"safe"},
+				{".id":"*12","name":"SB-GATEWAY-health-watchdog","comment":"SB-GATEWAY health watchdog","source":"old watchdog"}
 			]`))
 		case request.Method == http.MethodPatch && request.URL.Path == "/rest/system/script/*10":
 			var payload map[string]any
@@ -229,6 +231,16 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 			}
 			patchedSource = text(payload["source"])
 			_, _ = response.Write([]byte(`{}`))
+		case request.Method == http.MethodPatch && request.URL.Path == "/rest/system/script/*12":
+			var payload map[string]any
+			if json.NewDecoder(request.Body).Decode(&payload) != nil || len(payload) != 1 {
+				t.Error("startup watchdog update must change only source")
+				return
+			}
+			patchedWatchdog = text(payload["source"])
+			_, _ = response.Write([]byte(`{}`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script/*12":
+			_ = json.NewEncoder(response).Encode(map[string]any{"source": patchedWatchdog})
 		case request.Method == http.MethodPost && request.URL.Path == "/rest/system/script/run":
 			_, _ = response.Write([]byte(`[]`))
 		default:
@@ -250,9 +262,14 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 	if !strings.Contains(patchedSource, ":9080/traffic-ready") || strings.Contains(patchedSource, ":9080/healthz") {
 		t.Fatalf("patched source = %q", patchedSource)
 	}
+	if !strings.Contains(patchedWatchdog, "runtime_started_at") || !strings.Contains(patchedWatchdog, "SB_HEALTH_COOLDOWN_TICKS") {
+		t.Fatal("restart-aware admission or ordinary outage cooldown was not installed")
+	}
 	want := []string{
 		"GET /rest/system/script?.proplist=.id,name,comment,source",
 		"PATCH /rest/system/script/*10",
+		"PATCH /rest/system/script/*12",
+		"GET /rest/system/script/*12?.proplist=source",
 		"POST /rest/system/script/run",
 		"POST /rest/system/script/run",
 	}

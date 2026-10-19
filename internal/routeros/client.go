@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	routerosassets "github.com/sb-gateway/sb-gateway/routeros"
 )
 
 const maxResponseBytes = 4 << 20
@@ -284,7 +286,7 @@ func (client *Client) WaitManagedDiversion(ctx context.Context) error {
 // EnforceStartupTrafficSafety migrates an existing installation from the
 // legacy container-only health gate to the route-aware traffic gate, then
 // immediately enters the already-owned fail-open startup state. It touches
-// only two exact scripts with exact project comments; foreign or ambiguous
+// only exact scripts with exact project comments; foreign or ambiguous
 // resources stop the operation without mutation.
 func (client *Client) EnforceStartupTrafficSafety(ctx context.Context) (bool, error) {
 	rows, err := client.list(ctx, "/rest/system/script?.proplist=.id,name,comment,source")
@@ -297,8 +299,9 @@ func (client *Client) EnforceStartupTrafficSafety(ctx context.Context) (bool, er
 		item    ownedScript
 		seen    bool
 	}{
-		watchdogConfigScript:  {comment: "SB-GATEWAY watchdog persisted config"},
-		startupFailOpenScript: {comment: "SB-GATEWAY startup fail-open"},
+		watchdogConfigScript:         {comment: "SB-GATEWAY watchdog persisted config"},
+		startupFailOpenScript:        {comment: "SB-GATEWAY startup fail-open"},
+		"SB-GATEWAY-health-watchdog": {comment: "SB-GATEWAY health watchdog"},
 	}
 	for _, row := range rows {
 		name := text(row["name"])
@@ -318,7 +321,8 @@ func (client *Client) EnforceStartupTrafficSafety(ctx context.Context) (bool, er
 	}
 	config := wanted[watchdogConfigScript]
 	failOpen := wanted[startupFailOpenScript]
-	if !config.seen || config.item.id == "" || !failOpen.seen || failOpen.item.id == "" {
+	watchdog := wanted["SB-GATEWAY-health-watchdog"]
+	if !config.seen || config.item.id == "" || !failOpen.seen || failOpen.item.id == "" || !watchdog.seen || watchdog.item.id == "" {
 		return false, errors.New("startup traffic safety scripts are missing")
 	}
 	source := config.item.source
@@ -333,6 +337,23 @@ func (client *Client) EnforceStartupTrafficSafety(ctx context.Context) (bool, er
 		migrated = true
 	default:
 		return false, errors.New("watchdog health URL is missing or ambiguous")
+	}
+	// Install restart-aware admission before starting Xray, not on the regular
+	// one-minute script sync after image probation. Preserve thresholds/timing.
+	wantWatchdog := routerosassets.HealthWatchdogSource()
+	if strings.TrimSpace(strings.ReplaceAll(watchdog.item.source, "\r\n", "\n")) != wantWatchdog {
+		path := "/rest/system/script/" + routerOSResourceID(watchdog.item.id)
+		if _, err := client.request(ctx, http.MethodPatch, path, map[string]any{"source": wantWatchdog}); err != nil {
+			return false, err
+		}
+		readback, err := client.request(ctx, http.MethodGet, path+"?.proplist=source", nil)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(strings.ReplaceAll(text(readback["source"]), "\r\n", "\n")) != wantWatchdog {
+			return false, errors.New("startup watchdog source readback differs")
+		}
+		migrated = true
 	}
 	if _, err := client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": config.item.id}); err != nil {
 		return false, fmt.Errorf("load traffic-ready watchdog config: %w", err)
