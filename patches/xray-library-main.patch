@@ -36,6 +36,15 @@ diff --git a/main/version.go b/main/version.go
  
  import (
  	"fmt"
+diff --git a/main/run_test.go b/main/run_test.go
+--- a/main/run_test.go
++++ b/main/run_test.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"context"
 diff --git a/main/main_test.go b/main/main_test.go
 --- a/main/main_test.go
 +++ b/main/main_test.go

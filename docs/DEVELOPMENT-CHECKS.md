@@ -330,6 +330,8 @@ adds retirement callbacks without replacing its new per-stream locks. The VLESS
 failure hint patch follows the new import layout; Vision's Go 1.27.3+ changes
 remain intact. Build toolchains are pinned independently. Patch application,
 renderer validation and transport lifetime tests must pass before promotion.
+The multicall library patch also moves upstream's CLI tests into `maincmd`;
+new upstream test files must retain the same package as the importable CLI.
 
 The upstream gRPC dialer now uses the shared channel's reconnect context, not
 the first stream's context. `xray-grpc-context-regression.patch` adds tests only:
