@@ -203,6 +203,13 @@ fields can be retained. Consumers must validate before runtime publication;
 typed boundary decoders must reject malformed values rather than silently
 defaulting them. Validation/runtime agreement is already tested for enabled
 defaults, transport settings, DNS controls and configuration-owned exits.
+
+`health_timeout_retention_test.go` exercises permitted VLESS retention after
+confirmed HTTPS timeouts in both priority and URLTest modes, without promoting
+failed health or changing service permissions. It also checks fresh-reserve
+failover, live Reverse session revalidation, membership removal, explicit
+network/TLS failures and rejection of non-VLESS exits. A retained route is not
+evidence that the remote transport or the surrounding network is healthy.
 These tests are important but do not provide compile-time coverage for every
 string key. This change does not convert the complete schema or split large
 files. Add focused validation-to-rendering contracts when changing a field.

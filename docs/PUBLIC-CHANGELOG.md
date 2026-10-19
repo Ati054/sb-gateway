@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.75
+
+- Keep the current permitted VLESS after confirmed HTTPS timeouts when no freshly successful reserve exists, without a WAN fallback or a healthy status.
+- Require a fresh online-session observation before retaining Reverse; removed or disabled nodes and explicit network/TLS failures still fail closed without a working reserve.
+
 ## 1.6.74
 
 - Publish confirmed route selections before background quality surveys after a cold start.

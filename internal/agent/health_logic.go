@@ -270,9 +270,8 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 		if len(alternatives) > 0 {
 			desired, reason = alternatives[0], "active-unavailable"
 		} else {
-			// The active path is already confirmed unavailable. Do not keep
-			// sending new connections to it merely because another candidate is
-			// still unconfirmed; fail closed until a qualified reserve appears.
+			// Only the controller may retain an eligible encrypted active on
+			// timeouts; Reverse additionally needs a fresh online observation.
 			desired, reason = "block", "all-candidates-unavailable"
 		}
 	} else {
