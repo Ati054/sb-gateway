@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
@@ -123,10 +124,17 @@ func restoreXraySelectors(configPath string, opts Options, runtime *xraySelector
 			}
 		}
 	}
+	confirmed := make(healthState, len(plan.Balancers))
 	for _, balancer := range plan.Balancers {
 		if err := runtime.Select(balancer.Tag, balancer.Outbound); err != nil {
 			return fmt.Errorf("restore selector %s: %w", balancer.Tag, err)
 		}
+		confirmed[balancer.Tag] = &policyHealthState{RuntimeSelected: balancer.Outbound,
+			RuntimeConfirmed: true, RuntimeObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	}
+	if opts.StateRoot != "" {
+		// Publish only live readbacks; startup never rewrites historical health.
+		return publishSelectorReadiness(statePath(opts.StateRoot, "selector-health"), confirmed)
 	}
 	return nil
 }

@@ -269,7 +269,9 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 	} else if !schedulerPresent && transitionCount == 0 {
 		switch currentRoot {
 		case text(operation["candidate_root"]):
-			nextState = "completed"
+			if server.imageUpdateTrafficAdmitted(ctx, stack.REST) {
+				nextState = "completed"
+			}
 		case text(operation["previous_root"]):
 			if nextState == "preparing" && text(operation["schedule_confirmation"]) == "pending" {
 				deadline, deadlineErr := time.Parse(time.RFC3339Nano, text(operation["schedule_confirmation_deadline_at"]))
@@ -296,6 +298,37 @@ func (server *Server) reconcileLifecycleOperation(parent context.Context, config
 	_ = server.repository.saveAuxiliary("lifecycle-operation", operation)
 	log.Printf("lifecycle image update state=%s version=%s", nextState, text(operation["version"]))
 	return operation
+}
+
+// Older autonomous workers can commit on process health alone. The new panel
+// must still wait for current selector proof and the actual RouterOS gate.
+func (server *Server) imageUpdateTrafficAdmitted(ctx context.Context, client *routeros.Client) bool {
+	active, err := server.repository.loadActive()
+	if err != nil {
+		return false
+	}
+	if ready, _ := server.routerReadinessState(active); !ready {
+		return false
+	}
+	selector, err := server.repository.selectorReadiness()
+	if err != nil {
+		return false
+	}
+	if _, pending := trafficReadyPolicies(active, selector, server.trafficReadyAfter); len(pending) > 0 {
+		return false
+	}
+	rows, err := client.List(ctx, "/rest/ip/firewall/mangle?.proplist=.id,comment,disabled")
+	if err != nil {
+		return false
+	}
+	found, enabled := 0, false
+	for _, row := range rows {
+		if text(row["comment"]) == "SB-GATEWAY diversion-gate" {
+			found++
+			enabled = row["disabled"] == false || text(row["disabled"]) == "false"
+		}
+	}
+	return found == 1 && enabled
 }
 
 func routerOSByteSize(value any) (int64, bool) {

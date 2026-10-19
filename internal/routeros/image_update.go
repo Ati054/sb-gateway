@@ -314,7 +314,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :return true`,
 		`}`,
 
-		// Probation: three consecutive healthy scheduler passes commit; any
+		// Probation: three consecutive traffic-admitted scheduler passes commit; any
 		// container restart or sixty misses restore the old image. Large GeoIP
 		// configs can need a longer cold Xray start on single-core RouterOS.
 		`:if (([:len $current] = 1) && ([:len $candidate] = 0) && ([:len $rollback] = 1)) do={`,
@@ -323,12 +323,14 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :local trafficReady false`,
 		`  :do { :local trafficProbe ([/tool/fetch url=$trafficURL output=user as-value]->"data"); :if ([:typeof [:find $trafficProbe "\"traffic_ready\":true"]] = "num") do={ :set trafficReady true } } on-error={}`,
 		`  :local probationGate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]`,
+		`  :local trafficAdmitted false`,
 		`  :if ([:len $probationGate] = 1) do={ :if ($trafficReady = true) do={ /ip/firewall/mangle/enable $probationGate } else={ /ip/firewall/mangle/disable $probationGate } }`,
+		`  :if (([:len $probationGate] = 1) && ($trafficReady = true)) do={ :set trafficAdmitted ([/ip/firewall/mangle/get $probationGate disabled] = false) }`,
 		`  :local restartCount 0`,
 		`  :do { :set restartCount [/container/get $current restart-count] } on-error={}`,
 		`  :if ([:typeof $sbGatewayImageProbation] = "nil") do={ :set sbGatewayImageProbation 0 }`,
 		`  :if ([:typeof $sbGatewayImageMisses] = "nil") do={ :set sbGatewayImageMisses 0 }`,
-		`  :if (($healthy = true) && ($restartCount = 0)) do={ :set sbGatewayImageProbation ($sbGatewayImageProbation + 1); :set sbGatewayImageMisses 0 } else={ :set sbGatewayImageProbation 0; :set sbGatewayImageMisses ($sbGatewayImageMisses + 1) }`,
+		`  :if (($healthy = true) && ($trafficReady = true) && ($trafficAdmitted = true) && ($restartCount = 0)) do={ :set sbGatewayImageProbation ($sbGatewayImageProbation + 1); :set sbGatewayImageMisses 0 } else={ :set sbGatewayImageProbation 0; :set sbGatewayImageMisses ($sbGatewayImageMisses + 1) }`,
 		`  :if ($sbGatewayImageProbation >= 3) do={`,
 		`    :if ([:len $transfer] = 1) do={ :set ($receipt->"phase") "commit"; /system/script/set $transfer source=[:serialize to=json value=$receipt] }`,
 		`    :if ([/container/get $current start-on-boot] != false) do={ :error "SB-GATEWAY candidate boot policy changed during probation" }`,

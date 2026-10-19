@@ -204,6 +204,21 @@ func TestImageRetentionOnlyRunsAfterHealthyProbation(t *testing.T) {
 	}
 }
 
+func TestImageUpdateCannotCommitBeforeTrafficAdmission(t *testing.T) {
+	worker := renderImageUpdateWorker(ImageUpdateSpec{Version: "1.7.2", StorageRoot: "usb1/sb-gateway",
+		CandidateRoot: "usb1/sb-gateway/root-1.7.2", CandidateSource: "local-file",
+		CandidateReference: "usb1/sb-gateway/data/lifecycle-uploads/image.tar", ContainerAddress: "192.0.2.2"})
+	admission := strings.Index(worker, `:set trafficAdmitted ([/ip/firewall/mangle/get $probationGate disabled] = false)`)
+	confirmation := strings.Index(worker, `:if (($healthy = true) && ($trafficReady = true) && ($trafficAdmitted = true) && ($restartCount = 0))`)
+	commit := strings.Index(worker, `:if ($sbGatewayImageProbation >= 3)`)
+	if admission < 0 || confirmation <= admission || commit <= confirmation {
+		t.Fatal("image commit must require fresh traffic readiness and exact diversion-gate readback")
+	}
+	if strings.Contains(worker, `:if (($healthy = true) && ($restartCount = 0)) do={ :set sbGatewayImageProbation`) {
+		t.Fatal("controller-only health can still complete an update before routes are ready")
+	}
+}
+
 func TestImageUpdateTransfersPersistentMountOwnershipExclusively(t *testing.T) {
 	spec := ImageUpdateSpec{Version: "1.6.0", StorageRoot: "pcie1/sb-gateway", CandidateRoot: "pcie1/sb-gateway/root-1.6.0", CandidateSource: "local-file", CandidateReference: "pcie1/sb-gateway/data/lifecycle-uploads/image.tar", ContainerAddress: "192.0.2.2", KeepPrevious: true}
 	worker := renderImageUpdateWorker(spec)

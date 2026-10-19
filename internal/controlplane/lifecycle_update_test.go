@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNativeImageUpdateSchedulesVerifiedCandidateWithRecovery(t *testing.T) {
@@ -327,6 +329,8 @@ func TestLifecycleStatusReconcilesCompletedRouterOSImageUpdate(t *testing.T) {
 			_, _ = response.Write([]byte(`[{".id":"*1","comment":"SB-GATEWAY container","root-dir":"/usb1/sb-gateway/root-1.7.2","memory-high":"192.0MiB","memory-max":"268435456"}]`))
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/scheduler":
 			_, _ = response.Write([]byte(`[]`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/ip/firewall/mangle":
+			_, _ = response.Write([]byte(`[{".id":"*2","comment":"SB-GATEWAY diversion-gate","disabled":"false"}]`))
 		case request.Method == http.MethodPatch && request.URL.Path == "/rest/container/*1":
 			if err := json.NewDecoder(request.Body).Decode(&memoryPatch); err != nil {
 				http.Error(response, "bad memory patch", http.StatusBadRequest)
@@ -341,6 +345,27 @@ func TestLifecycleStatusReconcilesCompletedRouterOSImageUpdate(t *testing.T) {
 	server := newTestServer(t)
 	cookie, _ := bootstrapSession(t, server)
 	configureLifecycleRouter(t, server, router)
+	config, err := server.getDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["local_clients"] = []any{}
+	if _, err := server.repository.saveDraft(config); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := server.repository.stageGeneration(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("SB_ROUTER_READY_MARKER", marker)
+	if err := os.WriteFile(marker, []byte(strconv.FormatInt(server.now().Unix(), 10)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server.checkPersistentMounts = func() (bool, []string) { return true, nil }
 	if err := server.repository.saveAuxiliary("lifecycle-operation", map[string]any{
 		"kind": "image-update", "state": "probation", "candidate_root": "usb1/sb-gateway/root-1.7.2", "previous_root": "usb1/sb-gateway/root",
 	}); err != nil {
@@ -357,6 +382,80 @@ func TestLifecycleStatusReconcilesCompletedRouterOSImageUpdate(t *testing.T) {
 	if memoryPatch != nil {
 		t.Fatalf("read-only lifecycle polling changed memory limits and could restart the container: %#v", memoryPatch)
 	}
+}
+
+func TestLegacyImageCommitWaitsForFreshSelectorsAndActualDiversion(t *testing.T) {
+	gate := `[{"comment":"SB-GATEWAY diversion-gate","disabled":true}]`
+	router := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		if request.Method != http.MethodGet {
+			t.Error("status polling must not mutate RouterOS")
+			http.Error(response, "mutation", http.StatusMethodNotAllowed)
+			return
+		}
+		switch request.URL.Path {
+		case "/rest/container":
+			_, _ = response.Write([]byte(`[{"comment":"SB-GATEWAY container","root-dir":"usb1/sb-gateway/root-1.7.2"}]`))
+		case "/rest/system/scheduler":
+			_, _ = response.Write([]byte(`[]`))
+		case "/rest/ip/firewall/mangle":
+			_, _ = response.Write([]byte(gate))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer router.Close()
+	server := newTestServer(t)
+	cookie, _ := bootstrapSession(t, server)
+	configureLifecycleRouter(t, server, router)
+	config, err := server.getDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["policies"] = []any{map[string]any{"id": "route", "enabled": true}}
+	config["local_clients"] = []any{map[string]any{"id": "client", "enabled": true, "policy_id": "route"}}
+	if _, err := server.repository.saveDraft(config); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := server.repository.stageGeneration(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+		t.Fatal(err)
+	}
+	server.checkPersistentMounts = func() (bool, []string) { return true, nil }
+	marker := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("SB_ROUTER_READY_MARKER", marker)
+	if err := server.repository.saveAuxiliary("lifecycle-operation", map[string]any{
+		"kind": "image-update", "state": "probation", "candidate_root": "usb1/sb-gateway/root-1.7.2", "previous_root": "usb1/sb-gateway/root",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want string) {
+		t.Helper()
+		response := performRequest(t, server, http.MethodGet, apiPrefix+"/lifecycle", nil, nil, cookie)
+		if response.Code != http.StatusOK || objectAt(decodeResponse(t, response), "operation")["state"] != want {
+			t.Fatalf("want %s: %s", want, response.Body.String())
+		}
+	}
+	check("probation")
+	if err := os.WriteFile(marker, []byte(strconv.FormatInt(server.now().Unix(), 10)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check("probation")
+	for _, observed := range []time.Time{server.trafficReadyAfter.Add(-time.Second), server.trafficReadyAfter.Add(time.Second)} {
+		if err := server.repository.saveAuxiliary("selector-runtime", map[string]any{"route": map[string]any{
+			"runtime_selected": "node", "runtime_confirmed": true, "runtime_observed_at": observed.UTC().Format(time.RFC3339Nano),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		check("probation")
+	}
+	gate = `[{"comment":"SB-GATEWAY diversion-gate","disabled":false},{"comment":"SB-GATEWAY diversion-gate","disabled":false}]`
+	check("probation")
+	gate = `[{"comment":"SB-GATEWAY diversion-gate","disabled":false}]`
+	check("completed")
 }
 
 func TestLifecycleStatusPreservesLegacyDefaultMemoryLimits(t *testing.T) {

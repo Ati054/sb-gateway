@@ -9,7 +9,7 @@ diff --git a/proxy/vless/outbound/outbound.go b/proxy/vless/outbound/outbound.go
 +	"encoding/json"
 +	stdnet "net"
 +	"os"
- 	"reflect"
+ 	"strings"
 @@ -61,4 +64,56 @@ type Handler struct {
  	preConns chan *ConnExpire
  }

@@ -7,6 +7,13 @@ import (
 )
 
 func publishHealthState(path string, state healthState) error {
+	if err := publishSelectorReadiness(path, state); err != nil {
+		return err
+	}
+	return writeJSONAtomic(path, state)
+}
+
+func publishSelectorReadiness(path string, state healthState) error {
 	proof := make(map[string]runtimeproof.SelectorObservation, len(state))
 	for id, item := range state {
 		if item != nil {
@@ -17,8 +24,5 @@ func publishHealthState(path string, state healthState) error {
 	}
 	// Withdrawals and confirmations must reach readiness before serializing the
 	// much larger history. The history is not the source of live traffic proof.
-	if err := writeJSONAtomic(filepath.Join(filepath.Dir(path), runtimeproof.SelectorSnapshotName), proof); err != nil {
-		return err
-	}
-	return writeJSONAtomic(path, state)
+	return writeJSONAtomic(filepath.Join(filepath.Dir(path), runtimeproof.SelectorSnapshotName), proof)
 }
