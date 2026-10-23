@@ -78,9 +78,10 @@ func TestBusyCachePreservesLaneAndRuleDecisions(t *testing.T) {
 	a := &lane{id: "a", final: "wan", exact: map[string]ruleDecision{}, suffix: map[string]ruleDecision{}}
 	b := &lane{id: "b", final: "reject", exact: map[string]ruleDecision{}, suffix: map[string]ruleDecision{}}
 	c := &lane{id: "c", final: "wan", exact: map[string]ruleDecision{}, suffix: map[string]ruleDecision{}}
-	r := &runtime{lanes: map[string]*lane{"a": a, "b": b, "c": c}, servers: map[string]upstream{"wan": &countingUpstream{}}, cache: newResponseCache(16, 1<<20, time.Hour)}
+	d := &lane{id: "d", final: "proxy", exact: map[string]ruleDecision{}, suffix: map[string]ruleDecision{}}
+	r := &runtime{lanes: map[string]*lane{"a": a, "b": b, "c": c, "d": d}, servers: map[string]upstream{"wan": &countingUpstream{}, "proxy": &countingUpstream{}}, cache: newResponseCache(16, 1<<20, time.Hour)}
 	query := dnsQuery(77, "cached.example.com")
-	key, err := normalizedQueryKey("a", query)
+	key, err := normalizedQueryKey("wan", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func TestBusyCachePreservesLaneAndRuleDecisions(t *testing.T) {
 	for _, test := range []struct {
 		lane string
 		want uint16
-	}{{"a", 0}, {"b", 5}, {"c", 2}, {"missing", 2}} {
+	}{{"a", 0}, {"b", 5}, {"c", 0}, {"d", 2}, {"missing", 2}} {
 		response := s.overloadResponse(test.lane, query)
 		if len(response) < 12 || binary.BigEndian.Uint16(response[2:4])&15 != test.want {
 			t.Fatalf("lane %s: %x", test.lane, response)

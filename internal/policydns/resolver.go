@@ -614,7 +614,9 @@ func (runtime *runtime) planQuery(laneID string, query []byte) (queryPlan, error
 	if server == nil {
 		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
-	key, err := normalizedQueryKey(laneID, query)
+	// Only share after this lane has permitted and selected the route. Server
+	// tags distinguish resolver profiles and detours, not just resolver IPs.
+	key, err := normalizedQueryKey(target, query)
 	if err != nil {
 		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}

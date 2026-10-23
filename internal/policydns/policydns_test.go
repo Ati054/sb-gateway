@@ -262,7 +262,7 @@ func TestRuntimeUsesStaleOnlyWhenUpstreamFails(t *testing.T) {
 		cache:   newResponseCache(4, 1<<20, time.Hour),
 	}
 	query := dnsQuery(7, "example.com")
-	key, err := normalizedQueryKey("lane", query)
+	key, err := normalizedQueryKey("wan", query)
 	if err != nil {
 		t.Fatal(err)
 	}
