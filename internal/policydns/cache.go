@@ -160,14 +160,14 @@ func (group *flightGroup) do(
 	return active.response, active.err
 }
 
-func normalizedQueryKey(laneID string, query []byte) (string, error) {
+func normalizedQueryKey(serverTag string, query []byte) (string, error) {
 	if len(query) < 12 {
 		return "", errors.New("short DNS query")
 	}
-	key := make([]byte, len(laneID)+1+len(query))
-	copy(key, laneID)
-	copy(key[len(laneID)+1:], query)
-	key[len(laneID)+1], key[len(laneID)+2] = 0, 0
+	key := make([]byte, len(serverTag)+1+len(query))
+	copy(key, serverTag)
+	copy(key[len(serverTag)+1:], query)
+	key[len(serverTag)+1], key[len(serverTag)+2] = 0, 0
 	return string(key), nil
 }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.78
+
+- Reuse policy DNS answers and pending lookups across clients only after each client's access rules select the same resolver route. Preserve DNS options, transaction IDs, detour isolation and existing resource limits; start each DNS runtime with empty caches.
+
 ## 1.6.77
 
 - Keep outgoing DoH request bodies independent of recycled DNS input buffers after early HTTP errors or cancellation, including retries.
