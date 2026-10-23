@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.77
+
+- Keep outgoing DoH request bodies independent of recycled DNS input buffers after early HTTP errors or cancellation, including retries.
+
 ## 1.6.76
 
 - Update the pinned server core to Xray v26.10.21 and Go 1.27.3 with maintained gateway patches and updated TLS trust roots.
