@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.76
+
+- Update the pinned server core to Xray v26.10.21 and Go 1.27.3 with maintained gateway patches and updated TLS trust roots.
+- Smooth planned URLTest selection with up to three recent full-HTTPS samples, while preserving the configured millisecond margin and separate failure handling.
+- Require fresh measurements on both sides between the two planned-switch confirmations; an eligible pending nominee survives temporary rank changes.
+- Align current Delta with the short latency window and identify the effective margin and sample times in switch comparisons.
+- Preserve existing container memory limits and the independent exported Reverse bridge compatibility pin.
+
 ## 1.6.75
 
 - Keep the current permitted VLESS after confirmed HTTPS timeouts when no freshly successful reserve exists, without a WAN fallback or a healthy status.

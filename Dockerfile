@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GO_IMAGE=golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673
-ARG XRAY_GO_IMAGE=golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673
+ARG GO_IMAGE=golang:1.27.3-alpine3.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2
+ARG XRAY_GO_IMAGE=golang:1.27.3-alpine3.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2
 ARG NODE_IMAGE=node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
 ARG RUNTIME_IMAGE=alpine:3.23
 
@@ -9,8 +9,8 @@ FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build
 ARG TARGETARCH
 # The server can use the current validated core. Xray's simplified Reverse
 # regression is bridge-side; exported reverse clients are pinned separately.
-ARG XRAY_VERSION=26.10.17
-ARG XRAY_COMMIT=92ccc939aaf4f8965f369cf0b142e005aeaa11d5
+ARG XRAY_VERSION=26.10.21
+ARG XRAY_COMMIT=1b1647cd9ddf0abc34b981d4611fc03bcac1ca74
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
 RUN test "${TARGETARCH}" = "arm64"
 RUN apk add --no-cache git patch
@@ -31,6 +31,7 @@ RUN git init \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
     && git checkout --detach FETCH_HEAD \
     && test "$(git rev-parse HEAD)" = "${XRAY_COMMIT}" \
+    && grep -Fq 'golang.org/x/crypto/x509roots/fallback v0.0.0-20261020153306-9f2b28d4331a' go.mod \
     && patch -p1 --fuzz=0 < /tmp/xray-vision-padding-overflow.patch \
     && git apply --check /tmp/xray-vless-failure-signal.patch \
     && git apply /tmp/xray-vless-failure-signal.patch \
@@ -69,8 +70,8 @@ RUN set -eux; \
     go mod edit -replace github.com/xtls/reality=/src/reality
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG XRAY_COMMIT=92ccc939aaf4f8965f369cf0b142e005aeaa11d5
-ARG SB_GATEWAY_VERSION=1.6.75
+ARG XRAY_COMMIT=1b1647cd9ddf0abc34b981d4611fc03bcac1ca74
+ARG SB_GATEWAY_VERSION=1.6.76
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -86,6 +87,7 @@ COPY templates/decoy ./templates/decoy
 RUN set -eux; \
     case "${SB_GATEWAY_GO_TAGS}" in xray_multicall|xray_multicall,sb_cpu_lab) ;; *) exit 1 ;; esac; \
     sh scripts/prepare-xray-multicall.sh /opt/xray-source /opt/xray-source/reality /src/multicall.mod; \
+    test "$(go list -modfile=/src/multicall.mod -m -f '{{.Version}}' golang.org/x/crypto/x509roots/fallback)" = v0.0.0-20261020153306-9f2b28d4331a; \
     for package in ./cmd/sb-gateway ./internal/agent ./internal/domainset ./internal/policydns ./internal/runtimeconfig; do \
       test "$(go list -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" -f '{{if or .TestGoFiles .XTestGoFiles}}yes{{end}}' "$package")" = yes; \
     done; \
@@ -120,8 +122,8 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
-ARG XRAY_VERSION=26.10.17
-ARG SB_GATEWAY_VERSION=1.6.75
+ARG XRAY_VERSION=26.10.21
+ARG SB_GATEWAY_VERSION=1.6.76
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -129,6 +131,7 @@ RUN set -eux; \
     ln -s sb-gateway /out/xray; \
     arm /out/sb-gateway version | grep -F "sb-gateway ${SB_GATEWAY_VERSION}"; \
     arm /out/xray version | grep -F "Xray ${XRAY_VERSION}"; \
+    arm /out/xray version | grep -F 'go1.27.3'; \
     arm /out/xray help api | grep -F api; \
     printf '%s\n' \
       '{"log":{"loglevel":"warning"},"inbounds":[{"tag":"build-validation","listen":"127.0.0.1","port":19099,"protocol":"http"}],"outbounds":[{"tag":"direct","protocol":"freedom"}]}' \
@@ -158,10 +161,10 @@ RUN set -eux; \
     if ! grep -q '^www-data:' /etc/group; then addgroup -S www-data; fi; \
     if ! grep -q '^www-data:' /etc/passwd; then adduser -S -D -H -s /sbin/nologin -G www-data www-data; fi; \
     rm -f /etc/nginx/http.d/default.conf
-ARG XRAY_VERSION=26.10.17
-ARG XRAY_COMMIT=92ccc939aaf4f8965f369cf0b142e005aeaa11d5
+ARG XRAY_VERSION=26.10.21
+ARG XRAY_COMMIT=1b1647cd9ddf0abc34b981d4611fc03bcac1ca74
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.75
+ARG SB_GATEWAY_VERSION=1.6.76
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \

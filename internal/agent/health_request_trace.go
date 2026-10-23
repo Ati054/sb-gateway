@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http/httptrace"
 	"sync/atomic"
+	"time"
 )
 
 type probeRequestStage uint32
@@ -39,9 +40,15 @@ type probeRequestError struct {
 func (err *probeRequestError) Error() string { return err.err.Error() }
 func (err *probeRequestError) Unwrap() error { return err.err }
 
-type probeRequestTrace struct{ stage atomic.Uint32 }
+type probeRequestTrace struct {
+	stage       atomic.Uint32
+	started     time.Time
+	connectedNS atomic.Int64
+	responseNS  atomic.Int64
+}
 
 func (trace *probeRequestTrace) hooks() *httptrace.ClientTrace {
+	trace.started = time.Now()
 	return &httptrace.ClientTrace{
 		TLSHandshakeStart: func() { trace.stage.Store(uint32(probeStageTLS)) },
 		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
@@ -49,8 +56,21 @@ func (trace *probeRequestTrace) hooks() *httptrace.ClientTrace {
 				trace.stage.Store(uint32(probeStageHeaders))
 			}
 		},
-		GotConn: func(httptrace.GotConnInfo) { trace.stage.Store(uint32(probeStageHeaders)) },
+		GotConn: func(httptrace.GotConnInfo) {
+			trace.stage.Store(uint32(probeStageHeaders))
+			trace.connectedNS.Store(time.Since(trace.started).Nanoseconds() + 1)
+		},
+		GotFirstResponseByte: func() {
+			if connected := trace.connectedNS.Load(); connected > 0 {
+				trace.responseNS.CompareAndSwap(0, max(int64(1), time.Since(trace.started).Nanoseconds()+1-connected))
+			}
+		},
 	}
+}
+
+func (trace *probeRequestTrace) responseDelayMS() (int, bool) {
+	duration := trace.responseNS.Load()
+	return max(1, int(time.Duration(duration).Milliseconds())), duration > 0
 }
 
 func (trace *probeRequestTrace) wrap(err error) error {

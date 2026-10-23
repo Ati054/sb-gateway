@@ -140,13 +140,13 @@ The release-hygiene workflow has an independent Go quality job:
 
 - `go vet ./...`;
 - Staticcheck v0.8.1, `-checks='SA*' ./...`;
-- Analysis tools use the pinned `golang.org/x/tools` v0.51.0 importer for Go 1.27.2 export-format compatibility. Install them with `sh scripts/install-analysis-tools.sh "$(go env GOPATH)/bin"`; this does not change runtime dependencies.
+- Analysis tools use the pinned `golang.org/x/tools` v0.51.0 importer for Go 1.27.x export-format compatibility. Install them with `sh scripts/install-analysis-tools.sh "$(go env GOPATH)/bin"`; this does not change runtime dependencies.
 - `CGO_ENABLED=1 go test -race ./... -count=1 -timeout=15m`;
 - govulncheck v1.8.0, `govulncheck ./...`.
 
 Its Go version matches the gateway build toolchain pinned in `Dockerfile`;
 update both pins and the laboratory packaging image together. All three use
-Go 1.27.2; earlier Go 1.27.1 and 1.26.4 images have known standard-library
+Go 1.27.3; earlier Go 1.27.1 and 1.26.4 images have known standard-library
 vulnerabilities that a source scan under a newer host Go cannot detect.
 Ubuntu's C compiler is required only for race
 instrumentation. Production gateway binaries remain `CGO_ENABLED=0`. Analysis
@@ -326,10 +326,15 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 
 ## Pinned Core Upgrade
 
-The server pins upstream Xray v26.10.17 (an upstream pre-release) at
-`92ccc939aaf4f8965f369cf0b142e005aeaa11d5`, with REALITY
-`83f621788ca88b83179810b12baa7ae518aacb83`. This is not a stable upstream tag;
-promotion still requires renderer, Reverse and external data-plane acceptance.
+The server source pins upstream Xray v26.10.21 at
+`1b1647cd9ddf0abc34b981d4611fc03bcac1ca74`, with REALITY
+`83f621788ca88b83179810b12baa7ae518aacb83` and Go 1.27.3.
+Promotion still requires renderer, Reverse and external data-plane acceptance;
+a source pin change does not certify an image. The build asserts both the
+upstream and multicall-selected `x509roots/fallback` version
+`v0.0.0-20261020153306-9f2b28d4331a` and the final executable's Go toolchain.
+See [upstream's trust-store update](https://github.com/XTLS/Xray-core/pull/7212)
+and [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3).
 Exported Reverse bridge versions remain independently pinned.
 
 The v26.10.17 rebase preserves upstream Hysteria write/close cancellation and
@@ -357,6 +362,12 @@ per-client lock rather than reintroducing a mutex. Changes to REALITY use the
 corresponding pinned dependency and preserve the narrow X25519 compatibility
 patch. TUN, Lua and MASQUE remain disabled unless explicitly configured; updating
 their implementation does not enable them in generated gateway rules.
+
+## URLTest Comparison
+
+See [URLTest measurement](URLTEST-MEASUREMENT.md) for upstream measurement
+boundaries and the cold/warm, idle/load comparison gate. This is an investigation
+procedure, not a change to the configured switch threshold or failure deadline.
 
 ## Public Export Boundary
 

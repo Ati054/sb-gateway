@@ -66,7 +66,7 @@ func (cache *healthPoolCache) load(path string) (healthPoolSnapshot, error) {
 			return healthPoolSnapshot{}, errors.New("health pool contract predates the 1.6.15 release baseline")
 		}
 		for id, contract := range pool.HealthPolicies {
-			contract.Policy.LatencyMeasurement = "gstatic-head-v1"
+			contract.Policy.LatencyMeasurement = latencyMeasurement
 			pool.HealthPolicies[id] = contract
 		}
 		snapshot.pool, snapshot.signature = pool, signature

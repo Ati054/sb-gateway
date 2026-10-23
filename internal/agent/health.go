@@ -20,6 +20,7 @@ const (
 	outageRetryInterval    = 15 * time.Second
 	failureRetryInterval   = 2 * time.Second
 	activeLivenessInterval = 3 * time.Second
+	latencyMeasurement     = "gstatic-head-v1"
 )
 
 var healthTargets = []struct {
@@ -208,6 +209,7 @@ type probeEvidence struct {
 	Deferred             bool
 	LocalFailure         bool
 	OK                   bool
+	ResponseDelayMS      *int
 	DelayMS              *int
 	Targets              map[string]*int
 	// TargetFailures contains only fixed health-target labels and failure classes,
@@ -1057,26 +1059,30 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if evidence, ok := measured[candidate]; ok && (!evidence.OK || evidence.DelayMS != nil || evidence.QualityUnmeasured) {
 			samples = append(samples, healthSample{At: float64(now.Unix()), OK: evidence.OK, DelayMS: evidence.DelayMS})
 		}
-		if len(samples) > 1 {
+		if contract.Mode == "best" {
+			samples = recentQualitySamples(now, samples, p)
+		} else if len(samples) > 1 {
 			samples = samples[len(samples)-1:]
 		}
 		item.Samples[candidate] = samples
 		failed := 0
 		delays := []int{}
 		for _, sample := range samples {
-			if !sample.OK {
-				failed++
-			} else if sample.DelayMS != nil {
+			if sample.OK && sample.DelayMS != nil {
 				delays = append(delays, *sample.DelayMS)
 			}
 		}
+		latestQuality := len(samples) > 0 && samples[len(samples)-1].OK && samples[len(samples)-1].DelayMS != nil
+		if len(samples) > 0 && !samples[len(samples)-1].OK {
+			failed = 1
+		}
 		loss := 100.0
 		if len(samples) > 0 {
-			loss = float64(failed) * 100 / float64(len(samples))
+			loss = float64(failed) * 100
 		}
 		losses[candidate] = roundOne(loss)
 		var typical *int
-		if len(delays) > 0 {
+		if len(delays) > 0 && latestQuality {
 			value := medianInt(delays)
 			typical = &value
 		}
@@ -1117,10 +1123,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 				item.Recoveries[candidate] = 0
 			}
 		}
-		anySuccess := false
-		for _, sample := range samples {
-			anySuccess = anySuccess || sample.OK
-		}
+		anySuccess := len(samples) > 0 && samples[len(samples)-1].OK
 		if len(samples) > 0 {
 			availabilityOK[candidate] = anySuccess && item.AvailabilityFailures[candidate] < p.failureThreshold
 		}

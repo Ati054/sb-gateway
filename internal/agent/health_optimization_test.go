@@ -89,12 +89,46 @@ func TestRepeatedOrdinaryEvidenceIsNotAnotherWin(t *testing.T) {
 	item := newPolicyHealthState()
 	p := effectivePolicySettings{active: 60}
 	now := time.Unix(1000, 0)
-	comparison := &optimizationComparison{At: now.UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	comparison := &optimizationComparison{At: now.UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1000, CandidateSampleAt: 1000}
 	for repeat := 0; repeat < 3; repeat++ {
 		desired, _ := gatePlannedOptimization(now, "active", "reserve", "meaningfully-faster", comparison, item, p)
 		if desired != "active" || item.OptimizationChecks != 1 {
 			t.Fatal("cached evidence counted again")
 		}
+	}
+}
+
+func TestLatencyConfirmationRequiresBothSampleTimesToAdvance(t *testing.T) {
+	p := effectivePolicySettings{active: 60}
+	for _, staleSide := range []string{"active", "candidate", "both", "missing"} {
+		t.Run(staleSide, func(t *testing.T) {
+			item := newPolicyHealthState()
+			pair := func(at int64) *optimizationComparison {
+				return compareOptimization(time.Unix(at, 0), "active", "reserve", map[string]probeEvidence{
+					"active": successfulEvidence(700), "reserve": successfulEvidence(300),
+				}, true, true, p)
+			}
+			first := pair(1000)
+			gatePlannedOptimization(time.Unix(1000, 0), "active", "reserve", "meaningfully-faster", first, item, p)
+			repeated := pair(1060)
+			if staleSide == "active" || staleSide == "both" {
+				repeated.ActiveSampleAt = 1000
+			}
+			if staleSide == "candidate" || staleSide == "both" {
+				repeated.CandidateSampleAt = 1000
+			}
+			if staleSide == "missing" {
+				repeated.ActiveSampleAt = 0
+			}
+			selected, _ := gatePlannedOptimization(time.Unix(1060, 0), "active", "reserve", "meaningfully-faster", repeated, item, p)
+			if selected != "active" || item.OptimizationChecks != 1 || item.OptimizationLastResult != first {
+				t.Fatal("a recalculated or one-sided pair counted as another independent win")
+			}
+			selected, _ = gatePlannedOptimization(time.Unix(1120, 0), "active", "reserve", "meaningfully-faster", pair(1120), item, p)
+			if selected != "reserve" {
+				t.Fatal("a new complete pair did not finish the pending nominee")
+			}
+		})
 	}
 }
 

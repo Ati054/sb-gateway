@@ -30,7 +30,7 @@ func TestLegacyPolicyControlsCannotOverrideFixedSafety(t *testing.T) {
 	}
 }
 
-func TestSelectionUsesLatestQualityDelayNotHistoricalMedian(t *testing.T) {
+func TestSelectionUsesBoundedRecentQualityNotDailyMedian(t *testing.T) {
 	for _, mode := range []string{"best", "priority"} {
 		t.Run(mode, func(t *testing.T) {
 			controller, runtime, item := livenessFixture(t, mode)
@@ -46,11 +46,22 @@ func TestSelectionUsesLatestQualityDelayNotHistoricalMedian(t *testing.T) {
 			if err := controller.Tick(time.Unix(1060, 0)); err != nil {
 				t.Fatal(err)
 			}
-			if got := item.MedianDelayMS["de"]; got == nil || *got != 400 || len(item.Samples["de"]) != 1 {
-				t.Fatalf("latest delay not used: delay=%v samples=%v", got, item.Samples["de"])
+			want, count := 400, 1
+			if mode == "best" {
+				want, count = 1900, 3
+			}
+			if got := item.MedianDelayMS["de"]; got == nil || *got != want || len(item.Samples["de"]) != count {
+				t.Fatalf("incorrect recent window: delay=%v samples=%v", got, item.Samples["de"])
 			}
 			if stats := item.DailyStats["de"]; stats.MedianMS == nil || *stats.MedianMS != 1900 {
 				t.Fatalf("historical statistics were overwritten: %+v", stats)
+			}
+			controller.regularNext["europe"] = time.Time{}
+			if err := controller.Tick(time.Unix(1120, 0)); err != nil {
+				t.Fatal(err)
+			}
+			if got := item.MedianDelayMS["de"]; got == nil || *got != 400 {
+				t.Fatal("stable improvement remained pinned to old latency")
 			}
 		})
 	}

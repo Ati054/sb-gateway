@@ -20,9 +20,10 @@ test("release toolchains agree and shared-core compression is pinned", async () 
   const workflow = await readFile(new URL("../.github/workflows/release-hygiene.yml", import.meta.url), "utf8");
   const moduleSource = await readFile(new URL("../go.mod", import.meta.url), "utf8");
   const shared = await readFile(new URL("../scripts/prepare-xray-multicall.sh", import.meta.url), "utf8");
-  const pins = [...dockerfile.matchAll(/ARG (?:XRAY_)?GO_IMAGE=golang:(\d+\.\d+\.\d+)-alpine@sha256:[a-f0-9]{64}/g)];
+  const pins = [...dockerfile.matchAll(/ARG (?:XRAY_)?GO_IMAGE=golang:(\d+\.\d+\.\d+)-alpine(\d+\.\d+)@sha256:[a-f0-9]{64}/g)];
   assert.equal(pins.length, 2);
   assert.equal(pins[0][1], pins[1][1]);
+  assert.equal(pins[0][2], pins[1][2]);
   assert.ok(moduleSource.includes("toolchain go" + pins[0][1]));
   const ci = [...workflow.matchAll(/go-version: '(\d+\.\d+\.\d+)'/g)];
   assert.equal(ci.length, 2);

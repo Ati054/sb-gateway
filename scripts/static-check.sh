@@ -7,8 +7,8 @@ for script in "$root"/entrypoint.sh "$root"/scripts/*.sh; do
   sh -n "$script"
 done
 
-grep -Fq '92ccc939aaf4f8965f369cf0b142e005aeaa11d5' "$root/Dockerfile"
-grep -Fq 'XRAY_GO_IMAGE=golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673' "$root/Dockerfile"
+grep -Fq '1b1647cd9ddf0abc34b981d4611fc03bcac1ca74' "$root/Dockerfile"
+grep -Fq 'XRAY_GO_IMAGE=golang:1.27.3-alpine3.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2' "$root/Dockerfile"
 grep -Fq 'FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build' "$root/Dockerfile"
 grep -Fq 'patch -p1 --fuzz=0 < /tmp/xray-vision-padding-overflow.patch' "$root/Dockerfile"
 grep -Fq 'go test ./proxy' "$root/Dockerfile"

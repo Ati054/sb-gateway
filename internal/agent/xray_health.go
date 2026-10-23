@@ -950,9 +950,15 @@ func (runtime *xraySelectorRuntime) probe(candidate string, mode xrayProbeMode) 
 		// a slower HEAD-only success must not invite an immediate failback.
 		method, timeout, limit = http.MethodGet, availabilityProbeTimeout, 1024
 	}
-	_, err := requestThroughProxyContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, method, timeout, limit, target.status)
+	requestTrace := &probeRequestTrace{}
+	_, err := requestThroughProxyObservedContext(runtime.requestContext(), runtime.opts.ProbeURL, target.url, method, timeout, limit, target.status, requestTrace)
 	trace.finish(err == nil)
 	if err == nil {
+		// Setup-free timing is diagnostic only; the configured threshold keeps
+		// its full HTTPS-request meaning across upgrades.
+		if responseDelay, measured := requestTrace.responseDelayMS(); measured {
+			evidence.ResponseDelayMS = &responseDelay
+		}
 		delay := maxInt(1, int(time.Since(started).Milliseconds()))
 		evidence.OK, evidence.DelayMS = true, &delay
 		evidence.Targets[target.label] = &delay
@@ -1256,6 +1262,10 @@ func downloadThroughProxyContext(ctx context.Context, proxyURL, target string, t
 }
 
 func requestThroughProxyContext(ctx context.Context, proxyURL, target, method string, timeout time.Duration, limit, expectedStatus int) (int, error) {
+	return requestThroughProxyObservedContext(ctx, proxyURL, target, method, timeout, limit, expectedStatus, nil)
+}
+
+func requestThroughProxyObservedContext(ctx context.Context, proxyURL, target, method string, timeout time.Duration, limit, expectedStatus int, trace *probeRequestTrace) (int, error) {
 	parsed, err := url.Parse(proxyURL)
 	if err != nil {
 		return 0, err
@@ -1269,7 +1279,9 @@ func requestThroughProxyContext(ctx context.Context, proxyURL, target, method st
 	}
 	request.Header.Set("User-Agent", "SB-Gateway-Go-Health/1")
 	request.Header.Set("Accept-Encoding", "identity")
-	trace := &probeRequestTrace{}
+	if trace == nil {
+		trace = &probeRequestTrace{}
+	}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace.hooks()))
 	response, err := client.Do(request)
 	if err != nil {

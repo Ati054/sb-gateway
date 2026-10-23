@@ -52,16 +52,19 @@ test("mandatory Claude and Antigravity candidate packs stay narrow and complete"
 
 test("ARM64 image builds pinned Xray and static UI", async () => {
   const dockerfile = await text("Dockerfile");
-  assert.match(dockerfile, /ARG XRAY_VERSION=26\.10\.17/);
+  assert.match(dockerfile, /ARG XRAY_VERSION=26\.10\.21/);
   assert.match(await text("patches/xray-library-main.patch"), /diff --git a\/main\/run_test\.go b\/main\/run_test\.go/);
   assert.match(dockerfile, /go test \.\/main/);
-  assert.match(dockerfile, /92ccc939aaf4f8965f369cf0b142e005aeaa11d5/);
+  assert.match(dockerfile, /1b1647cd9ddf0abc34b981d4611fc03bcac1ca74/);
   assert.match(dockerfile, /XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83/);
   assert.match(dockerfile, /git apply --check \/tmp\/xray-grpc-context-regression\.patch/);
   const grpcRegression = await text("patches/xray-grpc-context-regression.patch");
   assert.match(grpcRegression, /TestGRPCSharedClientOutlivesItsFirstRequest/);
   assert.match(grpcRegression, /TestGRPCReconnectAfterFirstRequestFinishes/);
-  assert.match(dockerfile, /XRAY_GO_IMAGE=golang:1\.27\.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673/);
+  assert.match(dockerfile, /XRAY_GO_IMAGE=golang:1\.27\.3-alpine3\.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2/);
+  assert.match(dockerfile, /GO_IMAGE=golang:1\.27\.3-alpine3\.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2/);
+  assert.match(dockerfile, /golang\.org\/x\/crypto\/x509roots\/fallback v0\.0\.0-20261020153306-9f2b28d4331a/);
+  assert.match(dockerfile, /arm \/out\/xray version \| grep -F 'go1\.27\.3'/);
   assert.match(dockerfile, /FROM --platform=\$BUILDPLATFORM \$\{XRAY_GO_IMAGE\} AS xray-build/);
   assert.match(dockerfile, /go test \.\/app\/router -run '\^TestSB'/);
   assert.match(dockerfile, /server can use the current validated core/);

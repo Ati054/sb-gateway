@@ -651,7 +651,7 @@ func TestPlannedBestSwitchRequiresTwoFreshPairedConfirmations(t *testing.T) {
 		t.Fatalf("unmeasured nomination moved traffic: desired=%q reason=%q item=%+v", desired, reason, item)
 	}
 
-	confirmed := &optimizationComparison{At: now.Add(time.Minute).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	confirmed := &optimizationComparison{At: now.Add(time.Minute).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1060, CandidateSampleAt: 1060}
 	desired, reason = gatePlannedOptimization(
 		now.Add(time.Minute), "active", "reserve", "meaningfully-faster", confirmed, item, settings,
 	)
@@ -659,7 +659,7 @@ func TestPlannedBestSwitchRequiresTwoFreshPairedConfirmations(t *testing.T) {
 		t.Fatalf("first paired comparison switched early: desired=%q reason=%q item=%+v", desired, reason, item)
 	}
 
-	confirmed = &optimizationComparison{At: now.Add(2 * time.Minute).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	confirmed = &optimizationComparison{At: now.Add(2 * time.Minute).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1120, CandidateSampleAt: 1120}
 	desired, reason = gatePlannedOptimization(
 		now.Add(2*time.Minute), "active", "reserve", "meaningfully-faster", confirmed, item, settings,
 	)
@@ -754,7 +754,7 @@ func TestIncompletePairResetsEarlierConfirmation(t *testing.T) {
 	item := newPolicyHealthState()
 	item.OptimizationBaseline, item.OptimizationCandidate = "active", "reserve"
 	settings := effectivePolicySettings{active: 60, backup: 300}
-	win := &optimizationComparison{At: time.Unix(1000, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	win := &optimizationComparison{At: time.Unix(1000, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1000, CandidateSampleAt: 1000}
 	incomplete := &optimizationComparison{Candidate: "reserve", Result: optimizationInconclusive, Reason: "pair-incomplete"}
 	_, _ = gatePlannedOptimization(time.Unix(1000, 0), "active", "reserve", "meaningfully-faster", win, item, settings)
 	if item.OptimizationChecks != 1 {
@@ -765,12 +765,12 @@ func TestIncompletePairResetsEarlierConfirmation(t *testing.T) {
 		t.Fatal("incomplete pair retained its earlier confirmation")
 	}
 	_, _ = gatePlannedOptimization(time.Unix(1120, 0), "active", "reserve", "meaningfully-faster", nil, item, settings)
-	win = &optimizationComparison{At: time.Unix(1180, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	win = &optimizationComparison{At: time.Unix(1180, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1180, CandidateSampleAt: 1180}
 	desired, _ := gatePlannedOptimization(time.Unix(1180, 0), "active", "reserve", "meaningfully-faster", win, item, settings)
 	if desired != "active" || item.OptimizationChecks != 1 {
 		t.Fatal("retry inherited a stale win")
 	}
-	win = &optimizationComparison{At: time.Unix(1240, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin}
+	win = &optimizationComparison{At: time.Unix(1240, 0).UTC().Format(time.RFC3339), Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1240, CandidateSampleAt: 1240}
 	desired, reason := gatePlannedOptimization(time.Unix(1240, 0), "active", "reserve", "meaningfully-faster", win, item, settings)
 	if desired != "reserve" || reason != "meaningfully-faster" {
 		t.Fatal("retry did not complete two new confirmations")
