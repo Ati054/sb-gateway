@@ -84,7 +84,7 @@ func TestLatencyConfirmationExpiresBeforeFreshPair(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			item := newPolicyHealthState()
 			item.OptimizationBaseline, item.OptimizationCandidate, item.OptimizationChecks = "active", "reserve", 1
-			item.OptimizationLastResult = &optimizationComparison{At: tc.at, Candidate: "reserve", Result: optimizationWin}
+			item.OptimizationLastResult = &optimizationComparison{At: tc.at, Candidate: "reserve", Result: optimizationWin, ActiveSampleAt: 1000, CandidateSampleAt: 1000}
 			comparison := compareOptimization(now, "active", "reserve", map[string]probeEvidence{
 				"active": successfulEvidence(600), "reserve": successfulEvidence(500),
 			}, true, true, p)

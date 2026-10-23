@@ -4,8 +4,12 @@
 
 ## Current Build Baseline
 
-Version 1.6.48 pins Go 1.27.2 for both executable roles and release CI,
-golang.org/x/net 0.60.0, and compress 1.18.7 in the shared-core build.
+The current source pins Go 1.27.3 for both executable roles and release CI,
+and Xray v26.10.21. Upstream updates its fallback roots to remove three
+emSign roots; Go 1.27.3 also rejects the affected intermediate certificates.
+The multicall build asserts the selected fallback-root module version and
+the executable toolchain. These are source/build requirements, not evidence
+that a new image has completed release acceptance.
 Go 1.27.1 has newly reported standard-library vulnerabilities and is not
 an acceptable current build baseline. Older audit entries below describe
 their stated artifacts, not the current image. Source and final-binary
@@ -13,7 +17,8 @@ audits must both be repeated; an updated version alone does not prove a
 clean audit. OpenPGP wildcard findings and build-tool npm findings must
 not be suppressed or represented as resolved by unrelated upgrades.
 
-References: [Go 1.27.2](https://go.dev/doc/devel/release#go1.27.2),
+References: [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3),
+[Xray trust-store update](https://github.com/XTLS/Xray-core/pull/7212),
 [HTTP/2 advisory](https://pkg.go.dev/vuln/GO-2026-6617),
 [compress advisory](https://pkg.go.dev/vuln/GO-2026-5841).
 

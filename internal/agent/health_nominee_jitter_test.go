@@ -49,13 +49,19 @@ func TestBestModeReplacesInvalidOrExpiredNomineeWithoutInheritingWins(t *testing
 			if err := controller.Tick(time.Unix(tc.nextAt, 0)); err != nil {
 				t.Fatal(err)
 			}
-			if item.Selected != "active" || item.OptimizationCandidate != "other" || item.OptimizationChecks != 1 {
+			expected := "other"
+			if tc.name == "expired" {
+				// The fresh short median still favors this nominee, but its old
+				// confirmation must expire independently of nomination ranking.
+				expected = "reserve"
+			}
+			if item.Selected != "active" || item.OptimizationCandidate != expected || item.OptimizationChecks != 1 {
 				t.Fatalf("replacement inherited an invalid nominee's win: selected=%s nominee=%s wins=%d", item.Selected, item.OptimizationCandidate, item.OptimizationChecks)
 			}
 			if err := controller.Tick(time.Unix(tc.nextAt+60, 0)); err != nil {
 				t.Fatal(err)
 			}
-			if item.Selected != "other" || item.LastSwitchReason != "meaningfully-faster" {
+			if item.Selected != expected || item.LastSwitchReason != "meaningfully-faster" {
 				t.Fatalf("replacement failed to qualify independently: selected=%s reason=%s", item.Selected, item.LastSwitchReason)
 			}
 		})
