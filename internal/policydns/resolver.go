@@ -537,8 +537,10 @@ func (upstream *dohUpstream) exchangeDoHOnce(ctx context.Context, query []byte) 
 		return nil, context.Canceled
 	}
 	defer func() { upstream.finishDoH(transport, err) }()
+	// A failed RoundTrip may still consume its body asynchronously. The
+	// listener may recycle query's datagram buffer as soon as we return.
 	request, err := http.NewRequestWithContext(
-		ctx, http.MethodPost, upstream.url, bytes.NewReader(query),
+		ctx, http.MethodPost, upstream.url, bytes.NewReader(bytes.Clone(query)),
 	)
 	if err != nil {
 		return nil, err
