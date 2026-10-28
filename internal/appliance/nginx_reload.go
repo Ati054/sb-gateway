@@ -71,17 +71,39 @@ func reloadNginxWith(ctx context.Context, config string, workers func() (map[str
 
 func nginxWorkers(proc string, master int) (map[string]bool, error) {
 	root := filepath.Join(proc, strconv.Itoa(master))
-	body, err := os.ReadFile(filepath.Join(root, "task", strconv.Itoa(master), "children"))
+	// RouterOS does not expose task/PID/children. Enumerate stat PPIDs instead;
+	// this scan runs only on a configuration reload, never in health polling.
+	masterStat, err := os.ReadFile(filepath.Join(root, "stat"))
 	if err != nil {
-		return nil, fmt.Errorf("read nginx workers: %w", err)
+		return nil, fmt.Errorf("read nginx master: %w", err)
+	}
+	_, state, valid := nginxProcessParent(masterStat)
+	if !valid || state == "Z" || state == "X" {
+		return nil, fmt.Errorf("nginx master is not live")
+	}
+	entries, err := os.ReadDir(proc)
+	if err != nil {
+		return nil, err
 	}
 	workers := make(map[string]bool)
-	for _, child := range strings.Fields(string(body)) {
+	for _, entry := range entries {
+		child := entry.Name()
 		pid, err := strconv.Atoi(child)
-		if err != nil || pid <= 1 {
-			return nil, fmt.Errorf("invalid nginx child PID")
+		if err != nil || pid <= 1 || !entry.IsDir() {
+			continue
 		}
 		childRoot := filepath.Join(proc, child)
+		stat, err := os.ReadFile(filepath.Join(childRoot, "stat"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		parent, state, valid := nginxProcessParent(stat)
+		if !valid || parent != master || state == "Z" || state == "X" {
+			continue
+		}
 		cmdline, err := os.ReadFile(filepath.Join(childRoot, "cmdline"))
 		if os.IsNotExist(err) {
 			continue
@@ -92,18 +114,20 @@ func nginxWorkers(proc string, master int) (map[string]bool, error) {
 		if strings.Trim(string(cmdline), " \x00") != "nginx: worker process" {
 			continue
 		}
-		stat, err := os.ReadFile(filepath.Join(childRoot, "stat"))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		end := strings.LastIndexByte(string(stat), ')')
-		fields := strings.Fields(string(stat)[max(0, end+1):])
-		if end >= 0 && len(fields) > 0 && fields[0] != "Z" && fields[0] != "X" {
-			workers[child] = true
-		}
+		workers[child] = true
 	}
 	return workers, nil
+}
+
+func nginxProcessParent(stat []byte) (int, string, bool) {
+	end := strings.LastIndexByte(string(stat), ')')
+	if end < 0 {
+		return 0, "", false
+	}
+	fields := strings.Fields(string(stat)[end+1:])
+	if len(fields) < 2 {
+		return 0, "", false
+	}
+	parent, err := strconv.Atoi(fields[1])
+	return parent, fields[0], err == nil && parent >= 0
 }

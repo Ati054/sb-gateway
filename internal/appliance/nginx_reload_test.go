@@ -68,7 +68,8 @@ func TestNginxWorkersIgnoresCacheManagerExitedAndDrainingProcesses(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	write("5/task/5/children", "10 11 12 13 14")
+	// In particular, no task/PID/children file: RouterOS omits it.
+	write("5/stat", "5 (nginx) S 1 0")
 	write("10/cmdline", "nginx: worker process\x00")
 	write("10/stat", "10 (nginx) S 5 0")
 	write("11/cmdline", "nginx: cache manager process\x00")
@@ -77,6 +78,8 @@ func TestNginxWorkersIgnoresCacheManagerExitedAndDrainingProcesses(t *testing.T)
 	write("12/stat", "12 (nginx) Z 5 0")
 	write("13/cmdline", "nginx: worker process is shutting down\x00")
 	write("13/stat", "13 (nginx) S 5 0")
+	write("14/cmdline", "nginx: worker process\x00")
+	write("14/stat", "14 (nginx) S 99 0")
 	got, err := nginxWorkers(proc, 5)
 	if err != nil || !reflect.DeepEqual(got, map[string]bool{"10": true}) {
 		t.Fatalf("workers=%v err=%v", got, err)
