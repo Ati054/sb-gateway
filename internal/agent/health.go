@@ -1083,7 +1083,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	medians := make(map[string]*int)
 	for _, candidate := range candidates {
 		samples := append([]healthSample(nil), item.Samples[candidate]...)
-		if evidence, ok := measured[candidate]; ok && (!evidence.OK || evidence.DelayMS != nil || evidence.QualityUnmeasured) {
+		if evidence, ok := measured[candidate]; ok && (!evidence.OK || evidence.PrimaryQualityFailed || evidence.DelayMS != nil && !evidence.QualityUnmeasured) {
 			samples = append(samples, healthSample{At: float64(now.Unix()), ObservedAt: qualityObservationAt(now, evidence), OK: evidence.OK, DelayMS: evidence.DelayMS})
 		}
 		if contract.Mode == "best" {

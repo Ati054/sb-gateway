@@ -37,6 +37,7 @@ func TestURLTestEmergencyPlanUsesFreshQualityAndKeepsSweepSlot(t *testing.T) {
 	item.LastProbeAt["stale"] = 999 // a recent availability probe is not quality
 	item.Samples["future"][0].At = 1001
 	item.AvailabilityFailures["failed"] = 1
+	item.Samples["failed"][0].OK = false
 	item.PreflightClosed = map[string]bool{"closed": true}
 	delete(item.Samples, "unknown")
 	// Daily aggregates must not override current quality evidence.
@@ -92,7 +93,6 @@ func TestURLTestEmergencyRankingRejectsInvalidLatestQuality(t *testing.T) {
 		{name: "future", sample: healthSample{At: 999, ObservedAt: 1001, OK: true, DelayMS: &delay}},
 		{name: "failed", sample: healthSample{At: 999, OK: false, DelayMS: &delay}},
 		{name: "fallback-only", sample: healthSample{At: 999, OK: true}},
-		{name: "availability-failed", sample: healthSample{At: 999, OK: true, DelayMS: &delay}, failures: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			item := newPolicyHealthState()

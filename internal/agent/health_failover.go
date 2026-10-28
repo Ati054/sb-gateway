@@ -174,35 +174,38 @@ func knownFreshReserve(now time.Time, selected string, candidates []string, mode
 
 func knownFreshReserves(now time.Time, selected string, candidates []string, mode string, groups map[string]int, item *policyHealthState, p effectivePolicySettings) []string {
 	fresh := make([]string, 0, len(candidates))
-	delays := item.MedianDelayMS
-	if mode == "best" {
-		delays = make(map[string]*int, len(candidates))
-	}
+	delays := emergencyRankingDelays(now, candidates, nil, item, p)
 	for _, candidate := range candidates {
-		if candidate == selected || !item.AvailabilityOK[candidate] || !item.QualityOK[candidate] ||
-			item.AvailabilityFailures[candidate] != 0 {
+		if candidate == selected || item.PreflightClosed[candidate] || delays[candidate] == nil {
 			continue
-		}
-		if mode == "best" {
-			// An outage needs a currently validated replacement, not the recovery
-			// streak required to optimize a healthy path. Rank its latest primary
-			// request, never a median that may describe an earlier network state.
-			sample, observedAt := latestQualityObservation(item, candidate)
-			age := float64(now.UnixNano())/float64(time.Second) - observedAt
-			if !sample.OK || sample.DelayMS == nil || *sample.DelayMS <= 0 || observedAt <= 0 || age < 0 || age > float64(p.backup) {
-				continue
-			}
-			delays[candidate] = sample.DelayMS
-		} else {
-			// Priority-mode recovery keeps its existing confirmation semantics.
-			age, recentQuality := qualitySampleAge(now, item, candidate)
-			if item.Recoveries[candidate] < p.recoveryThreshold || candidateDelay(candidate, delays) <= 0 || !recentQuality || age > float64(p.backup) {
-				continue
-			}
 		}
 		fresh = append(fresh, candidate)
 	}
 	return rankCandidates(fresh, mode, groups, nil, delays)
+}
+
+// Cached quality orders probes; only this batch's availability permits Select.
+// Old health flags and recovery streaks cannot replace that current proof.
+func emergencyRankingDelays(now time.Time, candidates []string, measured map[string]probeEvidence, item *policyHealthState, p effectivePolicySettings) map[string]*int {
+	delays := make(map[string]*int, len(candidates))
+	for _, candidate := range candidates {
+		evidence, current := measured[candidate]
+		if current && (!evidence.OK || evidence.LocalFailure || evidence.PrimaryQualityFailed) {
+			continue
+		}
+		if current && evidence.DelayMS != nil && *evidence.DelayMS > 0 && !evidence.QualityUnmeasured {
+			// A direct primary observation from this decision outranks its cache.
+			// Runtime observations finish after a tick's scheduler timestamp.
+			delays[candidate] = evidence.DelayMS
+			continue
+		}
+		sample, at := latestQualityObservation(item, candidate)
+		age := float64(now.UnixNano())/float64(time.Second) - at
+		if sample.OK && sample.DelayMS != nil && *sample.DelayMS > 0 && at > 0 && age >= 0 && age <= float64(p.backup) {
+			delays[candidate] = sample.DelayMS
+		}
+	}
+	return delays
 }
 
 // A cached reserve gets the first emergency slot, but must pass a current
@@ -255,6 +258,13 @@ func (controller *healthController) probeEmergencyCandidates(policyID string, ca
 	trace := beginHealthStage("emergency_batch", "controller", policyID, "")
 	defer func() { trace.finish(probeErr == nil && chosen != "") }()
 	defer func() {
+		for candidate, evidence := range observations {
+			// ProbeAvailability may return elapsed time for any successful origin.
+			// It is never a new primary quality measurement, even in custom runtimes.
+			evidence.QualityUnmeasured = true
+			evidence.DelayMS, evidence.ResponseDelayMS = nil, nil
+			observations[candidate] = evidence
+		}
 		if item := controller.state[policyID]; item != nil && probeErr == nil && chosen != "" {
 			item.LastEmergencySelection = emergencySelectionEvidence(item, candidates, preferred, observations, chosen)
 		}
