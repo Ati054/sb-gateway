@@ -484,6 +484,8 @@ func blockedRecoveryHasHistory(item *policyHealthState) bool {
 }
 
 func (controller *healthController) Tick(now time.Time) error {
+	previousGeneration := controller.processedGeneration
+	previousPool := controller.processedPool
 	controller.yielded = false
 	controller.processedGeneration = hotRuntimeGeneration{}
 	for _, item := range controller.state {
@@ -491,7 +493,6 @@ func (controller *healthController) Tick(now time.Time) error {
 			item.OutageBatchStartedAt = time.Time{}
 		}
 	}
-	previousGeneration := controller.processedGeneration
 	pool, runtimeReset, err := controller.runtime.Reload()
 	if err != nil {
 		return err
@@ -500,7 +501,9 @@ func (controller *healthController) Tick(now time.Time) error {
 	if source, ok := controller.runtime.(hotRuntimeGenerationSource); ok {
 		controller.processedGeneration = source.hotRuntimeGeneration()
 	}
-	if runtimeReset {
+	settingsOnly := runtimeReset && previousGeneration.XrayPID > 0 &&
+		previousGeneration.XrayPID == controller.processedGeneration.XrayPID && healthSettingsOnly(previousPool, pool)
+	if runtimeReset && !settingsOnly {
 		controller.warmStarted = make(map[string]bool)
 		controller.reconciled = nil
 		controller.regularNext = nil
@@ -522,7 +525,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		controller.state = loaded
 		controller.stateLoaded = true
 	}
-	if runtimeReset {
+	if runtimeReset && !settingsOnly {
 		for policyID, item := range controller.state {
 			if item != nil {
 				clearOptimizationCandidate(item)
@@ -545,6 +548,23 @@ func (controller *healthController) Tick(now time.Time) error {
 		policyIDs = append(policyIDs, policyID)
 	}
 	sort.Strings(policyIDs)
+	if settingsOnly {
+		if controller.observeUnchangedHotPolicies(pool, policyIDs) {
+			for _, id := range policyIDs {
+				clearOptimizationCandidate(controller.state[id])
+				controller.regularNext[id] = now
+			}
+			if err := controller.publishHotRuntimeReady(); err != nil {
+				return fmt.Errorf("acknowledge health settings: %w", err)
+			}
+		} else {
+			// A failed/different readback needs the ordinary reconciliation path.
+			controller.warmStarted = make(map[string]bool)
+			controller.reconciled = nil
+			controller.regularNext = make(map[string]time.Time)
+			controller.livenessAt = make(map[string]time.Time)
+		}
+	}
 	if runtimeReset && controller.processedGeneration.XrayPID > 0 &&
 		controller.processedGeneration.XrayPID != previousGeneration.XrayPID {
 		if err := controller.publishStartupReadbacks(pool, policyIDs); err != nil {

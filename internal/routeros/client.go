@@ -34,7 +34,7 @@ const (
 var managedRolePattern = regexp.MustCompile(`^(apply|rollback)$`)
 var managedNamePattern = regexp.MustCompile(`^SB-GATEWAY-(?:apply|rollback)-[0-9a-f]{12}$`)
 var prohibitedScriptPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)/system\s+(reset|reboot|shutdown|package\s+update)`),
+	regexp.MustCompile(`(?i)/system[\s/]+(reset|reboot|shutdown|package[\s/]+update)`),
 	regexp.MustCompile(`(?i)/user\b`),
 	regexp.MustCompile(`(?i)/certificate\b[^\r\n]*\bremove\b`),
 	regexp.MustCompile(`(?i)\bset\s+channel\s*=`),
@@ -657,6 +657,13 @@ func managedScriptName(role, source string) (string, error) {
 func validateDirectDelta(source string) error {
 	if len(source) == 0 || len(source) > maxDirectScriptBytes {
 		return errors.New("direct RouterOS delta must contain 1 to 16384 bytes")
+	}
+	return validateImportedDelta(source)
+}
+
+func validateImportedDelta(source string) error {
+	if len(source) == 0 || len(source) > maxManagedImportBytes || strings.IndexByte(source, 0) >= 0 {
+		return errors.New("imported RouterOS delta must fit in 2 MiB and contain no NUL")
 	}
 	if !strings.HasPrefix(source, "# SB-GATEWAY generated minimal delta; complete managed sections\n") {
 		return errors.New("direct RouterOS script is not a generated section delta")

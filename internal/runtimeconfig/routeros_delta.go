@@ -70,9 +70,9 @@ func BuildRouterOSDelta(previousSource, desiredSource string, maximumRatio float
 		return strings.Join(lines, "\n") + "\n"
 	}
 	apply, rollback := assemble(desired), assemble(previous)
-	// ApplyDelta uses RouterOS REST script source; larger payloads must use
-	// the existing full-candidate SFTP/import path instead of failing mid-Apply.
-	if len(apply) > 16*1024 || len(rollback) > 16*1024 {
+	// The transaction selects guarded file import above REST's 16-KiB limit.
+	// A large embedded helper must not force unrelated sections to be reapplied.
+	if len(apply) > 2*1024*1024 || len(rollback) > 2*1024*1024 {
 		return nil
 	}
 	if float64(len(apply))/float64(max(1, len(desiredSource))) > maximumRatio ||

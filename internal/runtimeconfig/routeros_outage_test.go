@@ -213,7 +213,7 @@ func TestOutageCustomRuleSetSkipsSingleLabelAndKeepsSafeDomain(t *testing.T) {
 	}
 }
 
-func TestOutage5000DomainsChooseFullImportWithoutTruncation(t *testing.T) {
+func TestOutage5000DomainsChoosePartialFileImportWithoutTruncation(t *testing.T) {
 	config := routerOSModelConfig()
 	policy := objectSlice(config["policies"])[0]
 	domains := make([]any, 5000)
@@ -230,8 +230,13 @@ func TestOutage5000DomainsChooseFullImportWithoutTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if BuildRouterOSDelta(previous, desired, 0.8) != nil {
-		t.Fatal("oversized apply/rollback must use full file import")
+	delta := BuildRouterOSDelta(previous, desired, 0.8)
+	if delta == nil || len(delta.ApplyScript) <= 16*1024 || len(delta.RollbackScript) <= 16*1024 {
+		t.Fatal("large domain changes must retain a bounded partial file import")
+	}
+	if strings.Contains(delta.ApplyScript, `"site4999.example.test|`) || !strings.Contains(delta.ApplyScript, `"site4998.example.test|`) ||
+		!strings.Contains(delta.RollbackScript, `"site4999.example.test|`) {
+		t.Fatal("large partial import lost the exact apply/rollback domain boundary")
 	}
 	for _, domain := range domains {
 		if !strings.Contains(previous, `"`+domain.(string)+`|`) {
