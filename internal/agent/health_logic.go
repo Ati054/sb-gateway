@@ -56,6 +56,9 @@ func currentLatencyComparisons(now time.Time, item *policyHealthState, candidate
 		return nil
 	}
 	baseline := item.Samples[active][len(item.Samples[active])-1]
+	if baseline.ObservedAt <= 0 {
+		return nil
+	}
 	medians := sampleMedians(item.Samples, candidates)
 	result := make(map[string]latencyComparison)
 	for _, candidate := range candidates {
@@ -63,9 +66,12 @@ func currentLatencyComparisons(now time.Time, item *policyHealthState, candidate
 			continue
 		}
 		sample := item.Samples[candidate][len(item.Samples[candidate])-1]
+		if sample.ObservedAt <= 0 || math.Abs(sample.ObservedAt-baseline.ObservedAt) > optimizationPairSkew.Seconds() {
+			continue
+		}
 		result[candidate] = latencyComparison{
 			Active: active, ActiveDelayMS: *medians[active], CandidateDelayMS: *medians[candidate],
-			ActiveAt: baseline.At, CandidateAt: sample.At, ExpiresAt: min(baseline.At, sample.At) + window,
+			ActiveAt: baseline.ObservedAt, CandidateAt: sample.ObservedAt, ExpiresAt: min(baseline.ObservedAt, sample.ObservedAt) + window,
 		}
 	}
 	return result
@@ -386,8 +392,20 @@ func gatePlannedOptimization(now time.Time, selected, desired, reason string, co
 		return selected, ""
 	}
 	if comparison == nil {
-		if item.OptimizationChecks > 0 && !freshComparisonAt(now, item.OptimizationLastResult, p) {
+		if item.OptimizationCandidate != "" && !freshComparisonAt(now, item.OptimizationLastResult, p) {
 			clearOptimizationCandidate(item)
+		}
+		return selected, ""
+	}
+	if desired != selected && isPlannedOptimization(reason) && comparison.Result == optimizationInconclusive &&
+		comparison.CandidateSampleAt > 0 && freshComparisonAt(now, comparison, p) &&
+		(comparison.Reason == "pair-incomplete" || comparison.Reason == "pair-skew") {
+		if item.OptimizationCandidate != desired || item.OptimizationBaseline != selected ||
+			!freshComparisonAt(now, item.OptimizationLastResult, p) {
+			item.OptimizationBaseline, item.OptimizationCandidate = selected, desired
+			item.OptimizationChecks, item.OptimizationLastResult = 0, comparison
+		} else if item.OptimizationChecks == 0 {
+			item.OptimizationLastResult = comparison
 		}
 		return selected, ""
 	}
@@ -429,29 +447,36 @@ func freshComparisonAt(now time.Time, comparison *optimizationComparison, p effe
 	return err == nil && age >= 0 && age <= time.Duration(maxInt(p.active*2, 120))*time.Second
 }
 
-// A candidate needs a new ordinary probe. At a one-slot limit the active
-// measurement may come from the preceding cycle, with the same freshness bound.
+// Ordinary rotation may nominate a reserve, but only a close-time pair can
+// confirm it. Cached active evidence is restricted to a pending paired round.
 func regularOptimizationComparison(now time.Time, selected, candidate string, measured map[string]probeEvidence, item *policyHealthState, quality, available bool, p effectivePolicySettings) *optimizationComparison {
 	if _, fresh := measured[candidate]; !fresh {
 		return nil
 	}
 	pair := map[string]probeEvidence{candidate: measured[candidate]}
-	activeAt := float64(now.Unix())
+	candidateAt := qualityObservationAt(now, measured[candidate])
+	activeAt := float64(0)
+	complete := false
 	if active, ok := measured[selected]; ok {
 		pair[selected] = active
+		activeAt, complete = qualityObservationAt(now, active), true
 	} else {
-		samples := item.Samples[selected]
-		if len(samples) > 0 {
-			last := samples[len(samples)-1]
-			age := float64(now.Unix()) - last.At
-			if last.At > 0 && age >= 0 && age <= float64(maxInt(p.active*2, 120)) {
-				pair[selected] = probeEvidence{OK: last.OK, DelayMS: last.DelayMS}
-				activeAt = last.At
-			}
+		last, at := latestQualityObservation(item, selected)
+		activeAt = at
+		if item.OptimizationBaseline == selected && item.OptimizationCandidate == candidate && last.ObservedAt > 0 && last.ObservedAt <= candidateAt {
+			pair[selected] = probeEvidence{OK: last.OK, DelayMS: last.DelayMS}
+			complete = true
 		}
 	}
 	latest := compareOptimization(now, selected, candidate, pair, quality, available, p)
-	latest.ActiveSampleAt = activeAt
+	latest.ActiveSampleAt, latest.CandidateSampleAt = activeAt, candidateAt
+	if !complete || math.Abs(candidateAt-activeAt) > optimizationPairSkew.Seconds() {
+		latest.Result, latest.Reason = optimizationInconclusive, "pair-incomplete"
+		if complete {
+			latest.Reason = "pair-skew"
+		}
+		return latest
+	}
 	if latest.Result != optimizationWin {
 		return latest
 	}
@@ -463,7 +488,7 @@ func regularOptimizationComparison(now time.Time, selected, candidate string, me
 		}
 	}
 	comparison := compareOptimization(now, selected, candidate, pair, quality, available, p)
-	comparison.ActiveSampleAt = activeAt
+	comparison.ActiveSampleAt, comparison.CandidateSampleAt = activeAt, candidateAt
 	return comparison
 }
 

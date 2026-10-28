@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.6.79
+
+- URLTest: Исправлены ошибки, улучшена стабильность.
+- Reduce duplicate DNS policy state and pending request memory. Coalesce compatible requests before upstream admission and isolate active work and waiting queues between resolver profiles.
+- Use 32 global DNS upstream work slots by default; keep saved overrides, resolver routing and existing container memory defaults.
+
+## 1.6.79-rc.5
+
+- Keep active quality observations close to later survey batches, so the remaining inventory can acquire valid Delta comparisons without increasing shared cycle limits.
+- Bound ordinary batches by actual probe lanes and request deadlines, avoiding a long sequential queue on a single lane. Keep saved settings, ten-second pair qualification and emergency recovery behavior.
+- Verify 24-member surveys across restarts, mixed-interval policies sharing one slot, and the first complete confirmation after an incomplete nomination.
+- Retain the DNS admission and memory improvements from rc.4 with unchanged core and container memory defaults.
+
+## 1.6.79-rc.4
+
+- Keep actual UDP DNS request lengths instead of retaining a maximum-sized buffer for each pending request.
+- Share compatible DNS lookups before upstream admission, with separate bounded duplicate waiters and retained request bytes.
+- Use 32 global DNS work slots and isolate a single resolver profile to half of active work and unique pending capacity when several profiles exist. Preserve routing, access decisions and original deadlines.
+- Retain the URLTest and shared DNS policy improvements from rc.3.
+
+## 1.6.79-rc.3
+
+- Share identical effective DNS policies across clients while preserving resolver selection, rule order and access restrictions.
+- Reduce duplicate host-only DNS routing entries and reconcile committed wiring automatically at startup.
+- Retain the URLTest scheduling and Delta display improvements from rc.2 with unchanged memory defaults and probe intervals.
+
+## 1.6.79-rc.2
+
+- Finish a started URLTest pair within its existing slot budget without waiting for the regular quality timer. Preserve failure-recovery priority and cool overdue pairs on the normal schedule.
+- Keep the last qualified Delta percentage visible between checks, with original measurement times in its tooltip and invalidation when its active baseline or endpoint changes. Route selection still requires fresh independent confirmations.
+- Provide opt-in isolated HTTPS acceptance with actual per-minute request counters and controlled timing and outage scenarios.
+
+## 1.6.79-rc.1
+
+- Compare close-time quality observations before planned URLTest switches. Complete nominated pairs within existing probe budgets, including one-slot scheduling.
+- Keep the configured latency margin, two independent confirmations, availability failover and existing memory limits unchanged.
+
 ## 1.6.78
 
 - Reuse policy DNS answers and pending lookups across clients only after each client's access rules select the same resolver route. Preserve DNS options, transaction IDs, detour isolation and existing resource limits; start each DNS runtime with empty caches.

@@ -51,7 +51,7 @@ func TestFailedPrimaryRecoversWithoutWaitingForFullScan(t *testing.T) {
 			item.LastProbeAt["de"] = 1000
 			runtime := &fakeSelectorRuntime{pool: pool, current: map[string]string{"europe": "nl"}, probes: map[string]probeEvidence{"de": successfulEvidence(50), "nl": successfulEvidence(500)}}
 			controller := &healthController{opts: Options{StateRoot: stateRoot, HealthInterval: time.Minute}, runtime: runtime, warmStarted: map[string]bool{"europe": true}, stateLoaded: true, state: healthState{"europe": item}}
-			for second := int64(1060); second <= 1600; second += 60 {
+			for second := int64(1060); second <= 1600; second += 3 {
 				runtime.probeCalls = nil
 				if err := controller.Tick(time.Unix(second, 0)); err != nil {
 					t.Fatal(err)

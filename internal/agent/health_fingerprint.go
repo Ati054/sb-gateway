@@ -20,6 +20,12 @@ func invalidateChangedOutboundHealth(item *policyHealthState, candidates []strin
 			continue
 		}
 		changed = append(changed, id)
+		delete(item.LastLatencyComparisons, id)
+		for candidate, pair := range item.LastLatencyComparisons {
+			if pair.Active == id {
+				delete(item.LastLatencyComparisons, candidate)
+			}
+		}
 		delete(item.Failures, id)
 		delete(item.AvailabilityFailures, id)
 		delete(item.Recoveries, id)
@@ -80,6 +86,7 @@ func pruneRemovedCandidateHealth(item *policyHealthState, candidates []string) {
 	pruneNodeMap(item.CandidateGroups, active)
 	pruneNodeMap(item.CandidateServiceStatus, active)
 	pruneNodeMap(item.HTTPSProbeTargets, active)
+	pruneNodeMap(item.LastLatencyComparisons, active)
 	item.Shortlist = keepActiveCandidates(item.Shortlist, active)
 	item.ProbedCandidates = keepActiveCandidates(item.ProbedCandidates, active)
 	if item.LastWorkingSelection != nil && !active[item.LastWorkingSelection.Selected] {

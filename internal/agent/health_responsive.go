@@ -100,6 +100,13 @@ func healthProbeLaneCount(pool healthPool) int {
 	return maxInt(1, minInt(requested, inventory))
 }
 
+func (runtime *responsiveSelectorRuntime) qualityLaneCount() int {
+	if !runtime.parallelEnabled {
+		return 1
+	}
+	return max(1, len(runtime.backgrounds))
+}
+
 func (runtime *responsiveSelectorRuntime) takeProbeInterruption() error {
 	err := runtime.interrupted
 	runtime.interrupted = nil

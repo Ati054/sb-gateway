@@ -111,7 +111,7 @@ func TestDNSQueueIsBoundedAndMalformedOverflowDoesNotBorrowWorker(t *testing.T) 
 	query := dnsQuery(1, "queued.example.com")
 	admissions := make([]queryAdmission, cap(s.pending))
 	for i := range admissions {
-		admissions[i] = s.admitQuery("lane", query)
+		admissions[i] = s.admitQuery("lane", dnsQuery(uint16(i+1), fmt.Sprintf("queued-%d.example.com", i)))
 		if !admissions[i].queued || admissions[i].immediate {
 			t.Fatal("burst did not enter bounded queue")
 		}

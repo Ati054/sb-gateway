@@ -81,9 +81,18 @@ export function activeQualityMetrics(rawHealth: unknown, candidate: string, sinc
 }
 
 export function freshLatencyComparison(rawHealth: unknown, candidate: string, now: number, since = 0) {
+  return readLatencyComparison(rawHealth, candidate, now, since, "latency_comparisons", false);
+}
+
+export function displayedLatencyComparison(rawHealth: unknown, candidate: string, now: number, since = 0) {
+  return freshLatencyComparison(rawHealth, candidate, now, since)
+    ?? readLatencyComparison(rawHealth, candidate, now, since, "last_latency_comparisons", true);
+}
+
+function readLatencyComparison(rawHealth: unknown, candidate: string, now: number, since: number, field: string, allowExpired: boolean) {
   const health = rawHealth && typeof rawHealth === "object"
     ? rawHealth as Record<string, unknown> : {};
-  const comparisons = health.latency_comparisons;
+  const comparisons = health[field];
   const raw = comparisons && typeof comparisons === "object"
     ? (comparisons as Record<string, unknown>)[candidate] : null;
   if (health.runtime_confirmed !== true || health.runtime_error || candidate === health.runtime_selected
@@ -94,7 +103,8 @@ export function freshLatencyComparison(rawHealth: unknown, candidate: string, no
     || !Number.isFinite(now) || pair.active !== health.runtime_selected || pair.active === "block") return null;
   const [active, reserve, activeAt, candidateAt, expires] = numbers as number[];
   if (activeAt < since || candidateAt < since || activeAt > now || candidateAt > now
-    || expires <= now || expires <= Math.max(activeAt, candidateAt)) return null;
+    || (!allowExpired && expires <= now) || expires <= Math.max(activeAt, candidateAt)
+    || Math.abs(activeAt - candidateAt) > 10) return null;
   const percent = roundOne((reserve - active) * 100 / active);
   if (!Number.isFinite(percent)) return null;
   return { percent: Object.is(percent, -0) ? 0 : percent, activeAt, candidateAt };

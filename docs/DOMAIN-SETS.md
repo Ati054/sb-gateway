@@ -26,6 +26,19 @@ artifacts without changing the saved draft or requiring another Apply.
 Resolver documents are bounded at 32 MiB; listener readiness reads only lane
 addresses and does not rebuild the membership index.
 
+Clients with identical effective DNS policies share one loopback listener and
+Xray forwarding outbound. Equality includes the final resolver, ordered domain
+conditions, resolver tags and reject actions. Source, authenticated-user and
+inbound selection still happens before that listener, with first-match routing
+preserved. Disjoint host-only source rules can share an Xray route to the same
+listener; compaction never crosses overlapping sources, network prefixes,
+user/inbound constraints or the fallback rule. Distinct resolver tags remain
+isolated even when they point at the same address. Persisted schema 1 remains
+readable by predecessor workers during rollback.
+A `lane_layout_version` marker triggers a transactional rebuild of committed
+artifacts at startup, so existing installations receive this layout without
+changing saved settings or requiring Apply.
+
 Packaged `xray_multicall` builds reuse the pinned Xray `MphMatcherGroup` for
 the DNS membership index. Its compact arena and numeric hash tables avoid
 per-domain string/slice pointers in retained memory. A numeric membership array
@@ -56,6 +69,8 @@ The `xray_multicall` command tests exercise the pinned core's native GeoSite
 decoder and confirm that a repeated large matcher reuses its compiled data.
 DNS tests cover overlapping sets, exact/suffix precedence, independent lane
 decisions, missing sets, immutable updates and safe cleanup.
+Compiler tests also cover shared client policies, IPv4/IPv6 host compaction,
+overlapping sources and preservation of ordered access decisions.
 
 `go test ./internal/policydns -run '^$' -bench BenchmarkDNSMembershipCompilation
 -benchmem` compares eight lanes sharing 10,000 suffixes with separate tables.

@@ -7,9 +7,81 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestQualityProbeDoesNotReuseHTTPConnections(t *testing.T) {
+	var connections, requests atomic.Int32
+	proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodHead {
+			t.Errorf("unexpected probe method %s", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	proxy.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	proxy.Start()
+	defer proxy.Close()
+	for range 2 {
+		if _, err := requestThroughProxyContext(t.Context(), proxy.URL, "http://probe.invalid/", http.MethodHead, time.Second, 0, http.StatusNoContent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if connections.Load() != 2 || requests.Load() != 2 {
+		t.Fatalf("independent probes reused a connection: connections=%d requests=%d", connections.Load(), requests.Load())
+	}
+}
+
+func TestRepeatedHTTPSMeasurementExcludesSetupButRetainsOriginDelay(t *testing.T) {
+	const setup = 150 * time.Millisecond
+	const originDelay = 40 * time.Millisecond
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(originDelay)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	client := origin.Client()
+	client.Timeout = 3 * time.Second
+	transport := client.Transport.(*http.Transport)
+	transport.ForceAttemptHTTP2 = false
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		select {
+		case <-time.After(setup):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	defer client.CloseIdleConnections()
+	for round := range 2 {
+		var reused bool
+		request, err := http.NewRequestWithContext(httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+		}), http.MethodHead, origin.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		elapsed := time.Since(started)
+		if response.StatusCode != http.StatusNoContent || reused != (round == 1) || elapsed < originDelay {
+			t.Fatalf("invalid repeated HTTPS measurement: round=%d reused=%t status=%d elapsed=%s", round, reused, response.StatusCode, elapsed)
+		}
+		if round == 0 && elapsed < setup+originDelay {
+			t.Fatal("initial measurement omitted connection setup")
+		}
+	}
+}
 
 func TestResponseTimingExcludesConnectionSetupAndKeepsServerDelay(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

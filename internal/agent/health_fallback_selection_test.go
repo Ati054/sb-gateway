@@ -91,16 +91,18 @@ func TestSplitLatencyPairUsesQualitySampleTimeNotAvailabilityTime(t *testing.T) 
 		want string
 	}{
 		{"fresh", 999, optimizationWin},
-		{"boundary", 880, optimizationWin},
+		{"boundary", 990, optimizationWin},
+		{"skewed", 989, optimizationInconclusive},
 		{"stale", 879, optimizationInconclusive},
 		{"missing", 0, optimizationInconclusive},
 		{"future", 1001, optimizationInconclusive},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			item := newPolicyHealthState()
+			item.OptimizationBaseline, item.OptimizationCandidate = "active", "reserve"
 			active := 500
 			item.LastProbeAt["active"] = 1000
-			item.Samples["active"] = []healthSample{{At: tc.at, OK: true, DelayMS: &active}}
+			item.Samples["active"] = []healthSample{{At: tc.at, ObservedAt: tc.at, OK: true, DelayMS: &active}}
 			item.DailySamples["active"] = []healthSample{{At: 1000, OK: true}}
 			comparison := regularOptimizationComparison(now, "active", "reserve",
 				map[string]probeEvidence{"reserve": successfulEvidence(300)}, item, true, true,

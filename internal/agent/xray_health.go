@@ -883,6 +883,7 @@ const (
 
 func (runtime *xraySelectorRuntime) Probe(candidate string) (evidence probeEvidence) {
 	trace := beginHealthStage("quality_probe", runtime.stageLane(), "", candidate)
+	defer func() { evidence.ObservedAt = time.Now() }()
 	defer func() { trace.finish(evidence.OK) }()
 	return runtime.probe(candidate, xrayQualityProbe)
 }
@@ -944,7 +945,7 @@ func (runtime *xraySelectorRuntime) probe(candidate string, mode xrayProbeMode) 
 	trace := beginHealthStage("https", runtime.stageLane(), "", "")
 	trace.target(target.label)
 	started := time.Now()
-	method, timeout, limit := http.MethodHead, 5*time.Second, 0
+	method, timeout, limit := http.MethodHead, qualityProbeTimeout, 0
 	if reverse {
 		// Recovery must qualify the same request/deadline as the active lane;
 		// a slower HEAD-only success must not invite an immediate failback.

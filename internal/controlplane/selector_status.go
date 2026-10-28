@@ -12,16 +12,17 @@ import (
 // Unknown fields, especially probe histories, must never enter the polling
 // cache. Raw messages preserve the existing API types and optional fields.
 type compactSelectorRecord struct {
-	Selected    json.RawMessage `json:"runtime_selected"`
-	Confirmed   json.RawMessage `json:"runtime_confirmed"`
-	Observed    json.RawMessage `json:"runtime_observed_at"`
-	Error       json.RawMessage `json:"runtime_error"`
-	Labels      json.RawMessage `json:"candidate_labels"`
-	Nodes       json.RawMessage `json:"candidate_nodes"`
-	Count       json.RawMessage `json:"candidate_count"`
-	Available   json.RawMessage `json:"availability_ok"`
-	Shortlist   json.RawMessage `json:"shortlist"`
-	Comparisons json.RawMessage `json:"latency_comparisons"`
+	Selected        json.RawMessage `json:"runtime_selected"`
+	Confirmed       json.RawMessage `json:"runtime_confirmed"`
+	Observed        json.RawMessage `json:"runtime_observed_at"`
+	Error           json.RawMessage `json:"runtime_error"`
+	Labels          json.RawMessage `json:"candidate_labels"`
+	Nodes           json.RawMessage `json:"candidate_nodes"`
+	Count           json.RawMessage `json:"candidate_count"`
+	Available       json.RawMessage `json:"availability_ok"`
+	Shortlist       json.RawMessage `json:"shortlist"`
+	Comparisons     json.RawMessage `json:"latency_comparisons"`
+	LastComparisons json.RawMessage `json:"last_latency_comparisons"`
 }
 
 type cachedSelectorStatus struct {
@@ -70,6 +71,7 @@ func (repository *stateRepository) selectorStatus() (map[string]any, error) {
 			"candidate_labels": record.Labels, "candidate_nodes": record.Nodes,
 			"candidate_count": record.Count, "availability_ok": record.Available,
 			"shortlist": record.Shortlist, "latency_comparisons": record.Comparisons,
+			"last_latency_comparisons": record.LastComparisons,
 		}
 		item := make(map[string]any, len(fields))
 		for key, body := range fields {
@@ -90,6 +92,9 @@ func (repository *stateRepository) selectorStatus() (map[string]any, error) {
 		}
 		if _, exists := item["latency_comparisons"]; !exists {
 			item["latency_comparisons"] = nil
+		}
+		if _, exists := item["last_latency_comparisons"]; !exists {
+			item["last_latency_comparisons"] = nil
 		}
 		result[id] = item
 	}

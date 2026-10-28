@@ -1,5 +1,25 @@
 # Development Checks
 
+## Survey baseline coverage
+
+Run `go test ./internal/agent -run 'TestSurvey' -count=1 -v` for the virtual-time
+24-node survey and unchanged-active restart regression. It exercises the real
+controller and wake schedule with parallel primary responses of one and 4.5
+seconds, in URLTest and priority modes. Every reserve must acquire a close-time
+comparison after the restart; shared cycle bounds, total quality requests and
+rolling-minute request peaks are checked. This is a deterministic scheduling
+test, not a network throughput or hardware CPU benchmark. One-slot allowance,
+failed primary, shared underlay failure and pending optimization cases verify
+that baseline refresh cannot create a tight retry loop or starve reserve work.
+
+Also run `go test ./internal/agent -run 'TestSingleQualityLaneBounds|TestIncompleteNomination|TestSharedSingleSlotCompletes' -count=1 -v`.
+The single-lane regression uses 24 members, a configured batch of ten, slow
+successful observations and a persisted restart. It bounds each actual batch
+to two sequential probes and requires refreshed Delta pairs for all reserves.
+The shared-slot test preserves both equal intervals and mixed 3/30/60-second
+intervals. An incomplete nomination must not consume the first valid win, while
+reusing an already accepted pair must not earn the second confirmation.
+
 ## Public Release History
 
 `docs/PUBLIC-CHANGELOG.md` is the reviewed, user-facing version history. The
@@ -368,6 +388,16 @@ their implementation does not enable them in generated gateway rules.
 See [URLTest measurement](URLTEST-MEASUREMENT.md) for upstream measurement
 boundaries and the cold/warm, idle/load comparison gate. This is an investigation
 procedure, not a change to the configured switch threshold or failure deadline.
+
+Emergency ranking regressions must include a fast latest primary request whose
+older short median is worse, and recovery streaks below the planned threshold.
+The current availability probe still has to succeed; a failed preferred reserve
+must release the next confirmed path. Keep stale/future observation times,
+fallback-only successes, priority ordering, bounded waiting, generation changes
+and cancellation covered. Check that `reserve_selection` diagnostics distinguish
+unfinished probes from failures, contain no endpoint data and are absent from
+persisted health history. These tests do not establish why a particular external
+server or production connection timed out.
 
 ## Public Export Boundary
 

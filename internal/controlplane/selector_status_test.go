@@ -44,7 +44,7 @@ func TestCompactSelectorStatusRequiresAuthAndOmitsHistory(t *testing.T) {
 	}
 	pairs := map[string]any{"finland": map[string]any{"active": "canada", "active_delay_ms": 600, "candidate_delay_ms": 350}}
 	if err := server.repository.saveAuxiliary("selector-health", map[string]any{
-		"europe": map[string]any{"runtime_selected": "canada", "runtime_confirmed": true, "latency_comparisons": pairs},
+		"europe": map[string]any{"runtime_selected": "canada", "runtime_confirmed": true, "latency_comparisons": pairs, "last_latency_comparisons": pairs},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +53,9 @@ func TestCompactSelectorStatusRequiresAuthAndOmitsHistory(t *testing.T) {
 	pair := item["latency_comparisons"].(map[string]any)["finland"].(map[string]any)
 	if pair["active"] != "canada" || pair["candidate_delay_ms"] != float64(350) {
 		t.Fatalf("missing compact comparison=%v", item)
+	}
+	if item["last_latency_comparisons"].(map[string]any)["finland"].(map[string]any)["active"] != "canada" {
+		t.Fatal("display comparison missing from compact polling")
 	}
 }
 
@@ -71,10 +74,10 @@ func TestSelectorStatusCacheExcludesHistoryAndObservesAtomicReplacement(t *testi
 		t.Fatal(err)
 	}
 	item := objectAt(first, "route")
-	if len(item) != 4 || text(item["runtime_selected"]) != "node-a" {
+	if len(item) != 5 || text(item["runtime_selected"]) != "node-a" {
 		t.Fatalf("unexpected projection: %#v", item)
 	}
-	if len(repository.cache) != 0 || len(objectAt(repository.selectors.value, "route")) != 4 {
+	if len(repository.cache) != 0 || len(objectAt(repository.selectors.value, "route")) != 5 {
 		t.Fatal("full history entered the polling cache")
 	}
 	item["runtime_selected"] = "changed"

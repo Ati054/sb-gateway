@@ -5,7 +5,7 @@ import { DraftAutosave } from "../draft-autosave";
 import { type MessageKey, useLanguage } from "../i18n";
 import { compareRouteCandidates, nodeDisplayLabel, routeCandidateIds, selectorCandidateIds } from "../node-presentation";
 import { confirmedUnstableRoute, qualitySheet } from "../node-quality";
-import { activeQualityMetrics, freshLatencyComparison, qualityStatsSince } from "../quality-window";
+import { activeQualityMetrics, displayedLatencyComparison, qualityStatsSince } from "../quality-window";
 import { reverseAvailability } from "../runtime-status";
 import { DraftEnvelope, NodeName, QUALITY_24H_BASELINE_STORAGE_KEY, ROUTING_EXPANDED_POLICY_STORAGE_KEY, ROUTING_MONITOR_DEFAULTS, ROUTING_SAVE_MESSAGE_STORAGE_KEY, RevisionState, SectionTitle, StatusPill, Toggle, Tone, asObject, asObjectList, asStringList, asText, configuredItemStatus, configuredItemTone, copyText, countryName, errorMessage, formatTimestamp, isErrorMessage, itemName, normalizePolicySelectionMode, orderedCandidateNodeIds, prefixedErrorMessage, reverseTransportKindLabel, selectorDescription, subscriptionRegionGroups, useConnectionHostname, useRouterClientSources, wireguardEgressId, withDeploymentReadiness } from "./shared";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -343,7 +343,7 @@ export function Routing({
         const nodeStats = candidateIds
           .map((candidate) => {
             const stats = asObject(dailyStats[candidate]);
-            const comparison = freshLatencyComparison(health, candidate, Date.now() / 1000, visibleBaseline ?? 0);
+            const comparison = displayedLatencyComparison(health, candidate, Date.now() / 1000, visibleBaseline ?? 0);
             const unstable = confirmedUnstableRoute(
               asObject(health.availability_ok)[candidate] as boolean | undefined,
               Number(stats.samples ?? 0),
@@ -715,7 +715,7 @@ export function Routing({
                     <th>{tr("Маршрут и узел")}</th>
                     <th>{tr("Доступность / ошибки HTTPS")}</th>
                     <th>{tr("Медиана")}</th>
-                    <th title={tr("Свежий HTTPS-отклик относительно активного: минус — быстрее, плюс — медленнее.")}>{tr("Delta, %")}</th>
+                    <th title={tr("Последнее парное сравнение с активным: минус — быстрее, плюс — медленнее.")}>{tr("Delta, %")}</th>
                     <th>{tr("Замеры")}</th>
                   </tr>
                 </thead>
@@ -744,7 +744,7 @@ export function Routing({
                       </td>
                       <td className="quality-measurement"><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong></td>
                       <td className={node.comparison ? `quality-comparison ${node.comparison.percent < 0 ? "is-faster" : node.comparison.percent > 0 ? "is-slower" : ""}` : "quality-comparison"}
-                        title={node.comparison ? tr("Активный: {value1}; кандидат: {value2}", {
+                        title={node.comparison ? tr("Последнее парное сравнение. Активный: {value1}; кандидат: {value2}", {
                           value1: formatTimestamp(new Date(node.comparison.activeAt * 1000).toISOString(), locale),
                           value2: formatTimestamp(new Date(node.comparison.candidateAt * 1000).toISOString(), locale),
                         }) : tr("Нет свежего подтверждённого сравнения")}>

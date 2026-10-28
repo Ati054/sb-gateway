@@ -113,6 +113,7 @@ type PolicyDNSArtifacts struct {
 type PolicyDNSRuntime struct {
 	DomainIndexVersion int                        `json:"domain_index_version,omitempty"`
 	DomainSets         map[string]domainset.Set   `json:"domain_sets,omitempty"`
+	LaneLayoutVersion  int                        `json:"lane_layout_version,omitempty"`
 	Lanes              []PolicyDNSLane            `json:"lanes"`
 	Servers            map[string]PolicyDNSServer `json:"servers"`
 	TimeoutSeconds     int                        `json:"timeout_seconds,omitempty"`
@@ -250,9 +251,10 @@ func CompilePolicyDNS(source PolicyDNSSource, options PolicyDNSCompileOptions) (
 func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArtifacts, error) {
 	artifacts := PolicyDNSArtifacts{
 		Runtime: PolicyDNSRuntime{
-			Lanes:   make([]PolicyDNSLane, 0),
-			Servers: make(map[string]PolicyDNSServer, len(source.Servers)),
-			Version: 2,
+			Lanes:             make([]PolicyDNSLane, 0),
+			Servers:           make(map[string]PolicyDNSServer, len(source.Servers)),
+			LaneLayoutVersion: 1,
+			Version:           2,
 		},
 		XrayInbounds:  make([]map[string]any, 0),
 		XrayOutbounds: make([]map[string]any, 0),
@@ -272,17 +274,11 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 	}
 
 	identities := collectPolicyDNSIdentities(source.Rules)
-	for index, identity := range identities {
-		port, err := compiler.takePort(30000 + index)
-		if err != nil {
-			return PolicyDNSArtifacts{}, err
-		}
-		tag := fmt.Sprintf("dns-policy-lane-%d", index)
+	laneTags := make(map[string]string, len(identities))
+	for _, identity := range identities {
 		lane := PolicyDNSLane{
 			Final: source.Final,
 			Host:  "127.0.0.1",
-			ID:    tag,
-			Port:  port,
 			Rules: make([]PolicyDNSRule, 0),
 		}
 		for _, raw := range source.Rules {
@@ -332,21 +328,43 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 				lane.Rules = append(lane.Rules, rule)
 			}
 		}
-		artifacts.Runtime.Lanes = append(artifacts.Runtime.Lanes, lane)
-		artifacts.XrayOutbounds = append(artifacts.XrayOutbounds, map[string]any{
-			"tag": tag, "protocol": "freedom",
-			"settings": map[string]any{
-				"redirect":  fmt.Sprintf("127.0.0.1:%d", port),
-				"userLevel": policyDNSUserLevel,
-				"finalRules": []any{map[string]any{
-					"action": "allow", "network": "tcp,udp", "ip": []string{"127.0.0.0/8"}, "port": fmt.Sprint(port),
-				}},
-			},
-		})
+		// Identity matching stays in Xray. Only identical effective, ordered DNS
+		// policies share a listener; resolver tags and reject actions remain part
+		// of the key, even when two resolvers happen to have the same address.
+		key, err := json.Marshal(struct {
+			Final string
+			Rules []PolicyDNSRule
+		}{lane.Final, lane.Rules})
+		if err != nil {
+			return PolicyDNSArtifacts{}, err
+		}
+		tag, exists := laneTags[string(key)]
+		if !exists {
+			index := len(artifacts.Runtime.Lanes)
+			port, err := compiler.takePort(30000 + index)
+			if err != nil {
+				return PolicyDNSArtifacts{}, err
+			}
+			tag = fmt.Sprintf("dns-policy-lane-%d", index)
+			lane.ID, lane.Port = tag, port
+			laneTags[string(key)] = tag
+			artifacts.Runtime.Lanes = append(artifacts.Runtime.Lanes, lane)
+			artifacts.XrayOutbounds = append(artifacts.XrayOutbounds, map[string]any{
+				"tag": tag, "protocol": "freedom",
+				"settings": map[string]any{
+					"redirect":  fmt.Sprintf("127.0.0.1:%d", port),
+					"userLevel": policyDNSUserLevel,
+					"finalRules": []any{map[string]any{
+						"action": "allow", "network": "tcp,udp", "ip": []string{"127.0.0.0/8"}, "port": fmt.Sprint(port),
+					}},
+				},
+			})
+		}
 		route := map[string]any{"type": "field", "network": "tcp,udp", "port": "53", "outboundTag": tag}
 		copyIdentityToXray(identity, route)
 		artifacts.XrayRules = append(artifacts.XrayRules, route)
 	}
+	artifacts.XrayRules = compactPolicyDNSHostRules(artifacts.XrayRules)
 
 	tags := make([]string, 0, len(servers))
 	for tag := range servers {
@@ -412,6 +430,56 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 	artifacts.XrayRules = append(tunnelRules, artifacts.XrayRules...)
 	artifacts.Runtime.TimeoutSeconds = 5
 	return artifacts, nil
+}
+
+// Disjoint host-only identities commute: a packet can match at most one of
+// them. Group their sources by lane, without crossing broader prefixes,
+// overlapping addresses, authenticated identities, inbound matches or fallback.
+func compactPolicyDNSHostRules(rules []map[string]any) []map[string]any {
+	result := make([]map[string]any, 0, len(rules))
+	groups := make(map[string]int)
+	seen := make(map[netip.Addr]struct{})
+	reset := func() {
+		clear(groups)
+		clear(seen)
+	}
+	for _, rule := range rules {
+		sources, sourceOnly := rule["source"].([]string)
+		_, hasUser := rule["user"]
+		_, hasInbound := rule["inboundTag"]
+		hosts := make([]netip.Addr, 0, len(sources))
+		valid := sourceOnly && len(sources) != 0 && !hasUser && !hasInbound
+		for _, source := range sources {
+			prefix, err := netip.ParsePrefix(source)
+			if err != nil || prefix.Bits() != prefix.Addr().BitLen() {
+				valid = false
+				break
+			}
+			hosts = append(hosts, prefix.Addr().Unmap())
+		}
+		if !valid {
+			reset()
+			result = append(result, rule)
+			continue
+		}
+		for _, host := range hosts {
+			if _, overlap := seen[host]; overlap {
+				reset()
+				break
+			}
+		}
+		for _, host := range hosts {
+			seen[host] = struct{}{}
+		}
+		tag := rule["outboundTag"].(string)
+		if index, exists := groups[tag]; exists {
+			result[index]["source"] = append(result[index]["source"].([]string), sources...)
+		} else {
+			groups[tag] = len(result)
+			result = append(result, rule)
+		}
+	}
+	return result
 }
 
 func collectPolicyDNSIdentities(rules []PolicyDNSSourceRule) []policyDNSIdentity {
