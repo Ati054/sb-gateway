@@ -123,6 +123,7 @@ type flight struct {
 	done     chan struct{}
 	response []byte
 	err      error
+	waiters  int
 }
 
 type flightGroup struct {
@@ -135,29 +136,55 @@ func (group *flightGroup) do(
 	key string,
 	resolve func() ([]byte, error),
 ) ([]byte, error) {
+	active, owner := group.begin(key, 0)
+	defer group.leave(active)
+	if owner {
+		response, err := resolve()
+		group.finish(key, active, response, err)
+	}
+	return active.wait(ctx)
+}
+
+// A zero limit is for callers with their own admission bound.
+func (group *flightGroup) begin(key string, maximum int) (*flight, bool) {
 	group.mu.Lock()
+	defer group.mu.Unlock()
 	if group.flights == nil {
 		group.flights = make(map[string]*flight)
 	}
 	if active := group.flights[key]; active != nil {
-		group.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-active.done:
-			return active.response, active.err
+		if maximum > 0 && active.waiters >= maximum {
+			return nil, false
 		}
+		active.waiters++
+		return active, false
 	}
-	active := &flight{done: make(chan struct{})}
+	active := &flight{done: make(chan struct{}), waiters: 1}
 	group.flights[key] = active
-	group.mu.Unlock()
+	return active, true
+}
 
-	active.response, active.err = resolve()
+func (group *flightGroup) leave(active *flight) {
 	group.mu.Lock()
+	active.waiters--
+	group.mu.Unlock()
+}
+
+func (group *flightGroup) finish(key string, active *flight, response []byte, err error) {
+	group.mu.Lock()
+	active.response, active.err = response, err
 	delete(group.flights, key)
 	close(active.done)
 	group.mu.Unlock()
-	return active.response, active.err
+}
+
+func (active *flight) wait(ctx context.Context) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-active.done:
+		return active.response, active.err
+	}
 }
 
 func normalizedQueryKey(serverTag string, query []byte) (string, error) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { activeQualityMetrics, freshLatencyComparison, qualityStatsSince } from "../app/quality-window.ts";
+import { activeQualityMetrics, displayedLatencyComparison, freshLatencyComparison, qualityStatsSince } from "../app/quality-window.ts";
 
 test("qualityStatsSince starts a fresh visible window without changing raw history", () => {
   const history = {
@@ -74,6 +74,29 @@ test("active metrics use recent latency and ignore legacy speed history", () => 
   assert.deepEqual(activeQualityMetrics(health, "active"), { median: 496, medianAt: 210 });
   assert.deepEqual(activeQualityMetrics(health, "active", 211), { median: null, medianAt: null });
   assert.deepEqual(activeQualityMetrics({}, "unknown"), { median: null, medianAt: null });
+});
+
+test("display retains a qualified old percentage without promoting it to fresh evidence", () => {
+  const pair = { active: "active", active_delay_ms: 600, candidate_delay_ms: 350,
+    active_at: 200, candidate_at: 205, expires_at: 320 };
+  const health = { runtime_selected: "active", runtime_confirmed: true,
+    latency_comparisons: null, last_latency_comparisons: { reserve: pair } };
+  assert.equal(freshLatencyComparison(health, "reserve", 1000), null);
+  assert.deepEqual(displayedLatencyComparison(health, "reserve", 1000),
+    { percent: -41.7, activeAt: 200, candidateAt: 205 });
+  assert.equal(displayedLatencyComparison(health, "reserve", 1000, 201), null);
+  for (const change of [{ runtime_selected: "other" }, { runtime_confirmed: false },
+    { runtime_error: "unconfirmed" }, { last_latency_comparisons: null }]) {
+    assert.equal(displayedLatencyComparison({ ...health, ...change }, "reserve", 1000), null);
+  }
+  for (const change of [{ candidate_at: 220 }, { candidate_delay_ms: 0 }, { active_at: 1001 }]) {
+    assert.equal(displayedLatencyComparison({ ...health, last_latency_comparisons: {
+      reserve: { ...pair, ...change },
+    } }, "reserve", 1000), null);
+  }
+  assert.equal(displayedLatencyComparison({ ...health, latency_comparisons: {
+    reserve: { ...pair, active_at: 995, candidate_at: 999, expires_at: 1100, candidate_delay_ms: 900 },
+  } }, "reserve", 1000).percent, 50);
 });
 
 test("a failed latency probe does not refresh old active metrics after a window reset", () => {

@@ -590,6 +590,7 @@ func (upstream *dohUpstream) close() {
 
 type queryPlan struct {
 	server upstream
+	tag    string
 	key    string
 	answer []byte
 	local  bool
@@ -623,7 +624,7 @@ func (runtime *runtime) planQuery(laneID string, query []byte) (queryPlan, error
 	if response, ok := runtime.cache.get(key, query[:2], time.Now()); ok {
 		return queryPlan{answer: response, local: true}, nil
 	}
-	return queryPlan{server: server, key: key}, nil
+	return queryPlan{server: server, tag: target, key: key}, nil
 }
 
 func (runtime *runtime) resolve(ctx context.Context, laneID string, query []byte) ([]byte, error) {
@@ -631,30 +632,40 @@ func (runtime *runtime) resolve(ctx context.Context, laneID string, query []byte
 	if err != nil || plan.local {
 		return plan.answer, err
 	}
-	stale, hasStale := runtime.cache.getStale(plan.key, query[:2], time.Now())
 	normalized, err := runtime.flights.do(ctx, plan.key, func() ([]byte, error) {
-		response, exchangeErr := plan.server.exchange(ctx, query)
-		if exchangeErr != nil {
-			return nil, exchangeErr
-		}
-		if len(response) < 12 {
-			return nil, errors.New("short upstream DNS response")
-		}
-		if !matchingQuestion(query, response) {
-			return nil, errors.New("upstream DNS response question mismatch")
-		}
-		ttl := responseTTL(response)
-		response[0], response[1] = 0, 0
-		runtime.cache.putOwned(plan.key, response, ttl, time.Now())
-		return response, nil
+		return runtime.exchangePlan(ctx, plan, query)
 	})
-	if err != nil {
-		if hasStale {
-			return stale, nil
-		}
-		return refusal(query, true), nil
+	return runtime.queryResult(plan, query, normalized, err), nil
+}
+
+func (runtime *runtime) exchangePlan(ctx context.Context, plan queryPlan, query []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return responseWithID(normalized, query[:2]), nil
+	response, err := plan.server.exchange(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if len(response) < 12 {
+		return nil, errors.New("short upstream DNS response")
+	}
+	if !matchingQuestion(query, response) {
+		return nil, errors.New("upstream DNS response question mismatch")
+	}
+	ttl := responseTTL(response)
+	response[0], response[1] = 0, 0
+	runtime.cache.putOwned(plan.key, response, ttl, time.Now())
+	return response, nil
+}
+
+func (runtime *runtime) queryResult(plan queryPlan, query, normalized []byte, err error) []byte {
+	if err != nil {
+		if stale, ok := runtime.cache.getStale(plan.key, query[:2], time.Now()); ok {
+			return stale
+		}
+		return refusal(query, true)
+	}
+	return responseWithID(normalized, query[:2])
 }
 
 func matchingQuestion(query, response []byte) bool {

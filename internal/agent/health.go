@@ -86,11 +86,13 @@ type policyHealthState struct {
 	ScanQueue              []string                          `json:"scan_queue"`
 	LastSwitchAt           string                            `json:"last_switch_at,omitempty"`
 	LastSwitchReason       string                            `json:"last_switch_reason,omitempty"`
+	LastEmergencySelection *emergencySelection               `json:"-"`
 	OptimizationBaseline   string                            `json:"optimization_baseline,omitempty"`
 	OptimizationCandidate  string                            `json:"optimization_candidate,omitempty"`
 	OptimizationChecks     int                               `json:"optimization_checks,omitempty"`
 	OptimizationLastResult *optimizationComparison           `json:"optimization_last_result,omitempty"`
 	LatencyComparisons     map[string]latencyComparison      `json:"latency_comparisons,omitempty"`
+	LastLatencyComparisons map[string]latencyComparison      `json:"last_latency_comparisons,omitempty"`
 	DailyStats             map[string]healthStats            `json:"daily_stats"`
 	PeriodStats            map[string]map[string]healthStats `json:"period_stats"`
 	DelayMS                map[string]*int                   `json:"delay_ms"`
@@ -128,9 +130,10 @@ type policyHealthState struct {
 }
 
 type healthSample struct {
-	At      float64 `json:"at,omitempty"`
-	OK      bool    `json:"ok"`
-	DelayMS *int    `json:"delay_ms"`
+	At         float64 `json:"at,omitempty"`
+	ObservedAt float64 `json:"observed_at,omitempty"`
+	OK         bool    `json:"ok"`
+	DelayMS    *int    `json:"delay_ms"`
 }
 
 func (item *policyHealthState) UnmarshalJSON(body []byte) error {
@@ -146,6 +149,14 @@ func (item *policyHealthState) UnmarshalJSON(body []byte) error {
 	*item = policyHealthState(decoded)
 	// Comparisons belong to a confirmed live selection, never a saved snapshot.
 	item.LatencyComparisons = nil
+	if item.OptimizationCandidate != "" {
+		active, _ := latestQualityObservation(item, item.OptimizationBaseline)
+		candidate, _ := latestQualityObservation(item, item.OptimizationCandidate)
+		if active.ObservedAt == 0 || candidate.ObservedAt == 0 {
+			clearOptimizationCandidate(item)
+			item.OptimizationLastResult = nil
+		}
+	}
 	// A legacy speed comparison cannot become a latency confirmation on upgrade.
 	// Keep availability, history and selected membership.
 	for _, key := range []string{"speed_samples_bps", "speed_median_bps", "speed_degradation", "outage_penalty", "optimization_next_at", "optimization_backoff", "optimization_active_ms"} {
@@ -346,9 +357,15 @@ func (controller *healthController) nextIntervalAt(now time.Time) time.Duration 
 	if len(controller.transitions) > 0 && (interval <= 0 || interval > time.Second) {
 		interval = time.Second
 	}
-	for _, item := range controller.state {
+	for policyID, item := range controller.state {
 		if item == nil {
 			continue
+		}
+		if item.OptimizationCandidate != "" && item.RuntimeConfirmed && item.UnderlayFailure == "" && item.Selected == item.OptimizationBaseline &&
+			item.AvailabilityFailures[item.Selected] == 0 {
+			if next := controller.regularNext[policyID]; !next.IsZero() {
+				interval = min(interval, max(next.Sub(now), time.Duration(0)))
+			}
 		}
 		liveness := configuredHealthDuration(item.ProbeLimits.LivenessSeconds, activeLivenessInterval)
 		failureRetry := configuredHealthDuration(item.ProbeLimits.FailureRetrySeconds, failureRetryInterval)
@@ -551,6 +568,11 @@ func (controller *healthController) Tick(now time.Time) error {
 		if urgent(policyIDs[i]) != urgent(policyIDs[j]) {
 			return urgent(policyIDs[i])
 		}
+		firstPair := optimizationPairHalfPending(now, pool.HealthPolicies[policyIDs[i]], controller.state[policyIDs[i]])
+		secondPair := optimizationPairHalfPending(now, pool.HealthPolicies[policyIDs[j]], controller.state[policyIDs[j]])
+		if firstPair != secondPair {
+			return firstPair
+		}
 		first, second := controller.probeBudget.DeferredPolicies[policyIDs[i]], controller.probeBudget.DeferredPolicies[policyIDs[j]]
 		firstDue := !first.IsZero() && !now.Before(controller.regularNext[policyIDs[i]])
 		secondDue := !second.IsZero() && !now.Before(controller.regularNext[policyIDs[j]])
@@ -629,9 +651,10 @@ func (controller *healthController) Tick(now time.Time) error {
 		if item.RuntimeConfirmed && item.Selected != beforeSelected && item.LastSwitchAt != beforeSwitchAt {
 			controller.emitHealthEvent(healthEvent{At: item.LastSwitchAt, Event: "switch", Policy: policyID,
 				From: beforeSelected, To: item.Selected, Reason: item.LastSwitchReason,
-				Failure:    probeFailureClass(item.FailureClass[beforeSelected]),
-				Quality:    switchQualityEvidence(now, item, beforeSelected, item.Selected, item.LastSwitchReason),
-				Comparison: switchOptimizationEvidence(item, item.Selected, item.LastSwitchReason)})
+				Failure:          probeFailureClass(item.FailureClass[beforeSelected]),
+				Quality:          switchQualityEvidence(now, item, beforeSelected, item.Selected, item.LastSwitchReason),
+				Comparison:       switchOptimizationEvidence(item, item.Selected, item.LastSwitchReason),
+				ReserveSelection: item.LastEmergencySelection})
 		}
 		managed[policyID] = item
 		if controller.yielded {
@@ -686,6 +709,7 @@ func newPolicyHealthState() *policyHealthState {
 
 func (controller *healthController) tickPolicy(now time.Time, policyID string, contract healthPolicyContract, item *policyHealthState) (tickErr error) {
 	item.LatencyComparisons = nil
+	item.LastEmergencySelection = nil
 	item.OutageBatchStartedAt = time.Time{}
 	trace := beginHealthStage("policy_tick", "controller", policyID, item.Selected)
 	defer func() { trace.finish(tickErr == nil) }()
@@ -703,6 +727,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		item.Failures = make(map[string]int)
 		item.MedianDelayMS = nil
 		item.QualityOK = nil
+		item.LastLatencyComparisons = nil
 		clearOptimizationCandidate(item)
 		item.OptimizationLastResult = nil
 	}
@@ -715,6 +740,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		// Priority is the user's complete ordered queue, not a top-N pool.
 		p.shortlist = len(candidates)
 	}
+	survey := controller.surveySettings(p)
 	groupIndex, groupSelector, groupLabels := candidateGroups(contract.Groups, candidates, contract.Mode)
 	signature := strings.Join(candidates, "\n")
 	selected := item.Selected
@@ -878,16 +904,17 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 		if warm {
 			probeTargets = append(probeTargets, selected)
 			for _, candidate := range uniqueCandidates(append(changedOutbounds, candidates...)) {
-				if candidate != selected && len(probeTargets) < p.batch {
+				if candidate != selected && len(probeTargets) < survey.batch {
 					probeTargets = append(probeTargets, candidate)
 				}
 			}
 		} else {
-			probeTargets = regularProbeTargets(now, selected, candidates, shortlist, item, p)
+			probeTargets = regularProbeTargets(now, selected, candidates, shortlist, item, survey)
 		}
 	}
 
 	if !outage {
+		probeTargets = controller.withSurveyBaseline(now, selected, probeTargets, item, survey)
 		var deferred []string
 		probeTargets, deferred = controller.claimProbeTargets(policyID, contract, probeTargets, false)
 		item.ScanQueue = uniqueCandidates(append(deferred, item.ScanQueue...))
@@ -1057,7 +1084,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	for _, candidate := range candidates {
 		samples := append([]healthSample(nil), item.Samples[candidate]...)
 		if evidence, ok := measured[candidate]; ok && (!evidence.OK || evidence.DelayMS != nil || evidence.QualityUnmeasured) {
-			samples = append(samples, healthSample{At: float64(now.Unix()), OK: evidence.OK, DelayMS: evidence.DelayMS})
+			samples = append(samples, healthSample{At: float64(now.Unix()), ObservedAt: qualityObservationAt(now, evidence), OK: evidence.OK, DelayMS: evidence.DelayMS})
 		}
 		if contract.Mode == "best" {
 			samples = recentQualitySamples(now, samples, p)

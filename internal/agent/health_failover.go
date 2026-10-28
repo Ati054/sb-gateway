@@ -174,20 +174,35 @@ func knownFreshReserve(now time.Time, selected string, candidates []string, mode
 
 func knownFreshReserves(now time.Time, selected string, candidates []string, mode string, groups map[string]int, item *policyHealthState, p effectivePolicySettings) []string {
 	fresh := make([]string, 0, len(candidates))
+	delays := item.MedianDelayMS
+	if mode == "best" {
+		delays = make(map[string]*int, len(candidates))
+	}
 	for _, candidate := range candidates {
 		if candidate == selected || !item.AvailabilityOK[candidate] || !item.QualityOK[candidate] ||
-			item.AvailabilityFailures[candidate] != 0 || item.Recoveries[candidate] < p.recoveryThreshold ||
-			candidateDelay(candidate, item.MedianDelayMS) <= 0 {
+			item.AvailabilityFailures[candidate] != 0 {
 			continue
 		}
-		// Availability-only probes must not refresh an old quality ranking.
-		age, recentQuality := qualitySampleAge(now, item, candidate)
-		if !recentQuality || age > float64(p.backup) {
-			continue
+		if mode == "best" {
+			// An outage needs a currently validated replacement, not the recovery
+			// streak required to optimize a healthy path. Rank its latest primary
+			// request, never a median that may describe an earlier network state.
+			sample, observedAt := latestQualityObservation(item, candidate)
+			age := float64(now.UnixNano())/float64(time.Second) - observedAt
+			if !sample.OK || sample.DelayMS == nil || *sample.DelayMS <= 0 || observedAt <= 0 || age < 0 || age > float64(p.backup) {
+				continue
+			}
+			delays[candidate] = sample.DelayMS
+		} else {
+			// Priority-mode recovery keeps its existing confirmation semantics.
+			age, recentQuality := qualitySampleAge(now, item, candidate)
+			if item.Recoveries[candidate] < p.recoveryThreshold || candidateDelay(candidate, delays) <= 0 || !recentQuality || age > float64(p.backup) {
+				continue
+			}
 		}
 		fresh = append(fresh, candidate)
 	}
-	return rankCandidates(fresh, mode, groups, nil, item.MedianDelayMS)
+	return rankCandidates(fresh, mode, groups, nil, delays)
 }
 
 // A cached reserve gets the first emergency slot, but must pass a current
@@ -239,6 +254,11 @@ func emergencyProbePlan(now time.Time, selected string, targets, candidates []st
 func (controller *healthController) probeEmergencyCandidates(policyID string, candidates []string, preferred []string) (observations map[string]probeEvidence, chosen string, probeErr error) {
 	trace := beginHealthStage("emergency_batch", "controller", policyID, "")
 	defer func() { trace.finish(probeErr == nil && chosen != "") }()
+	defer func() {
+		if item := controller.state[policyID]; item != nil && probeErr == nil && chosen != "" {
+			item.LastEmergencySelection = emergencySelectionEvidence(item, candidates, preferred, observations, chosen)
+		}
+	}()
 	measured := make(map[string]probeEvidence, len(candidates))
 	selected := ""
 	var selectErr error

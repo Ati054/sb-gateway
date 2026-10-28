@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -148,6 +149,33 @@ func TestStartupMigratesDNSIdleWithoutChangingDraft(t *testing.T) {
 	b, _ := canonicalJSON(after)
 	if !bytes.Equal(a, b) {
 		t.Fatal("startup changed saved settings")
+	}
+	if changed, err := MigrateLegacyDynamicRuntime(context.Background(), server.opts); err != nil || changed {
+		t.Fatalf("idempotent migration: %t %v", changed, err)
+	}
+}
+
+func TestStartupSharedDNSLaneMigration(t *testing.T) {
+	server, _, expected := startupProbeMigrationFixture(t, nil)
+	before, err := server.getDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dns map[string]any
+	if err := json.Unmarshal(expected["policy-dns.json"], &dns); err != nil {
+		t.Fatal(err)
+	}
+	delete(dns, "lane_layout_version")
+	writeStartupProbeJSON(t, server.opts.Runtime.PolicyDNSConfig, dns)
+	if changed, err := MigrateLegacyDynamicRuntime(context.Background(), server.opts); err != nil || !changed {
+		t.Fatalf("migration: %t %v", changed, err)
+	}
+	after, err := server.getDraft()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("startup changed saved settings: %v", err)
+	}
+	if got := mustReadFile(t, server.opts.Runtime.PolicyDNSConfig); !bytes.Equal(got, expected["policy-dns.json"]) {
+		t.Fatal("DNS layout not upgraded")
 	}
 	if changed, err := MigrateLegacyDynamicRuntime(context.Background(), server.opts); err != nil || changed {
 		t.Fatalf("idempotent migration: %t %v", changed, err)

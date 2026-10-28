@@ -188,12 +188,13 @@ func legacyDomainRuntime(path string) (bool, error) {
 	var header struct {
 		Version            int `json:"version"`
 		DomainIndexVersion int `json:"domain_index_version"`
+		LaneLayoutVersion  int `json:"lane_layout_version"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, maxRuntimeMigrationArtifactBytes+1))
 	if err := decoder.Decode(&header); err != nil {
 		return false, err
 	}
-	return header.Version == 2 || (header.Version == 1 && header.DomainIndexVersion != 1), nil
+	return header.Version == 2 || (header.Version == 1 && (header.DomainIndexVersion != 1 || header.LaneLayoutVersion != 1)), nil
 }
 
 func committedRuntimeMigrationNodes(repository *stateRepository, metadata map[string]any, revision string) ([]map[string]any, error) {

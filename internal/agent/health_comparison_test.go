@@ -14,8 +14,8 @@ func TestCurrentLatencyComparisonsUseQualifiedFreshQuality(t *testing.T) {
 		item := newPolicyHealthState()
 		item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "active", "active", true
 		item.Samples = map[string][]healthSample{
-			"active":  {{At: 995, OK: true, DelayMS: delay(600)}},
-			"reserve": {{At: 990, OK: true, DelayMS: delay(350)}},
+			"active":  {{At: 995, ObservedAt: 995, OK: true, DelayMS: delay(600)}},
+			"reserve": {{At: 990, ObservedAt: 990, OK: true, DelayMS: delay(350)}},
 		}
 		item.QualityOK = map[string]bool{"active": true, "reserve": true}
 		item.AvailabilityOK = map[string]bool{"active": true, "reserve": true}
@@ -40,6 +40,8 @@ func TestCurrentLatencyComparisonsUseQualifiedFreshQuality(t *testing.T) {
 		"future":         func(s *policyHealthState) { s.Samples["reserve"][0].At = 1001 },
 		"fallback":       func(s *policyHealthState) { s.Samples["reserve"][0].DelayMS = nil },
 		"bad-quality":    func(s *policyHealthState) { s.QualityOK["reserve"] = false },
+		"skewed":         func(s *policyHealthState) { s.Samples["reserve"][0].ObservedAt = 950 },
+		"legacy":         func(s *policyHealthState) { s.Samples["active"][0].ObservedAt = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := fixture()

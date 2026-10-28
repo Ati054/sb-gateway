@@ -43,6 +43,7 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	}
 	if actual != selected {
 		item.LatencyComparisons = nil
+		item.LastLatencyComparisons = nil
 		controller.livenessAt[policyID] = time.Time{}
 		if !recoverNow {
 			return true, errHealthYield

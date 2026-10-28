@@ -24,7 +24,7 @@ type Options struct {
 
 func OptionsFromEnvironment() Options {
 	return Options{
-		Workers:      boundedEnvironmentInt("SB_POLICY_DNS_WORKERS", 16, 2, 64),
+		Workers:      boundedEnvironmentInt("SB_POLICY_DNS_WORKERS", 32, 2, 64),
 		TCPSessions:  boundedEnvironmentInt("SB_POLICY_DNS_TCP_SESSIONS", 8, 2, 32),
 		CacheEntries: boundedEnvironmentInt("SB_POLICY_DNS_CACHE_ENTRIES", 4096, 256, 65536),
 		CacheBytes:   boundedEnvironmentInt("SB_POLICY_DNS_CACHE_BYTES", 4*1024*1024, 1024*1024, 64*1024*1024),
@@ -51,15 +51,19 @@ func boundedEnvironmentInt(name string, fallback, minimum, maximum int) int {
 }
 
 type service struct {
-	ctx        context.Context
-	runtimeMu  sync.RWMutex
-	runtime    *runtime
-	limit      chan struct{}
-	pending    chan struct{}
-	tcpLimit   chan struct{}
-	closers    []io.Closer
-	wait       sync.WaitGroup
-	udpBuffers sync.Pool
+	ctx           context.Context
+	runtimeMu     sync.RWMutex
+	runtime       *runtime
+	limit         chan struct{}
+	pending       chan struct{}
+	tcpLimit      chan struct{}
+	closers       []io.Closer
+	wait          sync.WaitGroup
+	udpBuffers    sync.Pool
+	admissionMu   sync.Mutex
+	queryBytes    int
+	sharedQueries int
+	routes        map[string]*routeBudget
 }
 
 func Serve(ctx context.Context, path string, options Options) error {
@@ -196,11 +200,11 @@ func (service *service) closeRuntime() {
 
 func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 	defer service.wait.Done()
+	buffer := service.udpBuffers.Get().(*[maxDNSMessage]byte)
+	defer service.udpBuffers.Put(buffer)
 	for {
-		buffer := service.udpBuffers.Get().(*[maxDNSMessage]byte)
 		size, address, err := connection.ReadFrom(buffer[:])
 		if err != nil {
-			service.udpBuffers.Put(buffer)
 			return
 		}
 		query := buffer[:size]
@@ -209,18 +213,18 @@ func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 			if len(admission.answer) > 0 {
 				_, _ = connection.WriteTo(admission.answer, address)
 			}
-			service.udpBuffers.Put(buffer)
 			continue
 		}
+		// Reuse the listener buffer; handlers retain only their actual packet.
+		query = append([]byte(nil), query...)
 		service.wait.Add(1)
-		go func(admission queryAdmission, query []byte, buffer *[maxDNSMessage]byte, address net.Addr) {
+		go func(admission queryAdmission, query []byte, address net.Addr) {
 			defer service.wait.Done()
-			defer service.udpBuffers.Put(buffer)
 			response, resolveErr := service.resolveAdmitted(admission, laneID, query)
 			if resolveErr == nil && len(response) > 0 {
 				_, _ = connection.WriteTo(response, address)
 			}
-		}(admission, query, buffer, address)
+		}(admission, query, address)
 	}
 }
 

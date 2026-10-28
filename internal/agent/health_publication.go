@@ -7,10 +7,37 @@ import (
 )
 
 func publishHealthState(path string, state healthState) error {
+	for _, item := range state {
+		if item != nil {
+			rememberDisplayComparisons(item)
+		}
+	}
 	if err := publishSelectorReadiness(path, state); err != nil {
 		return err
 	}
 	return writeJSONAtomic(path, state)
+}
+
+// The panel retains the last qualified pair while the same route is active.
+// Selection uses fresh probe evidence and never reads this display history.
+func rememberDisplayComparisons(item *policyHealthState) {
+	if !item.RuntimeConfirmed || item.RuntimeSelected == "" {
+		return
+	}
+	for candidate, pair := range item.LastLatencyComparisons {
+		if pair.Active != item.RuntimeSelected || candidate == item.RuntimeSelected || item.RuntimeSelected == "block" {
+			delete(item.LastLatencyComparisons, candidate)
+		}
+	}
+	for candidate, pair := range item.LatencyComparisons {
+		if pair.Active != item.RuntimeSelected || candidate == item.RuntimeSelected || item.RuntimeSelected == "block" {
+			continue
+		}
+		if item.LastLatencyComparisons == nil {
+			item.LastLatencyComparisons = make(map[string]latencyComparison)
+		}
+		item.LastLatencyComparisons[candidate] = pair
+	}
 }
 
 func publishSelectorReadiness(path string, state healthState) error {

@@ -29,6 +29,9 @@ func TestLatencyOnlyStateUpgradePreservesAvailabilityAndDropsCooldown(t *testing
 		}
 	}
 	item.OptimizationCandidate, item.OptimizationBaseline, item.OptimizationChecks = "reserve", "active", 1
+	item.Samples["active"][0].ObservedAt = 1000
+	delay := 300
+	item.Samples["reserve"] = []healthSample{{At: 1000, ObservedAt: 1000, OK: true, DelayMS: &delay}}
 	encoded, _ = json.Marshal(item)
 	var restored policyHealthState
 	if err := json.Unmarshal(encoded, &restored); err != nil {

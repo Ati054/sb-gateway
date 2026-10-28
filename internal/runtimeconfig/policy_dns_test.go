@@ -19,7 +19,7 @@ func TestCompilePolicyDNSEmptySource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(body), "{\"domain_index_version\":1,\"lanes\":[],\"servers\":{},\"version\":1}\n"; got != want {
+	if got, want := string(body), "{\"domain_index_version\":1,\"lane_layout_version\":1,\"lanes\":[],\"servers\":{},\"version\":1}\n"; got != want {
 		t.Fatalf("unexpected empty runtime:\n%s\nwant:\n%s", got, want)
 	}
 	if len(artifacts.XrayInbounds) != 0 || len(artifacts.XrayOutbounds) != 0 || len(artifacts.XrayRules) != 0 {
@@ -81,7 +81,7 @@ func TestCompilePolicyDNSMatchesCurrentArtifactContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"domain_index_version\":1,\"lanes\":[" +
+	want := "{\"domain_index_version\":1,\"lane_layout_version\":1,\"lanes\":[" +
 		"{\"final\":\"direct\",\"host\":\"127.0.0.1\",\"id\":\"dns-policy-lane-0\",\"port\":30001,\"rules\":[" +
 		"{\"action\":\"route\",\"domain\":[\"example.com\"],\"domain_suffix\":[],\"server\":\"vpn\"}," +
 		"{\"action\":\"route\",\"domain\":[],\"domain_suffix\":[\"youtube.com\"],\"server\":\"vpn\"}]}," +

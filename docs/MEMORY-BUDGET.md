@@ -127,8 +127,47 @@ require a restart to update the long-running processes' budgets.
 `GOMEMLIMIT` (gateway) and `SB_XRAY_GOMEMLIMIT` (core) may lower their calculated
 limits; they cannot raise them while automatic budgeting is enabled. Xray
 validation/API commands use a helper budget rather than a second core budget.
-ACME keeps its minimal environment and `GOMAXPROCS=1`; THP remains disabled.
+ACME keeps its minimal environment and `GOMAXPROCS=1`; `disablethp=1` remains
+enabled for Go heap mappings.
 Host-side developer commands are not automatically capped by this image setting.
+
+### Comparing Memory Accounting And THP
+
+Compare equivalent scopes: a complete container counter is not comparable to
+only the OpenWrt controller or core RSS. Inspect cgroup `memory.stat` for `anon`,
+`file`, `sock` and kernel memory, and process `smaps_rollup` for proportional
+memory. Do not add overlapping `memory.stat` categories or sum process RSS as if
+shared executable pages were private. Go soft limits and arithmetic helper
+reserves do not preallocate RAM.
+
+`GODEBUG=disablethp=1` is not a process-wide THP prohibition. Go runtime metadata
+and other anonymous mappings may still use huge pages; the runtime explicitly
+allows GC metadata to override its heap advice. Check `AnonHugePages` and
+`VmFlags` per mapping before attributing an increase to the heap. Nonzero THP
+bytes are not, by themselves, wasted bytes or a measured saving from disabling
+them. Do not change host-wide RouterOS THP or TCP buffer settings as a diagnostic
+shortcut: compare completed work, CPU, memory and latency on an isolated workload.
+See the [Go THP guidance](https://go.dev/doc/gc-guide#Linux_transparent_huge_pages)
+and [cgroup memory accounting](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+
+A lab comparison can prohibit THP before starting an application process tree
+with `PR_SET_THP_DISABLE`, then verify `THP_enabled` and `AnonHugePages` for its
+long-lived processes. The setting is inherited through fork and exec, not by
+unrelated container-exec processes started by the orchestrator. This is not a
+namespace-wide kernel setting or a production default. See the
+[kernel process controls](https://docs.kernel.org/admin-guide/mm/transhuge.html#process-thp-controls).
+
+Include the observer's own CPU and memory in test accounting. Repeated
+container-exec scans with a subprocess for each procfs read are additional work;
+a bounded persistent procfs sampler avoids those repeated launches. Preserve
+capture-drop counters and align packet clocks when correlating client and
+container traffic. First verify both capture directions against known successful
+exchanges; zero packet drops do not prove that the capture includes egress.
+Match source/destination addresses and ports as well as DNS IDs and questions
+before locating a missing reply. Do not attribute missing replies to the upstream
+provider without checking which side of the container lost them.
+See [network stall localization](NETWORK-DIAGNOSTICS.md) for queue counters,
+adjacent capture points and HTTPS timing controls.
 
 `GOGC=150` still controls ordinary collection before a soft limit is reached.
 GOMEMLIMIT is not a reservation, a combined RSS limit or a guarantee against
@@ -136,6 +175,14 @@ OOM: live objects can exceed it, and binary mappings, sockets and file cache
 need separate headroom. Smaller budgets can increase GC CPU. Functional tests
 and the formula do not establish capacity for a full LAN or sustained traffic;
 compare CPU, latency, throughput and cgroup pressure under the same workload.
+
+Separate startup and rule compilation from steady traffic when reading GC traces.
+The pinned Xray matcher builders include explicit `runtime.GC` calls to limit
+temporary construction memory, including in the
+[IP-set builder](https://github.com/XTLS/Xray-core/blob/1b1647cd9ddf0abc34b981d4611fc03bcac1ca74/common/geodata/ip_matcher.go).
+A trace marked `(forced)` does not by itself establish a too-small soft limit.
+Do not remove construction-time collection without measuring compilation peaks
+and large rule sets as well as startup CPU.
 
 ## Allocation Optimizations
 

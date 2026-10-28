@@ -167,8 +167,8 @@ func TestRenderPolicyDNSComposesSourceAndRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(artifacts.Runtime.Lanes) != 3 {
-		t.Fatalf("expected two updater identities and one catch-all lane: %#v", artifacts.Runtime.Lanes)
+	if len(artifacts.Runtime.Lanes) != 2 {
+		t.Fatalf("expected distinct direct/subscription policies with shared equivalent identities: %#v", artifacts.Runtime.Lanes)
 	}
 	if !strings.HasSuffix(string(body), "\n") || !strings.Contains(string(body), `"direct-public-dns"`) {
 		t.Fatalf("unexpected rendered policy DNS: %s", body)

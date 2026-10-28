@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -54,6 +55,108 @@ func TestURLTestEmergencyPlanUsesFreshQualityAndKeepsSweepSlot(t *testing.T) {
 	targets, preferred = emergencyProbePlan(now, "active", []string{"unknown", "slow", "middle"}, []string{"slow", "fast"}, map[string]int{"slow": 0, "fast": 1}, item, p)
 	if len(preferred) != 0 || targets[0] != "slow" {
 		t.Fatalf("URLTest ranking changed priority mode: %v / %v", targets, preferred)
+	}
+}
+
+func TestURLTestEmergencyRankingUsesLatestPrimaryWithoutPlannedRecoveryGate(t *testing.T) {
+	for _, recoveries := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprintf("recoveries=%d", recoveries), func(t *testing.T) {
+			item := newPolicyHealthState()
+			item.AvailabilityOK = map[string]bool{"fast": true, "slow": true}
+			item.QualityOK = map[string]bool{"fast": true, "slow": true}
+			oldFast, latestFast, oldSlow, latestSlow := 900, 400, 300, 640
+			item.MedianDelayMS = map[string]*int{"fast": &oldFast, "slow": &oldSlow}
+			item.Samples["fast"] = []healthSample{{At: 970, OK: true, DelayMS: &oldFast}, {At: 999, ObservedAt: 999.5, OK: true, DelayMS: &latestFast}}
+			item.Samples["slow"] = []healthSample{{At: 970, OK: true, DelayMS: &oldSlow}, {At: 999, ObservedAt: 999.5, OK: true, DelayMS: &latestSlow}}
+			item.Recoveries["fast"], item.Recoveries["slow"] = recoveries, 3
+			p := policySettings(healthPolicy{ProbeBatchSize: 2}, "best")
+			targets, preferred := emergencyProbePlan(time.Unix(1000, 0), "active", []string{"slow", "unknown"}, []string{"active", "slow", "fast", "unknown"}, nil, item, p)
+			if !reflect.DeepEqual(targets, []string{"fast", "slow"}) || !reflect.DeepEqual(preferred, []string{"fast", "slow"}) {
+				t.Fatalf("latest primary evidence lost to old median/recovery gate: targets=%v preferred=%v", targets, preferred)
+			}
+			if item.Recoveries["fast"] != recoveries || *item.MedianDelayMS["fast"] != oldFast {
+				t.Fatal("emergency ranking changed planned recovery or historical aggregates")
+			}
+		})
+	}
+}
+
+func TestURLTestEmergencyRankingRejectsInvalidLatestQuality(t *testing.T) {
+	delay := 100
+	for _, tc := range []struct {
+		name     string
+		sample   healthSample
+		failures int
+	}{
+		{name: "stale", sample: healthSample{At: 999, ObservedAt: 879, OK: true, DelayMS: &delay}},
+		{name: "future", sample: healthSample{At: 999, ObservedAt: 1001, OK: true, DelayMS: &delay}},
+		{name: "failed", sample: healthSample{At: 999, OK: false, DelayMS: &delay}},
+		{name: "fallback-only", sample: healthSample{At: 999, OK: true}},
+		{name: "availability-failed", sample: healthSample{At: 999, OK: true, DelayMS: &delay}, failures: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := newPolicyHealthState()
+			item.AvailabilityOK, item.QualityOK = map[string]bool{"node": true}, map[string]bool{"node": true}
+			item.MedianDelayMS = map[string]*int{"node": &delay}
+			item.Samples["node"] = []healthSample{tc.sample}
+			item.Recoveries["node"], item.AvailabilityFailures["node"] = 3, tc.failures
+			if got := knownFreshReserves(time.Unix(1000, 0), "active", []string{"node"}, "best", nil, item, policySettings(healthPolicy{}, "best")); len(got) != 0 {
+				t.Fatalf("invalid primary entered emergency ranking: %v", got)
+			}
+		})
+	}
+}
+
+func TestURLTestEmergencyLatestReserveMustPassCurrentProbe(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprintf("preferred-status=%d", status), func(t *testing.T) {
+			runtime, _, nodes := rankedEmergencyFixture(t, []emergencyProbeResponse{{20 * time.Millisecond, 204}, {150 * time.Millisecond, status}})
+			item := newPolicyHealthState()
+			item.AvailabilityOK, item.QualityOK = map[string]bool{}, map[string]bool{}
+			item.MedianDelayMS = map[string]*int{}
+			for i, node := range nodes {
+				latest, old := 640-i*240, 300+i*600
+				item.Samples[node] = []healthSample{{At: 999, ObservedAt: 999.5, OK: true, DelayMS: &latest}}
+				item.MedianDelayMS[node] = &old
+				item.AvailabilityOK[node], item.QualityOK[node], item.Recoveries[node] = true, true, 1
+			}
+			p := policySettings(healthPolicy{ProbeBatchSize: 2}, "best")
+			targets, preferred := emergencyProbePlan(time.Unix(1000, 0), "active", nodes, nodes, nil, item, p)
+			controller := &healthController{runtime: runtime, state: healthState{"route": item}}
+			measured, selected, err := controller.probeEmergencyCandidates("route", targets, preferred)
+			want := nodes[1]
+			if status != http.StatusNoContent {
+				want = nodes[0]
+			}
+			if err != nil || selected != want || !measured[selected].OK {
+				t.Fatalf("cached speed bypassed current proof: selected=%s want=%s err=%v", selected, want, err)
+			}
+			if item.LastEmergencySelection == nil || len(item.LastEmergencySelection.Preferred) != 2 || item.LastEmergencySelection.Preferred[0] != nodes[1] {
+				t.Fatal("switch lost its emergency ranking evidence")
+			}
+		})
+	}
+}
+
+func TestEmergencySelectionEvidenceIsTransientAndSanitized(t *testing.T) {
+	item := newPolicyHealthState()
+	delay := 400
+	item.Samples["fast"] = []healthSample{{At: 999, OK: true, DelayMS: &delay}}
+	preferred := []string{"fast"}
+	item.LastEmergencySelection = emergencySelectionEvidence(item, []string{"fast", "slow", "pending"}, preferred,
+		map[string]probeEvidence{"fast": {Failure: probeFailureTimeout, TargetFailures: map[string]probeFailureClass{"private-origin.example/secret": probeFailureTimeout}}, "slow": successfulEvidence(640)}, "slow")
+	preferred[0], delay = "changed", 999
+	selection := item.LastEmergencySelection
+	if selection.Reason != "ranked-reserves-pending-or-unavailable" || selection.Preferred[0] != "fast" || *selection.Probes[0].PrimaryDelayMS != 400 || selection.Probes[2].Result != "not-completed" {
+		t.Fatalf("inaccurate or aliased switch evidence: %+v", selection)
+	}
+	data, err := json.Marshal(healthEvent{ReserveSelection: selection})
+	if err != nil || strings.Contains(string(data), "private-origin") || strings.Contains(string(data), "secret") || !strings.Contains(string(data), "reserve_selection") {
+		t.Fatalf("invalid switch diagnostic: %s err=%v", data, err)
+	}
+	data, err = json.Marshal(item)
+	if err != nil || strings.Contains(string(data), "ranked-reserves-pending-or-unavailable") {
+		t.Fatal("transient switch diagnostic leaked into persisted health history")
 	}
 }
 

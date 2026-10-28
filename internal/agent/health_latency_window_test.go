@@ -60,7 +60,7 @@ func TestCurrentLatencyComparisonUsesSameShortMedianAsRanking(t *testing.T) {
 	item.Selected, item.RuntimeSelected, item.RuntimeConfirmed = "active", "active", true
 	for node, delays := range map[string][]int{"active": {600, 600, 1200}, "reserve": {350, 350, 450}} {
 		for index, value := range delays {
-			item.Samples[node] = append(item.Samples[node], healthSample{At: float64(880 + index*60), OK: true, DelayMS: &value})
+			item.Samples[node] = append(item.Samples[node], healthSample{At: float64(880 + index*60), ObservedAt: float64(880 + index*60), OK: true, DelayMS: &value})
 		}
 		item.QualityOK[node], item.AvailabilityOK[node], item.Recoveries[node] = true, true, 3
 	}

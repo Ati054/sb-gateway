@@ -75,6 +75,14 @@ test("reverse connection status uses Xray online telemetry, not HTTPS health", (
   assert.equal(reverseAvailability({ reverse_telemetry: telemetry }, "home", NaN).state, "unknown");
 });
 
+test("late history cannot restore display comparisons withdrawn by a newer status", () => {
+  const current = { selector_health: { route: { runtime_selected: "new",
+    runtime_observed_at: "2026-01-01T00:01:00Z", last_latency_comparisons: null } } };
+  const older = { selector_health: { route: { runtime_selected: "old",
+    runtime_observed_at: "2026-01-01T00:00:00Z", last_latency_comparisons: { reserve: { active: "old" } } } } };
+  assert.equal(mergeRuntimeStatus(current, older).selector_health.route.last_latency_comparisons, null);
+});
+
 test("unused Reverse indicator is independent of route probes and other profiles", () => {
   const now = Date.parse("2026-09-07T00:00:00Z");
   const runtime = {

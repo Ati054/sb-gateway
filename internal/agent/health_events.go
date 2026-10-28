@@ -10,21 +10,63 @@ import (
 // labels and failure classes. Server addresses, URLs, credentials and raw
 // network errors must not enter the management log.
 type healthEvent struct {
-	At           string                  `json:"at"`
-	Event        string                  `json:"event"`
-	Policy       string                  `json:"policy"`
-	Node         string                  `json:"node,omitempty"`
-	From         string                  `json:"from,omitempty"`
-	To           string                  `json:"to,omitempty"`
-	Reason       string                  `json:"reason,omitempty"`
-	Failure      probeFailureClass       `json:"failure,omitempty"`
-	Count        int                     `json:"count,omitempty"`
-	Threshold    int                     `json:"threshold,omitempty"`
-	Underlay     string                  `json:"underlay,omitempty"`
-	Targets      map[string]string       `json:"targets,omitempty"`
-	TargetStages map[string]string       `json:"target_stages,omitempty"`
-	Quality      *switchQuality          `json:"quality,omitempty"`
-	Comparison   *optimizationComparison `json:"comparison,omitempty"`
+	At               string                  `json:"at"`
+	Event            string                  `json:"event"`
+	Policy           string                  `json:"policy"`
+	Node             string                  `json:"node,omitempty"`
+	From             string                  `json:"from,omitempty"`
+	To               string                  `json:"to,omitempty"`
+	Reason           string                  `json:"reason,omitempty"`
+	Failure          probeFailureClass       `json:"failure,omitempty"`
+	Count            int                     `json:"count,omitempty"`
+	Threshold        int                     `json:"threshold,omitempty"`
+	Underlay         string                  `json:"underlay,omitempty"`
+	Targets          map[string]string       `json:"targets,omitempty"`
+	TargetStages     map[string]string       `json:"target_stages,omitempty"`
+	Quality          *switchQuality          `json:"quality,omitempty"`
+	Comparison       *optimizationComparison `json:"comparison,omitempty"`
+	ReserveSelection *emergencySelection     `json:"reserve_selection,omitempty"`
+}
+
+// Captured only for the switching tick, never persisted in health history.
+// A missing result means canceled/unfinished work, not a failed reserve.
+type emergencySelection struct {
+	Reason    string                  `json:"reason"`
+	Preferred []string                `json:"preferred,omitempty"`
+	Probes    []emergencyReserveProbe `json:"probes"`
+}
+
+type emergencyReserveProbe struct {
+	Node            string  `json:"node"`
+	Result          string  `json:"result"`
+	PrimaryDelayMS  *int    `json:"primary_delay_ms,omitempty"`
+	PrimarySampleAt float64 `json:"primary_sample_at,omitempty"`
+}
+
+func emergencySelectionEvidence(item *policyHealthState, candidates, preferred []string, measured map[string]probeEvidence, chosen string) *emergencySelection {
+	result := &emergencySelection{Reason: "no-fresh-ranking", Preferred: append([]string(nil), preferred...)}
+	if contains(preferred, chosen) {
+		result.Reason = "fresh-ranked-reserve"
+	} else if len(preferred) > 0 {
+		result.Reason = "ranked-reserves-pending-or-unavailable"
+	}
+	for _, candidate := range candidates {
+		probe := emergencyReserveProbe{Node: candidate, Result: "not-completed"}
+		if evidence, checked := measured[candidate]; checked {
+			probe.Result = "failed"
+			if evidence.OK {
+				probe.Result = "ok"
+			} else if evidence.Failure != "" {
+				probe.Result = string(evidence.Failure)
+			}
+		}
+		if sample, observedAt := latestQualityObservation(item, candidate); sample.OK && sample.DelayMS != nil && *sample.DelayMS > 0 && observedAt > 0 {
+			delay := *sample.DelayMS
+			probe.PrimaryDelayMS, probe.PrimarySampleAt = &delay, observedAt
+		}
+		result.Probes = append(result.Probes, probe)
+	}
+	return result
 }
 
 // Numeric decision evidence is emitted only on a switch. It contains no
