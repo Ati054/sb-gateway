@@ -90,6 +90,14 @@ func NewTransaction(rest *Client, sshTransport *SSHTransport) (*Transaction, err
 }
 
 func (transaction *Transaction) ApplyDelta(ctx context.Context, applySource, rollbackSource string, options TransactionOptions) (TransactionResult, error) {
+	if len(applySource) > maxDirectScriptBytes || len(rollbackSource) > maxDirectScriptBytes {
+		for _, source := range []string{applySource, rollbackSource} {
+			if err := validateImportedDelta(source); err != nil {
+				return TransactionResult{}, err
+			}
+		}
+		return transaction.ApplyCandidate(ctx, applySource, rollbackSource, options)
+	}
 	var result TransactionResult
 	if options.HealthCheck == nil {
 		return result, errors.New("RouterOS post-apply health check is required")
@@ -115,7 +123,7 @@ func (transaction *Transaction) ApplyDelta(ctx context.Context, applySource, rol
 	return transaction.applyPrepared(ctx, result, scheduler, options, nil)
 }
 
-// ApplyCandidate streams complete generated RSC files once through SCP and
+// ApplyCandidate streams generated full candidates or section deltas through SCP and
 // executes only small import wrappers through the same guarded transaction.
 func (transaction *Transaction) ApplyCandidate(ctx context.Context, applySource, rollbackSource string, options TransactionOptions) (TransactionResult, error) {
 	var result TransactionResult

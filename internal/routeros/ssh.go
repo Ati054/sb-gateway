@@ -121,7 +121,11 @@ func (transport *SSHTransport) uploadCandidate(ctx context.Context, role, source
 	if err != nil {
 		return "", err
 	}
-	if err := validateFullCandidate(source); err != nil {
+	validate := validateFullCandidate
+	if strings.HasPrefix(source, "# SB-GATEWAY generated minimal delta; complete managed sections\n") {
+		validate = validateImportedDelta
+	}
+	if err := validate(source); err != nil {
 		return "", err
 	}
 	if err := transport.UploadManagedImport(ctx, name, strings.NewReader(source), int64(len(source))); err != nil {

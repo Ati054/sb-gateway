@@ -19,6 +19,8 @@ type Program struct {
 	Name  string
 	Run   func(context.Context) error
 	Probe func(context.Context) error
+	// Reload replaces configuration without closing existing connections.
+	Reload func(context.Context) error
 }
 
 type programState struct {
@@ -30,6 +32,7 @@ type programState struct {
 }
 
 type restartRequest struct {
+	ctx context.Context
 	ack chan error
 }
 
@@ -114,6 +117,7 @@ func (supervisor *Supervisor) Run(ctx context.Context) error {
 func (supervisor *Supervisor) runProgram(ctx context.Context, state *programState) {
 	var failures int
 	var restarted chan error
+generation:
 	for ctx.Err() == nil {
 		child, cancel := context.WithCancel(ctx)
 		result := make(chan error, 1)
@@ -124,40 +128,47 @@ func (supervisor *Supervisor) runProgram(ctx context.Context, state *programStat
 			restarted = nil
 		}
 
-		select {
-		case request := <-state.restart:
-			log.Printf("appliance: planned restart requested for %s", state.program.Name)
-			cancel()
-			err := <-result
-			if ctx.Err() != nil {
-				request.ack <- ctx.Err()
-				return
-			}
-			supervisor.setStopped(state, expectedStopError(err))
-			failures = 0
-			restarted = request.ack
-			continue
-		case err := <-result:
-			cancel()
-			if ctx.Err() != nil {
+		for {
+			select {
+			case request := <-state.restart:
+				if state.program.Reload != nil {
+					request.ack <- state.program.Reload(request.ctx)
+					continue
+				}
+				log.Printf("appliance: planned restart requested for %s", state.program.Name)
+				cancel()
+				err := <-result
+				if ctx.Err() != nil {
+					request.ack <- ctx.Err()
+					return
+				}
+				supervisor.setStopped(state, expectedStopError(err))
+				failures = 0
+				restarted = request.ack
+				continue generation
+			case err := <-result:
+				cancel()
+				if ctx.Err() != nil {
+					supervisor.setStopped(state, nil)
+					return
+				}
+				failures++
+				supervisor.setStopped(state, unexpectedStopError(err))
+				delay := restartDelay(failures)
+				log.Printf("appliance: %s stopped unexpectedly: %v; restart in %s", state.program.Name, unexpectedStopError(err), delay)
+				if !waitContext(ctx, delay) {
+					return
+				}
+				continue generation
+			case <-ctx.Done():
+				cancel()
+				<-result
 				supervisor.setStopped(state, nil)
+				if restarted != nil {
+					restarted <- ctx.Err()
+				}
 				return
 			}
-			failures++
-			supervisor.setStopped(state, unexpectedStopError(err))
-			delay := restartDelay(failures)
-			log.Printf("appliance: %s stopped unexpectedly: %v; restart in %s", state.program.Name, unexpectedStopError(err), delay)
-			if !waitContext(ctx, delay) {
-				return
-			}
-		case <-ctx.Done():
-			cancel()
-			<-result
-			supervisor.setStopped(state, nil)
-			if restarted != nil {
-				restarted <- ctx.Err()
-			}
-			return
 		}
 	}
 }
@@ -171,7 +182,7 @@ func (supervisor *Supervisor) Restart(ctx context.Context, names []string) error
 		return err
 	}
 	for _, state := range states {
-		request := restartRequest{ack: make(chan error, 1)}
+		request := restartRequest{ctx: ctx, ack: make(chan error, 1)}
 		select {
 		case state.restart <- request:
 		case <-ctx.Done():

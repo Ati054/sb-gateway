@@ -93,6 +93,9 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return err
 	}
+	nginx.Reload = func(ctx context.Context) error {
+		return reloadNginx(ctx, options.NginxBinary, options.NginxConfig)
+	}
 	xray, err := CommandProgram(
 		"xray", options.ShellBinary, []string{options.XrayRunner},
 		WaitProbe(xrayStartupProbe(options, "/proc"), 250*time.Millisecond),

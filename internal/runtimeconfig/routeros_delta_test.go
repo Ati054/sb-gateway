@@ -63,7 +63,11 @@ func TestBuildRouterOSDeltaFallsBackForUnknownOrLargeChanges(t *testing.T) {
 		t.Fatalf("identical candidates produced delta: %#v", plan)
 	}
 	large := strings.Replace(previous, routerOSSectionPrefix+"dns\n", routerOSSectionPrefix+"dns\n#"+strings.Repeat("x", 17*1024)+"\n", 1)
-	if plan := BuildRouterOSDelta(previous, large, 1); plan != nil {
-		t.Fatal("REST source limit must force file import even when the ratio allows a delta")
+	if plan := BuildRouterOSDelta(previous, large, 1); plan == nil || !reflect.DeepEqual(plan.Sections, []string{"dns"}) {
+		t.Fatal("a large partial change must remain a delta for guarded file import")
+	}
+	tooLarge := strings.Replace(previous, routerOSSectionPrefix+"dns\n", routerOSSectionPrefix+"dns\n#"+strings.Repeat("x", 2*1024*1024)+"\n", 1)
+	if plan := BuildRouterOSDelta(previous, tooLarge, 1); plan != nil {
+		t.Fatal("a delta larger than the import bound must fall back")
 	}
 }
