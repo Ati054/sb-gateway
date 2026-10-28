@@ -322,9 +322,10 @@ test("RouterOS bootstrap accepts a local ARM64 archive and waits for extraction"
 });
 
 test("setup mode cannot falsely advertise data-plane readiness", async () => {
-  const [entrypoint, runner, appliance, watchdog, runtime] = await Promise.all([
+  const [entrypoint, runner, validation, appliance, watchdog, runtime] = await Promise.all([
     text("entrypoint.sh"),
     text("scripts/run-xray.sh"),
+    text("scripts/validate-xray.sh"),
     text("internal/appliance/run.go"),
     text("internal/watchdog/watchdog.go"),
     text("internal/controlplane/runtime.go"),
@@ -334,7 +335,8 @@ test("setup mode cannot falsely advertise data-plane readiness", async () => {
   assert.match(entrypoint, /-checkip "\$bootstrap_ip"/);
   assert.doesNotMatch(entrypoint, /SB_CONTAINER_IP:-172\./);
   assert.match(runner, /while \[ ! -s "\$config" \]; do/);
-  assert.match(runner, /xray run -test -config "\$config"/);
+  assert.match(runner, /validate-xray\.sh "\$config"/);
+  assert.match(validation, /xray run -test -config "\$1"/);
   assert.match(
     runner,
     /ip rule add priority 1000 from "\$container_ip\/32" table 1001/,

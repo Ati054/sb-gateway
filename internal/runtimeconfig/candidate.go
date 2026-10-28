@@ -109,6 +109,7 @@ func (store *CandidateStore) Prepare(revision string, artifacts map[string][]byt
 		return RuntimeCandidate{}, errors.New("runtime candidate must contain every managed artifact")
 	}
 	names := make([]string, 0, len(artifacts))
+	digests := make(map[string]string, len(artifacts))
 	total := 0
 	for name, body := range artifacts {
 		if _, ok := store.destinations[name]; !ok {
@@ -122,8 +123,19 @@ func (store *CandidateStore) Prepare(revision string, artifacts map[string][]byt
 			return RuntimeCandidate{}, errors.New("runtime candidate exceeds 64 MiB")
 		}
 		names = append(names, name)
+		digest := sha256.Sum256(body)
+		digests[name] = hex.EncodeToString(digest[:])
 	}
 	sort.Strings(names)
+	// Preparation is also used by unchanged Apply. Reuse only after checking
+	// every file against both its durable manifest and the freshly rendered
+	// contents; a corrupt candidate must still be rebuilt atomically.
+	if candidate, err := store.loadLocked(revision, digests); err == nil {
+		if err := store.pruneExcept(revision); err != nil {
+			return RuntimeCandidate{}, err
+		}
+		return candidate, nil
+	}
 	if err := os.MkdirAll(store.root, 0o700); err != nil {
 		return RuntimeCandidate{}, err
 	}
@@ -135,15 +147,13 @@ func (store *CandidateStore) Prepare(revision string, artifacts map[string][]byt
 	if err := os.Chmod(staging, 0o700); err != nil {
 		return RuntimeCandidate{}, err
 	}
-	manifest := candidateManifest{Artifacts: make(map[string]string, len(names)), Revision: revision}
+	manifest := candidateManifest{Artifacts: digests, Revision: revision}
 	for _, name := range names {
 		body := artifacts[name]
 		path := filepath.Join(staging, name)
 		if err := writePrivateFile(path, body); err != nil {
 			return RuntimeCandidate{}, err
 		}
-		digest := sha256.Sum256(body)
-		manifest.Artifacts[name] = hex.EncodeToString(digest[:])
 	}
 	manifestBody, err := marshalCanonical(manifest)
 	if err != nil {
@@ -198,11 +208,26 @@ func (store *CandidateStore) Prepare(revision string, artifacts map[string][]byt
 func (store *CandidateStore) Load(revision string) (RuntimeCandidate, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	return store.loadLocked(revision, nil)
+}
+
+func (store *CandidateStore) loadLocked(revision string, renderedDigests map[string]string) (RuntimeCandidate, error) {
 	if !candidateRevisionPattern.MatchString(revision) {
 		return RuntimeCandidate{}, errors.New("runtime candidate revision is invalid")
 	}
 	directory := filepath.Join(store.root, revision)
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return RuntimeCandidate{}, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return RuntimeCandidate{}, errors.New("runtime candidate destination is not a safe directory")
+	}
 	manifestPath := filepath.Join(directory, "manifest.json")
+	manifestStat, err := os.Lstat(manifestPath)
+	if err != nil || !manifestStat.Mode().IsRegular() {
+		return RuntimeCandidate{}, errors.New("runtime candidate manifest is not a regular file")
+	}
 	file, err := os.Open(manifestPath)
 	if err != nil {
 		return RuntimeCandidate{}, err
@@ -234,7 +259,14 @@ func (store *CandidateStore) Load(revision string) (RuntimeCandidate, error) {
 		if !ok || !candidateRevisionPattern.MatchString(expected) {
 			return RuntimeCandidate{}, fmt.Errorf("runtime candidate manifest is missing artifact %q", name)
 		}
+		if renderedDigests != nil && renderedDigests[name] != expected {
+			return RuntimeCandidate{}, fmt.Errorf("runtime candidate artifact %q differs from its rendered contents", name)
+		}
 		path := filepath.Join(directory, name)
+		info, statErr := os.Lstat(path)
+		if statErr != nil || !info.Mode().IsRegular() {
+			return RuntimeCandidate{}, fmt.Errorf("runtime candidate artifact %q is not a regular file", name)
+		}
 		actual, hashErr := hashRegularFile(path, maxCandidateArtifactBytes, hashBuffer)
 		if hashErr != nil {
 			return RuntimeCandidate{}, fmt.Errorf("verify runtime artifact %q: %w", name, hashErr)

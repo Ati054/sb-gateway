@@ -440,7 +440,7 @@ func renderRouterOSIPv6(model RouterOSRenderModel) []string {
 
 func renderRouterOSFinalize() []string {
 	return []string{
-		`/ip/firewall/connection/remove [find where connection-mark="sb-managed"]`,
+		routerosassets.ManagedConnectionCleanupSource(),
 		`:do { /system/script/run SB-GATEWAY-startup-fail-open } on-error={ :error "SB-GATEWAY startup fail-open script unavailable" }`,
 		`:log info "SB-GATEWAY candidate reconciled; watchdog controls diversion gate"`,
 	}

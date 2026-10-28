@@ -154,10 +154,64 @@ func TestPlannedRuntimeActivationRequiresLiveApplyAndUnchangedRouterOS(t *testin
 	if plannedRuntimeActivationReady(operation, true) {
 		t.Fatal("RouterOS transaction must not bypass recovery gate")
 	}
+	operation["state"] = "active_committed"
+	if !plannedRuntimeActivationReady(operation, true) || plannedRuntimeActivationReady(operation, false) {
+		t.Fatal("only a live completed RouterOS transaction may recover its committed runtime")
+	}
 	operation["target_routeros_source"] = "managed rules"
 	operation["state"] = "recovery_pending"
 	if plannedRuntimeActivationReady(operation, true) {
 		t.Fatal("rollback-pending journal must stay fail-open")
+	}
+}
+
+func TestPlannedRuntimeAdmissionRequiresLiveActivationAndTrafficProof(t *testing.T) {
+	server := newTestServer(t)
+	config := routerOSReadyConfig(t)
+	config["local_clients"] = []any{}
+	revision, err := server.repository.stageGeneration(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.repository.commitActive(commitMetadata{Revision: revision, Actor: "test", CommittedAt: server.now()}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "router-ready")
+	t.Setenv("SB_ROUTER_READY_MARKER", marker)
+	server.checkPersistentMounts = func() (bool, []string) { return true, nil }
+	for _, tc := range []struct {
+		name, phase, source string
+		live, lease, want   bool
+	}{
+		{"probed planned restart", "runtime_activated", "same", true, true, true},
+		{"not yet activated", "prepared", "same", true, true, false},
+		{"previous process journal", "runtime_activated", "same", false, true, false},
+		{"expired lease", "runtime_activated", "same", true, false, false},
+		{"changed router rules", "runtime_activated", "other", true, true, false},
+		{"committed changed rules", "active_committed", "other", true, true, true},
+		{"stale committed rules", "active_committed", "other", false, true, false},
+		{"committed missing lease", "active_committed", "other", true, false, false},
+		{"rollback pending", "recovery_pending", "same", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server.plannedRuntimeApply.Store(tc.live)
+			operation := map[string]any{"pending": true, "state": tc.phase, "previous_routeros_source": "same", "target_routeros_source": tc.source}
+			if err := server.repository.saveAuxiliary("apply-operation", operation); err != nil {
+				t.Fatal(err)
+			}
+			if tc.lease {
+				if err := os.WriteFile(marker, []byte(strconv.FormatInt(server.now().Unix(), 10)), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			response := performRequest(t, server, http.MethodGet, "/api/health/traffic-ready", nil, nil)
+			body := decodeResponse(t, response)
+			if body["planned_runtime_ready"] != tc.want || (tc.want && response.Code != http.StatusOK) {
+				t.Fatalf("unproven immediate admission: %s", response.Body.String())
+			}
+		})
 	}
 }
 

@@ -26,6 +26,7 @@ COPY patches/xray-health-probe-lifetime.patch /tmp/xray-health-probe-lifetime.pa
 COPY patches/xray-reverse-backpressure-selection.patch /tmp/xray-reverse-backpressure-selection.patch
 COPY patches/xray-grpc-context-regression.patch /tmp/xray-grpc-context-regression.patch
 COPY patches/xray-feature-warning-once.patch /tmp/xray-feature-warning-once.patch
+COPY patches/xray-reality-warning-once.patch /tmp/xray-reality-warning-once.patch
 RUN git init \
     && git remote add origin https://github.com/XTLS/Xray-core.git \
     && git fetch --depth=1 origin "${XRAY_COMMIT}" \
@@ -51,7 +52,10 @@ RUN git init \
     && git apply /tmp/xray-grpc-context-regression.patch \
     && git apply --check /tmp/xray-feature-warning-once.patch \
     && git apply /tmp/xray-feature-warning-once.patch \
+    && git apply --check /tmp/xray-reality-warning-once.patch \
+    && git apply /tmp/xray-reality-warning-once.patch \
     && go test ./main \
+    && go test ./infra/conf -run '^TestSBReality' \
     && go test ./common/errors -run '^TestSB' \
     && go test ./app/router -run '^TestSB' \
     && go test ./common/mux ./app/reverse ./proxy/vless/inbound \
@@ -71,7 +75,7 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
 ARG XRAY_COMMIT=1b1647cd9ddf0abc34b981d4611fc03bcac1ca74
-ARG SB_GATEWAY_VERSION=1.6.79
+ARG SB_GATEWAY_VERSION=1.6.80
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -123,7 +127,7 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
 ARG XRAY_VERSION=26.10.21
-ARG SB_GATEWAY_VERSION=1.6.79
+ARG SB_GATEWAY_VERSION=1.6.80
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -164,7 +168,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.10.21
 ARG XRAY_COMMIT=1b1647cd9ddf0abc34b981d4611fc03bcac1ca74
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.79
+ARG SB_GATEWAY_VERSION=1.6.80
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 LABEL org.opencontainers.image.title="sb-gateway" \
@@ -207,13 +211,20 @@ COPY --from=web-build /src/out /opt/sb-gateway/web/out
 COPY rulesets ./rulesets
 COPY templates/client-profile.json.j2 templates/nginx-api-decoy.inc templates/nginx-decoy.inc templates/nginx.conf.j2 templates/xray-source-model.json.j2 ./templates/
 COPY templates/decoy ./templates/decoy
-COPY scripts/configure-transparent-routing.sh scripts/configure-wireguard-egress.sh scripts/healthcheck.sh scripts/preflight.sh scripts/render-runtime.sh scripts/run-xray.sh ./scripts/
+COPY scripts/configure-transparent-routing.sh scripts/configure-wireguard-egress.sh scripts/healthcheck.sh scripts/preflight.sh scripts/render-runtime.sh scripts/run-xray.sh scripts/validate-xray.sh ./scripts/
 COPY entrypoint.sh ./
 RUN ln -s sb-gateway /usr/local/bin/xray \
     && chmod 0755 entrypoint.sh scripts/*.sh \
     && mkdir -p /config /data /logs /state /run/sb-gateway \
     && sb-gateway version | grep -F "sb-gateway ${SB_GATEWAY_VERSION}" \
-    && xray version | grep -F "Xray ${XRAY_VERSION}"
+    && xray version | grep -F "Xray ${XRAY_VERSION}" \
+    && test -x scripts/validate-xray.sh \
+    && validation_dir="$(mktemp -d)" \
+    && printf '%s\n' '{"outbounds":[{"protocol":"freedom"}]}' > "$validation_dir/xray.json" \
+    && scripts/validate-xray.sh "$validation_dir/xray.json" > "$validation_dir/output" 2>&1 \
+    && test ! -s "$validation_dir/output" \
+    && rm -f "$validation_dir/xray.json" "$validation_dir/output" \
+    && rmdir "$validation_dir"
 EXPOSE 443/tcp 443/udp 2443/tcp 2444/tcp 2446/tcp 9443/tcp
 VOLUME ["/config", "/data", "/logs", "/state"]
 HEALTHCHECK --interval=10s --timeout=10s --start-period=60s --retries=3 \

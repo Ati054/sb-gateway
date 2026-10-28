@@ -1,0 +1,124 @@
+diff --git a/infra/conf/sb_reality_warning.go b/infra/conf/sb_reality_warning.go
+new file mode 100644
+index 0000000..0880fc4
+--- /dev/null
++++ b/infra/conf/sb_reality_warning.go
+@@ -0,0 +1,8 @@
++package conf
++
++import "sync"
++
++// These two fixed keys retain the first advisory per process without storing
++// user-controlled names or filtering connection and validation failures.
++var sbRealityTargetWarning sync.Once
++var sbRealityPortWarning sync.Once
+diff --git a/infra/conf/sb_reality_warning_test.go b/infra/conf/sb_reality_warning_test.go
+new file mode 100644
+index 0000000..da9d3bc
+--- /dev/null
++++ b/infra/conf/sb_reality_warning_test.go
+@@ -0,0 +1,74 @@
++package conf
++
++import (
++	"context"
++	"encoding/json"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/xtls/xray-core/common/errors"
++	"github.com/xtls/xray-core/common/log"
++)
++
++type sbRealityWarningLog struct {
++	sync.Mutex
++	messages []string
++}
++
++func (h *sbRealityWarningLog) Handle(m log.Message) {
++	h.Lock()
++	defer h.Unlock()
++	h.messages = append(h.messages, m.String())
++}
++
++func TestSBRealityAdvisoriesOnceAcrossConfigBuilds(t *testing.T) {
++	sbRealityTargetWarning = sync.Once{}
++	sbRealityPortWarning = sync.Once{}
++	h := &sbRealityWarningLog{}
++	log.RegisterHandler(h)
++	t.Cleanup(func() {
++		log.RegisterHandler(log.NewLogger(log.CreateStdoutLogWriter()))
++		sbRealityTargetWarning = sync.Once{}
++		sbRealityPortWarning = sync.Once{}
++	})
++	const fixture = `{"inbounds":[{"port":2443,"protocol":"vless","settings":{"decryption":"none","clients":[{"id":"00000000-0000-0000-0000-000000000001"}]},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"target":"example.com:443","serverNames":["mask.example.ru","other.example.ru"],"privateKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","shortIds":["0123456789abcdef"]}}}],"outbounds":[{"protocol":"freedom"}]}`
++	var group sync.WaitGroup
++	for range 32 {
++		group.Add(1)
++		go func() {
++			defer group.Done()
++			var c Config
++			if err := json.Unmarshal([]byte(fixture), &c); err != nil {
++				t.Error(err)
++				return
++			}
++			if _, err := c.Build(); err != nil {
++				t.Error(err)
++			}
++		}()
++	}
++	group.Wait()
++	for range 2 {
++		errors.LogWarning(context.Background(), "sb-ordinary-warning")
++		errors.LogError(context.Background(), "sb-runtime-error")
++	}
++	var invalid Config
++	if err := json.Unmarshal([]byte(strings.Replace(fixture, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "invalid", 1)), &invalid); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := invalid.Build(); err == nil {
++		t.Fatal("invalid REALITY key accepted")
++	}
++	for fragment, want := range map[string]int{"REALITY: Choosing": 1, "REALITY: Listening on non-443": 1, "sb-ordinary-warning": 2, "sb-runtime-error": 2} {
++		count := 0
++		for _, m := range h.messages {
++			if strings.Contains(m, fragment) {
++				count++
++			}
++		}
++		if count != want {
++			t.Errorf("%s: got %d, want %d", fragment, count, want)
++		}
++	}
++}
+diff --git a/infra/conf/transport_security.go b/infra/conf/transport_security.go
+index 00e5387..2bacd2e 100644
+--- a/infra/conf/transport_security.go
++++ b/infra/conf/transport_security.go
+@@ -164,7 +164,9 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
+ 			sn = strings.ToLower(sn)
+ 			if strings.HasSuffix(sn, ".ru") || strings.HasSuffix(sn, ".ir") || strings.HasSuffix(sn, ".cn") ||
+ 				strings.Contains(sn, "apple") || strings.Contains(sn, "icloud") || strings.Contains(sn, "microsoft") {
+-				errors.LogWarning(context.Background(), `REALITY: Choosing "`, sn, `" as the target will increase the likelihood of your server's IP being blocked by the GFW`)
++				sbRealityTargetWarning.Do(func() {
++					errors.LogWarning(context.Background(), `REALITY: Choosing "`, sn, `" as the target will increase the likelihood of your server's IP being blocked by the GFW`)
++				})
+ 			}
+ 		}
+ 
+diff --git a/infra/conf/xray.go b/infra/conf/xray.go
+index 6bf6ba4..b2eb36d 100644
+--- a/infra/conf/xray.go
++++ b/infra/conf/xray.go
+@@ -184,7 +184,9 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
+ 		receiverSettings.StreamSettings = ss
+ 		if strings.Contains(ss.SecurityType, "reality") && (receiverSettings.PortList == nil ||
+ 			len(receiverSettings.PortList.Ports()) != 1 || receiverSettings.PortList.Ports()[0] != 443) {
+-			errors.LogWarning(context.Background(), `REALITY: Listening on non-443 ports will increase the likelihood of your server's IP being blocked by the GFW`)
++			sbRealityPortWarning.Do(func() {
++				errors.LogWarning(context.Background(), `REALITY: Listening on non-443 ports will increase the likelihood of your server's IP being blocked by the GFW`)
++			})
+ 		}
+ 	}
+ 	if c.SniffingConfig != nil {

@@ -355,6 +355,23 @@ func (client *Client) EnforceStartupTrafficSafety(ctx context.Context) (bool, er
 		}
 		migrated = true
 	}
+	// Refresh the startup helper before its first execution. Waiting for the
+	// periodic sync would run the previous image's conntrack cleanup at boot.
+	wantFailOpen := routerosassets.StartupFailOpenSource()
+	if strings.TrimSpace(strings.ReplaceAll(failOpen.item.source, "\r\n", "\n")) != wantFailOpen {
+		path := "/rest/system/script/" + routerOSResourceID(failOpen.item.id)
+		if _, err := client.request(ctx, http.MethodPatch, path, map[string]any{"source": wantFailOpen}); err != nil {
+			return false, err
+		}
+		readback, err := client.request(ctx, http.MethodGet, path+"?.proplist=source", nil)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(strings.ReplaceAll(text(readback["source"]), "\r\n", "\n")) != wantFailOpen {
+			return false, errors.New("startup fail-open source readback differs")
+		}
+		migrated = true
+	}
 	if _, err := client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": config.item.id}); err != nil {
 		return false, fmt.Errorf("load traffic-ready watchdog config: %w", err)
 	}

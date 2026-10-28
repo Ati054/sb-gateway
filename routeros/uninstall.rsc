@@ -19,7 +19,7 @@
 
 :local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]
 :if ([:len $gate] = 1) do={ /ip/firewall/mangle/disable $gate }
-/ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
 
 :foreach state in=[/system/script/find where comment~"^SB-GATEWAY WG egress peer state "] do={
   :local stateData [/system/script/get $state source]

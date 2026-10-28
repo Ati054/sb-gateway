@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestManagedConntrackCleanupHandlesEmptyAndExpiredRecords(t *testing.T) {
+	cleanup := ManagedConnectionCleanupSource()
+	if !strings.HasPrefix(cleanup, `:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"]`) ||
+		!strings.Contains(cleanup, `:do { /ip/firewall/connection/remove $sbFlow } on-error={}`) {
+		t.Fatal("cleanup must be scoped and tolerate each expired record separately")
+	}
+	for _, name := range []string{"watchdog.rsc", "install.rsc", "rollback.rsc", "uninstall.rsc"} {
+		body, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), cleanup) || strings.Contains(string(body), `/ip/firewall/connection/remove [find`) {
+			t.Fatalf("%s still permits empty-list or stale-record cleanup failure", name)
+		}
+	}
+}
+
 func TestContainerBootWaitsForStorageWithoutPeriodicRestart(t *testing.T) {
 	installer := ContainerStartupInstallSource()
 	ready := ContainerStorageReadySource()
@@ -93,10 +110,15 @@ func TestWatchdogReconcilesActualGateAfterFreshHealth(t *testing.T) {
 	if fetch < 0 || healthy < fetch || actual < healthy || enable < actual {
 		t.Fatal("gate reconciliation must follow fresh readiness")
 	}
-	for _, fragment := range []string{`($gateDisabled = true) && (($sbStartupSafety = true) || ($sbFailOpen = false) ||`, `SB_HEALTH_RECOVERY_THRESHOLD`, `SB_HEALTH_COOLDOWN_TICKS`} {
+	for _, fragment := range []string{`($gateDisabled = true) && (($sbStartupSafety = true) || ($plannedRuntimeReady = true) || ($sbFailOpen = false) ||`, `SB_HEALTH_RECOVERY_THRESHOLD`, `SB_HEALTH_COOLDOWN_TICKS`} {
 		if !strings.Contains(source, fragment) {
 			t.Fatalf("missing drift recovery/hysteresis: %s", fragment)
 		}
+	}
+	planned := strings.Index(source, `:set plannedRuntimeReady (($readiness->"planned_runtime_ready") = true)`)
+	proof := strings.Index(source, `:if (($readiness->"traffic_ready") = true)`)
+	if proof < fetch || planned < proof || planned > healthy {
+		t.Fatal("planned restart admission must be read only inside fresh traffic readiness proof")
 	}
 	if strings.Contains(source, "reverse") || strings.Contains(source, "selector_health") {
 		t.Fatal("router readiness must not depend on exit availability")
@@ -151,7 +173,7 @@ func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
 		`($localDestination = true) && ([:tostr $sourceIP] != [:tostr $containerIP])`,
 		`list="SB_MANAGED_CLIENTS"`,
 		`($sourceIP >> (32 - $bits)) = ($networkIP >> (32 - $bits))`,
-		`:if ($managed = true) do={ /ip/firewall/connection/remove $flow }`,
+		`:if ($managed = true) do={ :do { /ip/firewall/connection/remove $flow } on-error={} }`,
 	} {
 		if !strings.Contains(source, fragment) {
 			t.Fatalf("missing DNS cleanup scope: %s", fragment)
@@ -171,7 +193,7 @@ func TestWatchdogSerializesRecoveryAndPurgesOnlyOnTransition(t *testing.T) {
 		t.Fatal("recovery state must commit before DNS maintenance")
 	}
 	transition := strings.Index(source, `:if (($gateWasEnabled = true) || ($sbFailOpen = false)) do={`)
-	if transition < 0 || !strings.Contains(source[transition:], `/ip/firewall/connection/remove [find where connection-mark="sb-managed"]`) {
+	if transition < 0 || !strings.Contains(source[transition:], ManagedConnectionCleanupSource()) {
 		t.Fatal("outage cleanup must be limited to the state transition")
 	}
 	flow := strings.Index(source, `:foreach flow in=$dnsFlows do={`)

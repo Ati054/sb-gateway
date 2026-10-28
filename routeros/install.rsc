@@ -66,7 +66,7 @@
 # Re-imports also start fail-open.  Only the exact project gate/connections are
 # touched while trusted ingress and policy rules are reconciled.
 /ip/firewall/mangle/disable [find where comment="SB-GATEWAY diversion-gate"]
-/ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
 
 :if ([:len [/interface/bridge/find where name=$"SB_BRIDGE"]] = 0) do={
   /interface/bridge/add name=$"SB_BRIDGE" protocol-mode=none comment="SB-GATEWAY container bridge"
@@ -501,5 +501,5 @@
 }
 /system/scheduler/enable $bootScheduler
 /ip/firewall/mangle/disable [find where comment="SB-GATEWAY diversion-gate"]
-/ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
 :log warning "SB-GATEWAY: install complete in fail-open state; install the watchdog, then finish the first-launch wizard"

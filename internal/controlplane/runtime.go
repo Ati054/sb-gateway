@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -265,7 +266,7 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 			log.Printf("runtime Xray prevalidation marker: %v", err)
 		}
 	}
-	if containsRuntimeArtifact(receipt.Changed(), "xray.json") && beforeXrayRestart != nil {
+	if slices.Contains(programs, "xray") && beforeXrayRestart != nil {
 		if err := beforeXrayRestart(ctx); err != nil {
 			return receipt, fmt.Errorf("prepare planned Xray restart on RouterOS: %w", err)
 		}

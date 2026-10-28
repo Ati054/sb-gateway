@@ -959,7 +959,9 @@ export function GatewayConsole({
                 throw error;
               }
             } finally {
-              await refreshAll();
+              // Apply already confirms the committed revision and readiness.
+              // Slow history/telemetry reads must not prolong its busy state.
+              void refreshAll();
             }
           }}
         />

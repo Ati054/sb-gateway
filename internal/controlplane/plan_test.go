@@ -105,6 +105,49 @@ func TestPlanChangesRedactSensitiveValues(t *testing.T) {
 	}
 }
 
+func TestPlanDistinguishesContainerSettingsInsideNetworkSections(t *testing.T) {
+	for _, name := range []string{"vpn-resolver", "remote-ipv6", "ping", "watchdog"} {
+		t.Run(name, func(t *testing.T) {
+			server := newTestServer(t)
+			active := routerOSReadyConfig(t)
+			revision, err := server.repository.stageGeneration(active)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := runtimeconfig.RenderRouterOSTrafficCandidate(active, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := server.repository.commitActive(commitMetadata{Revision: revision, RouterOSSource: source, Actor: "test"}); err != nil {
+				t.Fatal(err)
+			}
+			desired := cloneJSONObject(active)
+			switch name {
+			case "vpn-resolver":
+				objectAt(desired, "dns")["vpn_resolver"] = map[string]any{"provider": "quad9", "protocol": "doh"}
+			case "remote-ipv6":
+				objectAt(objectAt(desired, "system"), "networking")["remote_ipv6_mode"] = "disabled"
+			case "ping":
+				objectAt(objectAt(desired, "system"), "networking")["allow_wan_ping"] = false
+			case "watchdog":
+				objectAt(desired, "watchdog")["interval_seconds"] = 6
+			}
+			plan, err := server.buildPlan(desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := name == "watchdog" || name == "ping"
+			mode := "runtime_fast"
+			if want {
+				mode = "routeros_safe_mode"
+			}
+			if plan["valid"] != true || plan["routeros_changed"] != want || plan["apply_mode"] != mode || plan["requires_backup"] != want {
+				t.Fatalf("incorrect plan for %s: %#v", name, plan)
+			}
+		})
+	}
+}
+
 func TestFlattenPlanChangesUsesStableEntityPaths(t *testing.T) {
 	before := map[string]any{"nodes": []any{
 		map[string]any{"id": "b", "name": "old"},

@@ -381,6 +381,22 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			server.finishFailedApplyRecovery(failure)
 			return nil, http.StatusConflict, failure
 		}
+		if server.waitApplyTraffic != nil && runtimeReady && stateCommitted && !runtimeCommitPending {
+			// The guarded RouterOS transaction has finished. Allow its verified
+			// committed runtime to renew the lease and recover without outage
+			// hysteresis, then prove the owned gate before reporting success.
+			server.plannedRuntimeApply.Store(true)
+			gateContext, cancelGate := context.WithTimeout(ctx, 100*time.Second)
+			gateErr := server.waitApplyTraffic(gateContext, config)
+			cancelGate()
+			if gateErr != nil {
+				// The active commit is authoritative; do not roll back just Xray
+				// or claim that the committed RouterOS transaction was undone.
+				failure := &applyFailureError{state: applyRecoveryPending, err: gateErr}
+				server.finishFailedApplyRecovery(failure)
+				return nil, http.StatusConflict, failure
+			}
+		}
 	} else {
 		if err := activate(ctx); err != nil {
 			failure := classifyApplyFailure(err, rollbackRuntime())
@@ -409,6 +425,15 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	result["routeros_guard_mode"] = guardMode
 	result["check"] = check.payload()
 	return result, http.StatusOK, nil
+}
+
+func (server *Server) waitRouterOSApplyTraffic(ctx context.Context, config map[string]any) error {
+	client, _, err := server.newRouterOSRESTClient(config)
+	if err != nil {
+		return err
+	}
+	defer client.CloseIdleConnections()
+	return client.WaitManagedDiversion(ctx)
 }
 
 func firstApplyRollbackConfig(config map[string]any) map[string]any {

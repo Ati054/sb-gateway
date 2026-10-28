@@ -248,19 +248,25 @@ func TestNativeRuntimePublishesPrevalidatedMarkerBeforeXrayRestart(t *testing.T)
 }
 
 func TestNativeRuntimeArmsPlannedRecoveryUnderApplyGuard(t *testing.T) {
+	for _, name := range []string{"xray.json", "client-telemetry.nft", "transparent-exclusions.txt"} {
+		t.Run(name, func(t *testing.T) { testNativeRuntimePlannedRecovery(t, name) })
+	}
+}
+
+func testNativeRuntimePlannedRecovery(t *testing.T, name string) {
 	root := t.TempDir()
-	live := filepath.Join(root, "live", "xray.json")
+	live := filepath.Join(root, "live", name)
 	if err := os.MkdirAll(filepath.Dir(live), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(live, []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{"xray.json": live})
+	store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{name: live})
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := store.Prepare(strings.Repeat("d", 64), map[string][]byte{"xray.json": []byte("new\n")})
+	candidate, err := store.Prepare(strings.Repeat("d", 64), map[string][]byte{name: []byte("new\n")})
 	if err != nil {
 		t.Fatal(err)
 	}

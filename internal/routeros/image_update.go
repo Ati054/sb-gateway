@@ -425,7 +425,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`:do { /container/set $candidate restart-policy=always restart-interval=10s } on-error={ /container/set $candidate auto-restart-interval=10s }`,
 		`:local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]`,
 		`:if ([:len $gate] = 1) do={ /ip/firewall/mangle/disable $gate }`,
-		`/ip/firewall/connection/remove [find where connection-mark="sb-managed"]`,
+		routerosassets.ManagedConnectionCleanupSource(),
 		`:if ([/container/get $current stopped] != true) do={ /container/stop $current }`,
 		`:local currentStopped false`,
 		`:local currentStopTry 0`,

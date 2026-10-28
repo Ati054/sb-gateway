@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	routerosassets "github.com/sb-gateway/sb-gateway/routeros"
 )
 
 const (
@@ -109,7 +111,7 @@ func renderFullUninstallWorker(root string) string {
 		`:if ([:len $storageEntry] != 1) do={ :error "SB-GATEWAY exact project storage directory is missing or ambiguous" }`,
 		`:local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]`,
 		`:if ([:len $gate] = 1) do={ /ip/firewall/mangle/disable $gate }`,
-		`/ip/firewall/connection/remove [find where connection-mark="sb-managed"]`,
+		routerosassets.ManagedConnectionCleanupSource(),
 		`:foreach state in=[/system/script/find where comment~"^SB-GATEWAY WG egress peer state "] do={`,
 		`  :local stateData [/system/script/get $state source]`,
 		`  :local separator [:find $stateData "|"]`,

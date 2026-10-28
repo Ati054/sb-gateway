@@ -107,6 +107,7 @@ type Server struct {
 	checkPersistentMounts     func() (bool, []string)
 	runtime                   runtimeApplier
 	applyRouterOS             routerOSApplyFunc
+	waitApplyTraffic          func(context.Context, map[string]any) error
 	fetchCDNFeed              cdnfeed.Fetcher
 	syncCDNFeed               cdnSourceSync
 
@@ -168,6 +169,7 @@ func NewServer(opts Options) (*Server, error) {
 			return nil, fmt.Errorf("initialize native runtime: %w", runtimeErr)
 		}
 		server.runtime = runtime
+		server.waitApplyTraffic = server.waitRouterOSApplyTraffic
 	}
 	server.applyRouterOS = server.runRouterOSApply
 	server.syncSubscriptionEndpoints = server.runSubscriptionEndpointSync
