@@ -210,6 +210,10 @@ func hotPolicyChange(changed []string) bool {
 	return len(changed) == 1 && changed[0] == "urltest-pool.json"
 }
 
+func hotPolicyWithoutCoreRestart(changed []string) bool {
+	return containsRuntimeArtifact(changed, "urltest-pool.json") && !slices.Contains(affectedPrograms(changed), "xray")
+}
+
 func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, beforeXrayRestart, beforeHotPolicy func(context.Context) error, beforePublication func([]string)) (runtimeconfig.ActivationReceipt, error) {
 	var policyScope hotRuntimeScope
 	releaseGuard := func() {}
@@ -221,17 +225,21 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 		if beforePublication != nil {
 			beforePublication(changed)
 		}
-		// This proof is made under the store's publication lock. Only policy
-		// eligibility changed: Xray, listeners, DNS and routing stay untouched.
-		if hotPolicyChange(changed) {
+		// A companion Nginx/DNS/monitor edit does not prove the new selectors.
+		// Capture the forwarding scope before replacing any live artifact.
+		if hotPolicyWithoutCoreRestart(changed) {
 			var scopeErr error
 			policyScope, scopeErr = hotPolicyScope(runtime.options.XrayHealthPool, candidate.Files["urltest-pool.json"])
 			if scopeErr != nil {
 				return scopeErr
 			}
 			if beforeHotPolicy != nil {
-				return beforeHotPolicy(ctx)
+				if err := beforeHotPolicy(ctx); err != nil {
+					return err
+				}
 			}
+		}
+		if hotPolicyChange(changed) {
 			return nil
 		}
 		if len(runtime.restartOrder(changed)) > 0 {
@@ -249,35 +257,37 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 	if err != nil {
 		return runtimeconfig.ActivationReceipt{}, err
 	}
-	if hotPolicyChange(receipt.Changed()) {
+	programs := runtime.restartOrder(receipt.Changed())
+	if len(programs) > 0 {
+		if containsRuntimeArtifact(receipt.Changed(), "xray.json") {
+			if err := runtime.markXrayPrevalidated(candidate.Files["xray.json"]); err != nil {
+				log.Printf("runtime Xray prevalidation marker: %v", err)
+			}
+		}
+		if slices.Contains(programs, "xray") && beforeXrayRestart != nil {
+			if err := beforeXrayRestart(ctx); err != nil {
+				return receipt, fmt.Errorf("prepare planned Xray restart on RouterOS: %w", err)
+			}
+		}
+		if err := runtime.controller.Restart(ctx, programs); err != nil {
+			return receipt, fmt.Errorf("restart runtime: %w", err)
+		}
+		probeContext, cancelProbe := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
+		defer cancelProbe()
+		if err := runtime.controller.Probe(probeContext, programs); err != nil {
+			return receipt, fmt.Errorf("probe runtime: %w", err)
+		}
+	}
+	if hotPolicyWithoutCoreRestart(receipt.Changed()) {
+		// Companion programs are now ready. Let the agent consume the published
+		// pool; holding its planned-restart guard while waiting would deadlock.
+		releaseGuard()
+		releaseGuard = func() {}
 		readyContext, cancelReady := context.WithTimeout(ctx, hotPolicyActivationTimeout)
 		defer cancelReady()
 		if err := runtime.waitHotRuntime(readyContext, runtime.options.XrayHealthPool, policyScope); err != nil {
 			return receipt, fmt.Errorf("activate policy selector generation without restart: %w", err)
 		}
-		return receipt, nil
-	}
-	programs := runtime.restartOrder(receipt.Changed())
-	if len(programs) == 0 {
-		return receipt, nil
-	}
-	if containsRuntimeArtifact(receipt.Changed(), "xray.json") {
-		if err := runtime.markXrayPrevalidated(candidate.Files["xray.json"]); err != nil {
-			log.Printf("runtime Xray prevalidation marker: %v", err)
-		}
-	}
-	if slices.Contains(programs, "xray") && beforeXrayRestart != nil {
-		if err := beforeXrayRestart(ctx); err != nil {
-			return receipt, fmt.Errorf("prepare planned Xray restart on RouterOS: %w", err)
-		}
-	}
-	if err := runtime.controller.Restart(ctx, programs); err != nil {
-		return receipt, fmt.Errorf("restart runtime: %w", err)
-	}
-	probeContext, cancelProbe := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
-	defer cancelProbe()
-	if err := runtime.controller.Probe(probeContext, programs); err != nil {
-		return receipt, fmt.Errorf("probe runtime: %w", err)
 	}
 	return receipt, nil
 }
@@ -591,14 +601,17 @@ func hashFileGeneration(path string) (string, int64, error) {
 func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfig.ActivationReceipt) error {
 	var policyScope hotRuntimeScope
 	var err error
-	if !hotPolicyChange(receipt.Changed()) && len(runtime.restartOrder(receipt.Changed())) > 0 {
-		releaseGuard, guardErr := runtime.beginApplyGuard()
+	releaseGuard := func() {}
+	defer func() { releaseGuard() }()
+	if len(runtime.restartOrder(receipt.Changed())) > 0 {
+		var guardErr error
+		releaseGuard, guardErr = runtime.beginApplyGuard()
 		if guardErr != nil {
+			releaseGuard = func() {}
 			return fmt.Errorf("create watchdog rollback guard: %w", guardErr)
 		}
-		defer releaseGuard()
 	}
-	if hotPolicyChange(receipt.Changed()) {
+	if hotPolicyWithoutCoreRestart(receipt.Changed()) {
 		policyScope, err = runtime.restoreHotPolicyScope(receipt)
 	} else {
 		err = runtime.store.Rollback(receipt)
@@ -606,24 +619,28 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 	if err != nil {
 		return err
 	}
-	if hotPolicyChange(receipt.Changed()) {
-		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
-	}
 	programs := runtime.restartOrder(receipt.Changed())
-	if len(programs) == 0 {
-		return nil
-	}
-	if containsRuntimeArtifact(receipt.Changed(), "xray.json") {
-		if err := runtime.markXrayPrevalidated(runtime.options.XrayConfig); err != nil {
-			log.Printf("runtime rollback Xray prevalidation marker: %v", err)
+	if len(programs) > 0 {
+		if containsRuntimeArtifact(receipt.Changed(), "xray.json") {
+			if err := runtime.markXrayPrevalidated(runtime.options.XrayConfig); err != nil {
+				log.Printf("runtime rollback Xray prevalidation marker: %v", err)
+			}
+		}
+		if err := runtime.controller.Restart(ctx, programs); err != nil {
+			return err
+		}
+		probeContext, cancelProbe := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
+		defer cancelProbe()
+		if err := runtime.controller.Probe(probeContext, programs); err != nil {
+			return err
 		}
 	}
-	if err := runtime.controller.Restart(ctx, programs); err != nil {
-		return err
+	if hotPolicyWithoutCoreRestart(receipt.Changed()) {
+		releaseGuard()
+		releaseGuard = func() {}
+		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
 	}
-	probeContext, cancelProbe := context.WithTimeout(ctx, runtimeReadinessTimeout(programs))
-	defer cancelProbe()
-	return runtime.controller.Probe(probeContext, programs)
+	return nil
 }
 
 func (runtime *nativeRuntime) beginApplyGuard() (func(), error) {
