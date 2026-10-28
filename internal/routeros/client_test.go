@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	routerosassets "github.com/sb-gateway/sb-gateway/routeros"
 )
 
 func TestExecuteDirectDeltaReusesOneAuthenticatedHTTPClient(t *testing.T) {
@@ -213,6 +215,7 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 	var requests []string
 	var patchedSource string
 	var patchedWatchdog string
+	var patchedFailOpen string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests = append(requests, request.Method+" "+request.URL.RequestURI())
 		response.Header().Set("Content-Type", "application/json")
@@ -241,6 +244,16 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 			_, _ = response.Write([]byte(`{}`))
 		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script/*12":
 			_ = json.NewEncoder(response).Encode(map[string]any{"source": patchedWatchdog})
+		case request.Method == http.MethodPatch && request.URL.Path == "/rest/system/script/*11":
+			var payload map[string]any
+			if json.NewDecoder(request.Body).Decode(&payload) != nil || len(payload) != 1 {
+				t.Error("startup fail-open update must change only source")
+				return
+			}
+			patchedFailOpen = text(payload["source"])
+			_, _ = response.Write([]byte(`{}`))
+		case request.Method == http.MethodGet && request.URL.Path == "/rest/system/script/*11":
+			_ = json.NewEncoder(response).Encode(map[string]any{"source": patchedFailOpen})
 		case request.Method == http.MethodPost && request.URL.Path == "/rest/system/script/run":
 			_, _ = response.Write([]byte(`[]`))
 		default:
@@ -265,11 +278,16 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 	if !strings.Contains(patchedWatchdog, "runtime_started_at") || !strings.Contains(patchedWatchdog, "SB_HEALTH_COOLDOWN_TICKS") {
 		t.Fatal("restart-aware admission or ordinary outage cooldown was not installed")
 	}
+	if !strings.Contains(patchedFailOpen, routerosassets.ManagedConnectionCleanupSource()) {
+		t.Fatal("safe conntrack cleanup was not installed before running the startup helper")
+	}
 	want := []string{
 		"GET /rest/system/script?.proplist=.id,name,comment,source",
 		"PATCH /rest/system/script/*10",
 		"PATCH /rest/system/script/*12",
 		"GET /rest/system/script/*12?.proplist=source",
+		"PATCH /rest/system/script/*11",
+		"GET /rest/system/script/*11?.proplist=source",
 		"POST /rest/system/script/run",
 		"POST /rest/system/script/run",
 	}

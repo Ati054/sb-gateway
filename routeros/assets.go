@@ -9,6 +9,12 @@ import (
 //go:embed watchdog.rsc cloudflare-update.rsc container-startup.rsc
 var scripts embed.FS
 
+// ManagedConnectionCleanupSource tolerates conntrack records that expire after
+// find returns, and never invokes remove with an empty item list.
+func ManagedConnectionCleanupSource() string {
+	return `:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }`
+}
+
 // ContainerStartupInstallSource installs the same storage gate as fresh installs.
 func ContainerStartupInstallSource() string {
 	source, err := scripts.ReadFile("container-startup.rsc")

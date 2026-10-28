@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCandidateStorePublishesRollsBackAndKeepsOneCandidate(t *testing.T) {
@@ -196,5 +197,113 @@ func assertFileBody(t *testing.T, path, want string) {
 	}
 	if got := string(body); got != want {
 		t.Fatalf("%s = %q, want %q", path, got, want)
+	}
+}
+
+func TestCandidatePrepareReusesVerifiedFilesAndPreservesRollback(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "live.json")
+	store, err := NewCandidateStore(filepath.Join(root, "state"), map[string]string{"xray.json": live})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(live, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	revision := strings.Repeat("c", 64)
+	artifacts := map[string][]byte{"xray.json": []byte("new")}
+	first, err := store.Prepare(revision, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Activate(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Unix(946684800, 0)
+	if err := os.Chtimes(first.Files["xray.json"], stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(first.Files["xray.json"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Prepare(revision, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(second.Files["xray.json"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("identical verified candidate was rewritten")
+	}
+	if err := store.Rollback(receipt); err != nil {
+		t.Fatal(err)
+	}
+	assertFileBody(t, live, "old")
+}
+
+func TestCandidatePrepareRepairsCorruptionAndRejectsStaleContents(t *testing.T) {
+	for _, kind := range []string{"artifact", "manifest", "rendered"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := NewCandidateStore(filepath.Join(root, "state"), map[string]string{"xray.json": filepath.Join(root, "live.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision := strings.Repeat("d", 64)
+			artifacts := map[string][]byte{"xray.json": []byte("expected")}
+			candidate, err := store.Prepare(revision, artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "artifact":
+				if err := os.WriteFile(candidate.Files["xray.json"], []byte("corrupt"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "manifest":
+				if err := os.WriteFile(filepath.Join(candidate.Directory, "manifest.json"), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "rendered":
+				artifacts["xray.json"] = []byte("changed")
+			}
+			fixed, err := store.Prepare(revision, artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertFileBody(t, fixed.Files["xray.json"], string(artifacts["xray.json"]))
+			if _, err := store.Load(revision); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func BenchmarkCandidatePrepareUnchanged(b *testing.B) {
+	root := b.TempDir()
+	artifacts := make(map[string][]byte)
+	destinations := make(map[string]string)
+	for _, name := range []string{"xray.json", "urltest-pool.json", "policy-dns.json", "nginx.conf", "watchdog.env", "client-telemetry.nft", "transparent-exclusions.txt"} {
+		artifacts[name] = make([]byte, 64<<10)
+		destinations[name] = filepath.Join(root, "live", name)
+	}
+	store, err := NewCandidateStore(filepath.Join(root, "state"), destinations)
+	if err != nil {
+		b.Fatal(err)
+	}
+	revision := strings.Repeat("b", 64)
+	if _, err := store.Prepare(revision, artifacts); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := store.Prepare(revision, artifacts); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

@@ -69,6 +69,109 @@ func TestCDNFeedLastKnownGoodAndRestart(t *testing.T) {
 	if syncs != 3 {
 		t.Fatal("first failed feed mutated allowlist")
 	}
+	if fetches != 3 {
+		t.Fatalf("cached Apply retried an unavailable provider: fetches=%d", fetches)
+	}
+}
+
+func TestCDNFeedExpiredCacheDoesNotFetchDuringApply(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.repository.saveAuxiliary("cdn-feeds", map[string]any{"gcore": map[string]any{
+		"cidrs": []string{"8.8.8.0/24"}, "last_success_at": time.Now().Add(-2 * cdnfeed.Interval).Format(time.RFC3339Nano),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	server.fetchCDNFeed = func(context.Context, string) ([]string, error) {
+		t.Fatal("Apply waited for network despite a validated cached allowlist")
+		return nil, nil
+	}
+	syncs := 0
+	server.syncCDNFeed = func(_ context.Context, _ map[string]any, _ string, values []string) error {
+		syncs++
+		if !reflect.DeepEqual(values, []string{"8.8.8.0/24"}) {
+			t.Fatal(values)
+		}
+		return nil
+	}
+	if err := server.refreshCDNFeed(context.Background(), nil, "gcore", true); err != nil || syncs != 1 {
+		t.Fatalf("cached Apply syncs=%d err=%v", syncs, err)
+	}
+}
+
+func TestCDNBackgroundFetchReleasesConfigurationLockAndDiscardsObsoleteResult(t *testing.T) {
+	for _, replacement := range []string{"none", "new-revision", "apply-lock"} {
+		t.Run(replacement, func(t *testing.T) {
+			server := newTestServer(t)
+			config := map[string]any{"transports": []any{map[string]any{"id": "cdn", "kind": "ws", "cdn_deployments": []any{
+				map[string]any{"id": "g", "cdn_provider": "gcore", "origin_protection_mode": "auto-cidr", "origin_port": 8444},
+			}}}}
+			revision, err := server.repository.stageGeneration(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := server.repository.setActiveRevision(revision); err != nil {
+				t.Fatal(err)
+			}
+			started, release := make(chan struct{}), make(chan struct{})
+			server.fetchCDNFeed = func(context.Context, string) ([]string, error) {
+				close(started)
+				<-release
+				return []string{"8.8.8.0/24"}, nil
+			}
+			syncs := 0
+			server.syncCDNFeed = func(context.Context, map[string]any, string, []string) error { syncs++; return nil }
+			done := make(chan error, 1)
+			go func() { done <- server.refreshOneCDNFeed(context.Background()) }()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("fetch not started")
+			}
+			if !server.configMu.TryLock() {
+				close(release)
+				<-done
+				t.Fatal("provider fetch blocks Apply's configuration lock")
+			}
+			if replacement == "new-revision" {
+				next, err := server.repository.stageGeneration(map[string]any{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := server.repository.setActiveRevision(next); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if replacement != "apply-lock" {
+				server.configMu.Unlock()
+			}
+			close(release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("background fetch blocked behind Apply")
+			}
+			if replacement == "apply-lock" {
+				server.configMu.Unlock()
+			}
+			want := 0
+			if replacement == "none" {
+				want = 1
+			}
+			if syncs != want {
+				t.Fatalf("obsolete or blocked sync: got=%d want=%d", syncs, want)
+			}
+			state, err := server.repository.auxiliary("cdn-feeds")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replacement != "none" && len(state) != 0 {
+				t.Fatal("obsolete fetch changed feed state")
+			}
+		})
+	}
 }
 
 func TestCDNFeedRejectsBadResponseAndSyncFailureWithoutReplacingCache(t *testing.T) {

@@ -26,6 +26,9 @@ export async function verifyConsoleWorkflows(browser, baseURL, { screenshotDirec
     config.reverse_vless_exits = [{id: "test-reverse", display_name: "Test reverse", enabled: true, transport_ids: ["xhttp-reality"], transport_id: "xhttp-reality"}];
     let draft = structuredClone(config), active = structuredClone(config), revision = 1, activeRevision = 1;
     let failNextSave = false, delayNextSave = 0, failNextApply = false;
+    let holdStatus = false;
+    const heldStatus = [];
+    const releaseStatus = () => {holdStatus = false; heldStatus.splice(0).forEach(resolve => resolve());};
     const writes = [], applies = [], unexpected = [], errors = [];
     const context = await browser.newContext({viewport: {width: 1440, height: 1000}});
     await context.route("**/*", async route => {
@@ -46,7 +49,10 @@ export async function verifyConsoleWorkflows(browser, baseURL, { screenshotDirec
       if (pathname === "/auth/session") response = {authenticated: true, username: "Test administrator", csrf_token: "test-token"};
       else if (pathname === "/bootstrap-state") response = {overview: overview(), draft: envelope(), status: {state: "healthy"}};
       else if (pathname === "/overview") response = overview();
-      else if (pathname === "/status") response = {state: "healthy", active_revision: String(activeRevision), selector_health: {}, subscriptions: {}, acme: {}};
+      else if (pathname === "/status") {
+        if (holdStatus) await new Promise(resolve => heldStatus.push(resolve));
+        response = {state: "healthy", active_revision: String(activeRevision), selector_health: {}, subscriptions: {}, acme: {}};
+      }
       else if (pathname === "/client-telemetry") response = {sampled_at: "test", clients: []};
       else if (pathname === "/routeros/discover") response = {routeros: {
         live_available: true, wireguard_egress_inventory_complete: true, wireguard_egress_candidates: [],
@@ -171,7 +177,11 @@ export async function verifyConsoleWorkflows(browser, baseURL, { screenshotDirec
       await apply.getByText("Test Apply rejected", {exact: false}).waitFor();
       assert.equal(applies.length, 0);
       assert.notDeepEqual(active, draft);
+      holdStatus = true;
       await apply.locator(".modal-actions .button-primary").click();
+      await apply.locator(".modal-success").waitFor({state: "visible", timeout: 2500});
+      assert.ok(heldStatus.length > 0, "slow post-Apply status read was not exercised");
+      releaseStatus();
       await apply.locator(".modal-success .button-primary").click();
       assert.equal(applies.length, 1);
       assert.deepEqual(active, draft);
@@ -191,8 +201,8 @@ export async function verifyConsoleWorkflows(browser, baseURL, { screenshotDirec
       if (screenshotDirectory) await page.screenshot({path: `${screenshotDirectory}/console-${locale}-mobile.png`, fullPage: true, animations: "disabled"});
       assert.deepEqual(errors, []);
       assert.deepEqual(unexpected, []);
-      receipts.push({locale, writes: writes.length, applies: applies.length, devices: 3, remote_formats: 6, settings_default_saved: true, saved_after_navigation: true, failure_preserves_input: true, rejected_apply_not_reported_as_success: true});
-    } finally {await context.close();}
+      receipts.push({locale, writes: writes.length, applies: applies.length, devices: 3, remote_formats: 6, settings_default_saved: true, saved_after_navigation: true, failure_preserves_input: true, rejected_apply_not_reported_as_success: true, slow_status_does_not_delay_apply: true});
+    } finally {releaseStatus(); await context.close();}
   }
   return receipts;
 }

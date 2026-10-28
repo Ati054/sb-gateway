@@ -90,7 +90,7 @@ func (server *Server) buildPlan(config map[string]any) (map[string]any, error) {
 		idempotent = false
 	}
 	routerOSChanged := !idempotent && planTouchesRouterOS(changes)
-	if check.Valid && activeRevision != "" && !routerOSChanged {
+	if check.Valid && activeRevision != "" {
 		currentNodes, nodeErr := server.routerOSPlanNodes(config)
 		if nodeErr != nil {
 			return nil, nodeErr

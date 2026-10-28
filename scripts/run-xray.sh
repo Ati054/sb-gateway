@@ -53,7 +53,7 @@ if [ "$startup_timeout_seconds" -gt 180 ]; then
   exit 78
 fi
 if [ "$skip_validation" -ne 1 ]; then
-  xray run -test -config "$config"
+  /bin/sh /opt/sb-gateway/scripts/validate-xray.sh "$config"
 fi
 validated_digest="$(sha256sum "$config" | awk '{print $1}')"
 

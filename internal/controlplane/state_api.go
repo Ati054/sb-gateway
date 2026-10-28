@@ -171,6 +171,7 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 		"outage_policy_active":       outagePolicy(active),
 		"persistent_mounts_writable": mountsWritable,
 		"apply_recovery_pending":     applyRecoveryPending,
+		"planned_runtime_ready":      ready && plannedRuntimeActivationReady(applyOperation, server.plannedRuntimeApply.Load()),
 	}
 	if len(blockedMounts) != 0 {
 		payload["blocked_persistent_mounts"] = blockedMounts
@@ -181,15 +182,16 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 	return ready, payload
 }
 
-// A runtime-only Apply has already restarted and probed Xray before it reaches
-// this journal phase. Its RouterOS source is unchanged, so the watchdog may
-// publish a fresh lease while Apply waits for the existing diversion gate.
-// Other pending journal phases remain fail-open, especially after a crash.
+// Runtime-only activation may recover an unchanged RouterOS source. Changed
+// rules require a completed RouterOS transaction and a published active commit.
+// Only the live Apply sets this flag; a recovered journal never grants admission.
 func plannedRuntimeActivationReady(operation map[string]any, liveApply bool) bool {
-	return liveApply && operation["pending"] == true &&
-		operation["state"] == "runtime_activated" &&
-		operation["previous_routeros_source"] == operation["target_routeros_source"] &&
-		operation["previous_routeros_source"] != ""
+	if !liveApply || operation["pending"] != true || text(operation["target_routeros_source"]) == "" {
+		return false
+	}
+	return operation["state"] == "active_committed" ||
+		(operation["state"] == "runtime_activated" &&
+			operation["previous_routeros_source"] == operation["target_routeros_source"])
 }
 
 func (server *Server) liveApplyReadinessAllowed(operation map[string]any) bool {
@@ -242,6 +244,7 @@ func (server *Server) trafficReadiness(response http.ResponseWriter, request *ht
 	}
 	required, pending := trafficReadyPolicies(active, selector, server.trafficReadyAfter)
 	ready := baseReady && len(pending) == 0
+	payload["planned_runtime_ready"] = ready && payload["planned_runtime_ready"] == true
 	payload["ready"] = ready
 	payload["traffic_ready"] = ready
 	payload["runtime_started_at"] = server.trafficReadyAfter.UTC().Format(time.RFC3339Nano)

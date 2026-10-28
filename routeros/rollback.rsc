@@ -9,7 +9,7 @@
 
 :local gate [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]
 :if ([:len $gate] = 1) do={ /ip/firewall/mangle/disable $gate }
-/ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
 
 :if ([:len [/system/script/find where name="SB-GATEWAY-fasttrack-state"]] = 1) do={
   :local fasttrack [/ip/firewall/filter/find where action="fasttrack-connection" and disabled=no]

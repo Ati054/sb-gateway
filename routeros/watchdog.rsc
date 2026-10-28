@@ -11,7 +11,7 @@
 # the exact project gate and clear only project-marked connections.
 /system/scheduler/disable [find where name="SB-GATEWAY-health-watchdog"]
 /ip/firewall/mangle/disable [find where comment="SB-GATEWAY diversion-gate"]
-/ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+:foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
 
 :if (([:typeof $"SB_HEALTH_URL"] != "str") || (($"SB_HEALTH_URL" ~ "^http://[0-9.]+:9080/traffic-ready\$") = false)) do={
   :error "SB-GATEWAY: SB_HEALTH_URL must be a container-only IPv4 http://address:9080/traffic-ready URL; diversion remains fail-open"
@@ -45,7 +45,7 @@
   :global sbWatchdogStage "startup"
   :global sbLastHealthStatus "not-checked"
   /ip/firewall/mangle/disable [find where comment="SB-GATEWAY diversion-gate"]
-  /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+  :foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
   :log warning "SB-GATEWAY: startup safety forced managed clients to main/WAN; health hysteresis must pass before diversion"
 } comment="SB-GATEWAY startup fail-open"
 
@@ -75,7 +75,7 @@
   :local exactGates [/ip/firewall/mangle/find where comment="SB-GATEWAY diversion-gate"]
   :if ($configLoaded = false) do={
     /ip/firewall/mangle/disable $exactGates
-    /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+    :foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
     :set sbFailOpen true
     :set sbWatchdogStage "config-error"
     :set sbLastHealthStatus "not-checked"
@@ -93,7 +93,7 @@
 
   :if ([:len $exactGates] != 1) do={
     /ip/firewall/mangle/disable $exactGates
-    /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+    :foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
     :set sbFailOpen true
     :set sbWatchdogStage "gate-error"
     :set sbLastHealthStatus "not-checked"
@@ -160,7 +160,7 @@
               }
             }
           }
-          :if ($managed = true) do={ /ip/firewall/connection/remove $flow }
+          :if ($managed = true) do={ :do { /ip/firewall/connection/remove $flow } on-error={} }
         }
       }
       }
@@ -169,10 +169,11 @@
   }
   :if ($stateMissing = true) do={
     /ip/firewall/mangle/disable $gate
-    /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+    :foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
   }
 
   :local healthy false
+  :local plannedRuntimeReady false
   :local readyGeneration ""
   :set sbWatchdogStage "fetching"
   :set sbLastHealthStatus "checking"
@@ -183,6 +184,7 @@
       :local readiness [:deserialize from=json value=($response->"data")]
       :if (($readiness->"traffic_ready") = true) do={
         :set healthy true
+        :set plannedRuntimeReady (($readiness->"planned_runtime_ready") = true)
         :local generation ($readiness->"runtime_started_at")
         :if (([:typeof $generation] = "str") && ([:len $generation] > 0) && ([:len $generation] <= 64)) do={ :set readyGeneration $generation }
       }
@@ -210,8 +212,10 @@
     # readiness response reconciles that drift even if our globals say healthy.
     # /traffic-ready already proves a current-process selector readback. On a
     # boot/update start, admit it on the first successful poll. Later recovery
-    # from a live outage keeps the configured hysteresis.
-    :if (($gateDisabled = true) && (($sbStartupSafety = true) || ($sbFailOpen = false) || (($sbHealthSuccesses >= $"SB_HEALTH_RECOVERY_THRESHOLD") && ($sbRecoveryTicks >= $"SB_HEALTH_COOLDOWN_TICKS")))) do={
+    # from a live outage keeps the configured hysteresis. A verified planned
+    # core-only restart is also admitted immediately: the controller process
+    # and its startup identity do not change during that Apply.
+    :if (($gateDisabled = true) && (($sbStartupSafety = true) || ($plannedRuntimeReady = true) || ($sbFailOpen = false) || (($sbHealthSuccesses >= $"SB_HEALTH_RECOVERY_THRESHOLD") && ($sbRecoveryTicks >= $"SB_HEALTH_COOLDOWN_TICKS")))) do={
       /ip/firewall/mangle/enable $gate
       :set sbFailOpen false
       :set sbStartupSafety false
@@ -229,7 +233,7 @@
       :local gateWasEnabled ([/ip/firewall/mangle/get $gate disabled] = false)
       :if (($gateWasEnabled = true) || ($sbFailOpen = false)) do={
         /ip/firewall/mangle/disable $gate
-        /ip/firewall/connection/remove [find where connection-mark="sb-managed"]
+        :foreach sbFlow in=[/ip/firewall/connection/find where connection-mark="sb-managed"] do={ :do { /ip/firewall/connection/remove $sbFlow } on-error={} }
         :log warning "SB-GATEWAY: container unhealthy; only SB_MANAGED_CLIENTS failed open to normal WAN"
       }
       :set sbFailOpen true

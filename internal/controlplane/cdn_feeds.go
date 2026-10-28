@@ -41,25 +41,48 @@ func (server *Server) runCDNFeedScheduler(ctx context.Context) {
 }
 
 func (server *Server) refreshOneCDNFeed(ctx context.Context) error {
+	config, revision, due, err := server.nextCDNFeed()
+	if err != nil || due == "" {
+		return err
+	}
+	// A slow provider must not hold the configuration lock needed by Apply,
+	// draft saves and other control-plane operations. Revalidate the committed
+	// generation before making any change after the network request completes.
+	values, fetchErr := server.fetchCDNFeedValues(ctx, due)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if !server.configMu.TryLock() {
 		return nil
 	}
 	defer server.configMu.Unlock()
+	current, err := server.repository.activeRevision()
+	if err != nil || current != revision {
+		return err
+	}
+	return server.commitCDNFeed(ctx, config, due, values, true, fetchErr, false)
+}
+
+func (server *Server) nextCDNFeed() (map[string]any, string, string, error) {
+	if !server.configMu.TryLock() {
+		return nil, "", "", nil
+	}
+	defer server.configMu.Unlock()
 	revision, err := server.repository.activeRevision()
 	if err != nil || revision == "" {
-		return err
+		return nil, "", "", err
 	}
 	config, err := server.repository.loadGeneration(revision)
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
 	providers, err := runtimeconfig.RequiredCDNFeeds(config)
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
 	state, err := server.repository.auxiliary("cdn-feeds")
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
 	due := ""
 	var oldest time.Time
@@ -79,15 +102,13 @@ func (server *Server) refreshOneCDNFeed(ctx context.Context) error {
 			due, oldest = provider, last
 		}
 	}
-	if due != "" {
-		return server.refreshCDNFeed(ctx, config, due, false)
-	}
-	return nil
+	return config, revision, due, nil
 }
 
 // Called inside the Apply health phase, before the new runtime is accepted.
-// The first activation requires a validated feed; subsequent failures can use
-// the persisted validated last-known-good snapshot, never an unrestricted rule.
+// The first activation requires a validated feed. Subsequent Apply operations
+// use the persisted validated snapshot; only the background scheduler refreshes
+// it. Provider availability must not delay an unrelated configuration change.
 func (server *Server) ensureCDNFeeds(ctx context.Context, config map[string]any) error {
 	providers, err := runtimeconfig.RequiredCDNFeeds(config)
 	if err != nil {
@@ -111,24 +132,41 @@ func (server *Server) refreshCDNFeed(ctx context.Context, config map[string]any,
 		record = map[string]any{}
 	}
 	cached, cacheErr := cdnfeed.Validate(cdnCachedValues(record["cidrs"]))
-	last, _ := time.Parse(time.RFC3339Nano, subscriptionText(record["last_success_at"]))
 	values := cached
 	var fetchErr error
-	fetched := false
-	refresh := cacheErr != nil || !apply || last.IsZero() || !server.now().Before(last.Add(cdnfeed.Interval))
+	refresh := cacheErr != nil || !apply
 	if refresh {
-		fetchContext, cancelFetch := context.WithTimeout(ctx, cdnFeedFetchTimeout)
-		values, fetchErr = server.fetchCDNFeed(fetchContext, provider)
-		cancelFetch()
-		if fetchErr == nil {
-			values, fetchErr = cdnfeed.Validate(values)
-		}
-		fetched = fetchErr == nil
+		values, fetchErr = server.fetchCDNFeedValues(ctx, provider)
 		if fetchErr != nil {
 			values = cached
 		}
 	}
-	if refresh {
+	return server.commitCDNFeed(ctx, config, provider, values, refresh, fetchErr, apply)
+}
+
+func (server *Server) fetchCDNFeedValues(ctx context.Context, provider string) ([]string, error) {
+	fetchContext, cancelFetch := context.WithTimeout(ctx, cdnFeedFetchTimeout)
+	defer cancelFetch()
+	values, err := server.fetchCDNFeed(fetchContext, provider)
+	if err != nil {
+		return nil, err
+	}
+	return cdnfeed.Validate(values)
+}
+
+// The caller owns configMu (or is a single-threaded test). Fetching has already
+// completed; merge into current state so a concurrent Apply cannot be undone.
+func (server *Server) commitCDNFeed(ctx context.Context, config map[string]any, provider string, values []string, attempted bool, fetchErr error, apply bool) error {
+	state, err := server.repository.auxiliary("cdn-feeds")
+	if err != nil {
+		return err
+	}
+	record, _ := state[provider].(map[string]any)
+	if record == nil {
+		record = map[string]any{}
+	}
+	cached, cacheErr := cdnfeed.Validate(cdnCachedValues(record["cidrs"]))
+	if attempted {
 		record["last_attempt_at"] = server.now().UTC().Format(time.RFC3339Nano)
 	}
 	if fetchErr != nil && (!apply || cacheErr != nil) {
@@ -137,6 +175,9 @@ func (server *Server) refreshCDNFeed(ctx context.Context, config map[string]any,
 		_ = server.repository.saveAuxiliary("cdn-feeds", state)
 		server.auditBackground("cdn-feeds.refresh", map[string]any{"provider": provider, "ok": false})
 		return fmt.Errorf("%s official origin feed unavailable; previous addresses retained: %w", provider, fetchErr)
+	}
+	if fetchErr != nil {
+		values = cached
 	}
 	syncContext, cancelSync := context.WithTimeout(ctx, cdnFeedSyncTimeout)
 	defer cancelSync()
@@ -161,12 +202,14 @@ func (server *Server) refreshCDNFeed(ctx context.Context, config map[string]any,
 			return fmt.Errorf("%s Nginx origin allowlist update: %w", provider, err)
 		}
 	}
+	fetched := attempted && fetchErr == nil
 	if fetched {
 		record["cidrs"] = values
 		record["last_success_at"] = server.now().UTC().Format(time.RFC3339Nano)
 	}
 	record["state"] = "ok"
-	if fetchErr != nil {
+	last, _ := time.Parse(time.RFC3339Nano, subscriptionText(record["last_success_at"]))
+	if fetchErr != nil || last.IsZero() || !server.now().Before(last.Add(cdnfeed.Interval)) {
 		record["state"] = "stale"
 		log.Printf("cdn-feeds: %s using last-known-good origin addresses", provider)
 	}
