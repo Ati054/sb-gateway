@@ -833,7 +833,7 @@ func TestEmergencyFailoverClearsPendingComparison(t *testing.T) {
 	}
 }
 
-func TestEmergencyFailoverPrefersFreshlyConfirmedReserveOverFreshCandidate(t *testing.T) {
+func TestEmergencyFailoverRanksCurrentSuccessWithoutRecoveryTier(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	settings := effectivePolicySettings{failureThreshold: 3, recoveryThreshold: 3, backup: 300}
 	for _, mode := range []string{"best", "priority"} {
@@ -852,7 +852,7 @@ func TestEmergencyFailoverPrefersFreshlyConfirmedReserveOverFreshCandidate(t *te
 				map[string]bool{"first-fresh": true, "confirmed-reserve": true},
 				map[string]bool{"first-fresh": true, "confirmed-reserve": true}, item, settings,
 			)
-			if desired != "confirmed-reserve" || reason != "active-unavailable" {
+			if desired != "first-fresh" || reason != "active-unavailable" {
 				t.Fatalf("emergency selection = (%q, %q)", desired, reason)
 			}
 		})

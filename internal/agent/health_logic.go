@@ -235,19 +235,16 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 		return rankCandidates(values, mode, groups, daily, medians)
 	}
 	// Current availability can restore service even without primary quality.
-	// Qualified primary quality still ranks the confirmed-reserve tier below.
+	// Recovery streaks qualify planned returns, not confirmed-outage replacements.
 	fresh := func(candidate string) bool {
 		evidence, ok := measured[candidate]
-		return ok && evidence.OK
+		return ok && evidence.OK && !evidence.LocalFailure
 	}
 	known := func(candidate string, confirmations int) bool {
 		return available[candidate] && item.Recoveries[candidate] >= confirmations && medians[candidate] != nil
 	}
-	confirmedReserve := func(candidate string) bool {
-		lastProbe := item.LastProbeAt[candidate]
-		return candidate != selected && quality[candidate] && known(candidate, p.recoveryThreshold) &&
-			item.AvailabilityFailures[candidate] == 0 && lastProbe > 0 &&
-			float64(now.Unix())-lastProbe <= float64(p.backup)
+	rankEmergency := func(values []string) []string {
+		return rankCandidates(values, mode, groups, nil, emergencyRankingDelays(now, values, measured, item, p))
 	}
 	selectedFailed := selected == "block" || !contains(candidates, selected) || item.AvailabilityFailures[selected] >= p.failureThreshold
 	desired, reason := selected, ""
@@ -258,28 +255,19 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 				values = append(values, candidate)
 			}
 		}
-		values = rank(values)
+		values = rankEmergency(values)
 		if len(values) > 0 {
 			desired, reason = values[0], "fresh-path-available"
 		}
 	} else if selectedFailed {
-		confirmedValues, freshValues := []string{}, []string{}
+		freshValues := []string{}
 		for _, candidate := range candidates {
 			if candidate == selected || !fresh(candidate) {
 				continue
 			}
-			if confirmedReserve(candidate) {
-				confirmedValues = append(confirmedValues, candidate)
-			} else {
-				freshValues = append(freshValues, candidate)
-			}
+			freshValues = append(freshValues, candidate)
 		}
-		// Historical confirmation ranks current successes, but never replaces
-		// a fresh probe during a confirmed outage.
-		alternatives := rank(confirmedValues)
-		if len(alternatives) == 0 {
-			alternatives = rank(freshValues)
-		}
+		alternatives := rankEmergency(freshValues)
 		if len(alternatives) > 0 {
 			desired, reason = alternatives[0], "active-unavailable"
 		} else {

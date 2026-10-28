@@ -452,8 +452,8 @@ func TestMassOutageRequiresCurrentReserveSuccessAndRecoversWithoutCooldown(t *te
 				map[string]probeEvidence{"flapping": successfulEvidence(flappingDelay), "stable": successfulEvidence(stableDelay)},
 				quality, available, item, settings,
 			)
-			if desired != "stable" || reason != "active-unavailable" {
-				t.Fatalf("fresh confirmed reserve not preferred: %q (%s)", desired, reason)
+			if desired != "flapping" || reason != "active-unavailable" {
+				t.Fatalf("recovery tier displaced the better current success: %q (%s)", desired, reason)
 			}
 
 			item.AvailabilityFailures["stable"] = settings.failureThreshold

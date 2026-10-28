@@ -398,6 +398,11 @@ and cancellation covered. Check that `reserve_selection` diagnostics distinguish
 unfinished probes from failures, contain no endpoint data and are absent from
 persisted health history. These tests do not establish why a particular external
 server or production connection timed out.
+Exercise the fallback selector and blocked recovery too, with stale availability
+flags and a current failed response. A full controller tick must preserve the
+primary observation and its timestamp after successful availability-only checks
+both with and without a returned latency, at batch sizes one and three. An
+unknown primary latency must not gain a ranking from another origin's response.
 
 ## Public Export Boundary
 

@@ -39,7 +39,7 @@ func testFallbackOnlyCandidateCannotMaskMeasuredWinner(t *testing.T, pending boo
 		item.AvailabilityOK[node], item.QualityOK[node] = true, true
 		runtime.probes[node] = successfulEvidence(delay)
 	}
-	runtime.probes["reserve"] = probeEvidence{OK: true, QualityUnmeasured: true}
+	runtime.probes["reserve"] = probeEvidence{OK: true, QualityUnmeasured: true, PrimaryQualityFailed: true}
 	for _, at := range []int64{1060, 1120} {
 		if err := controller.Tick(time.Unix(at, 0)); err != nil {
 			t.Fatal(err)
