@@ -2,12 +2,14 @@ package appliance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -70,10 +72,14 @@ func reloadNginxWith(ctx context.Context, config string, workers func() (map[str
 }
 
 func nginxWorkers(proc string, master int) (map[string]bool, error) {
+	return nginxWorkersWithRead(proc, master, os.ReadFile)
+}
+
+func nginxWorkersWithRead(proc string, master int, readFile func(string) ([]byte, error)) (map[string]bool, error) {
 	root := filepath.Join(proc, strconv.Itoa(master))
 	// RouterOS does not expose task/PID/children. Enumerate stat PPIDs instead;
 	// this scan runs only on a configuration reload, never in health polling.
-	masterStat, err := os.ReadFile(filepath.Join(root, "stat"))
+	masterStat, err := readFile(filepath.Join(root, "stat"))
 	if err != nil {
 		return nil, fmt.Errorf("read nginx master: %w", err)
 	}
@@ -93,8 +99,8 @@ func nginxWorkers(proc string, master int) (map[string]bool, error) {
 			continue
 		}
 		childRoot := filepath.Join(proc, child)
-		stat, err := os.ReadFile(filepath.Join(childRoot, "stat"))
-		if os.IsNotExist(err) {
+		stat, err := readFile(filepath.Join(childRoot, "stat"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			continue
 		}
 		if err != nil {
@@ -104,8 +110,8 @@ func nginxWorkers(proc string, master int) (map[string]bool, error) {
 		if !valid || parent != master || state == "Z" || state == "X" {
 			continue
 		}
-		cmdline, err := os.ReadFile(filepath.Join(childRoot, "cmdline"))
-		if os.IsNotExist(err) {
+		cmdline, err := readFile(filepath.Join(childRoot, "cmdline"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			continue
 		}
 		if err != nil {
