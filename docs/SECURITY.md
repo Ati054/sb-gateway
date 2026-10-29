@@ -5,7 +5,7 @@
 ## Current Build Baseline
 
 The current source pins Go 1.27.3 for both executable roles and release CI,
-and Xray v26.10.21. Upstream updates its fallback roots to remove three
+and Xray v26.10.29. Upstream updates its fallback roots to remove three
 emSign roots; Go 1.27.3 also rejects the affected intermediate certificates.
 The multicall build asserts the selected fallback-root module version and
 the executable toolchain. These are source/build requirements, not evidence

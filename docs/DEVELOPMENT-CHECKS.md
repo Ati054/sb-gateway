@@ -346,8 +346,8 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 
 ## Pinned Core Upgrade
 
-The server source pins upstream Xray v26.10.21 at
-`1b1647cd9ddf0abc34b981d4611fc03bcac1ca74`, with REALITY
+The server source pins upstream Xray v26.10.29 at
+`0afec66085a85191e9dd2a4a6646c7c9a94688d1`, with REALITY
 `83f621788ca88b83179810b12baa7ae518aacb83` and Go 1.27.3.
 Promotion still requires renderer, Reverse and external data-plane acceptance;
 a source pin change does not certify an image. The build asserts both the
@@ -356,6 +356,13 @@ upstream and multicall-selected `x509roots/fallback` version
 See [upstream's trust-store update](https://github.com/XTLS/Xray-core/pull/7212)
 and [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3).
 Exported Reverse bridge versions remain independently pinned.
+
+The v26.10.29 upgrade also changes asset/Lua path helpers, GeoData update
+validation and inbound module initialization order. Verify the generated
+external GeoIP/GeoSite references with `XRAY_LOCATION_ASSET=/config/rulesets`,
+API routing updates, WebSocket normal closure and cold-start traffic admission.
+Keep the private comparison and image acceptance pending until the new core
+has completed them; earlier-core measurements are only a baseline.
 
 The v26.10.17 rebase preserves upstream Hysteria write/close cancellation and
 adds retirement callbacks without replacing its new per-stream locks. The VLESS
