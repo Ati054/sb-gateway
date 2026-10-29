@@ -150,6 +150,61 @@ func TestHotPolicyReuseRequiresLiveReadback(t *testing.T) {
 	}
 }
 
+func TestHotModeApplyDoesNotWaitForUnchangedInitialSurvey(t *testing.T) {
+	c, r := hotReconcileFixture(t)
+	contract := r.pool.HealthPolicies["z-target"]
+	contract.Mode = "priority"
+	r.pool.HealthPolicies["z-target"] = contract
+	r.reset = true
+	// The core already serves this unchanged policy, but its first quality
+	// survey has not completed. A fresh selector readback is still required.
+	c.warmStarted["a-healthy"] = false
+	c.regularNext["a-healthy"] = time.Time{}
+	acknowledged, surveyed := false, false
+	c.hotPublisher = func(_ Options, ack hotRuntimeAcknowledgement) error {
+		if ack.hotRuntimeGeneration != r.generation || ack.PolicySelections["z-target"] != "target" {
+			t.Fatal("changed policy was not reconciled")
+		}
+		acknowledged = true
+		return nil
+	}
+	r.probeObserver = func(node string) {
+		if strings.HasPrefix(node, "healthy") {
+			surveyed = true
+			if !acknowledged {
+				t.Fatal("unchanged initial survey delayed hot Apply")
+			}
+		}
+	}
+	if err := c.Tick(time.Unix(1001, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if !acknowledged || !surveyed {
+		t.Fatalf("ack=%t survey=%t", acknowledged, surveyed)
+	}
+}
+
+func TestIncompleteHotPolicyReuseRequiresCurrentFingerprints(t *testing.T) {
+	for _, previous := range []string{"current", "old", ""} {
+		t.Run("fingerprint-"+previous, func(t *testing.T) {
+			c, r := hotReconcileFixture(t)
+			contract := r.pool.HealthPolicies["a-healthy"]
+			contract.Nodes = map[string]healthNode{"healthy": {Fingerprint: "current"}}
+			r.pool.HealthPolicies["a-healthy"] = contract
+			c.state["a-healthy"].CandidateNodes = map[string]healthNode{"healthy": {Fingerprint: previous}}
+			c.warmStarted["a-healthy"] = false
+			c.regularNext["a-healthy"] = time.Unix(2000, 0)
+			retained := c.retainUnchangedHotPolicies(r.pool, r.pool)
+			if retained["a-healthy"] != (previous == "current") {
+				t.Fatalf("retained=%t fingerprint=%q", retained["a-healthy"], previous)
+			}
+			if retained["a-healthy"] && !c.regularNext["a-healthy"].IsZero() {
+				t.Fatal("unfinished survey was postponed instead of running after acknowledgement")
+			}
+		})
+	}
+}
+
 func TestCoreRestartDoesNotReuseHotPolicyReadbacks(t *testing.T) {
 	c, r := hotReconcileFixture(t)
 	contract := r.pool.HealthPolicies["z-target"]

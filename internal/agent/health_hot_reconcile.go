@@ -16,10 +16,10 @@ func (controller *healthController) retainUnchangedHotPolicies(previous, target 
 	}
 	for id, contract := range target.HealthPolicies {
 		item := controller.state[id]
-		if item == nil || !controller.warmStarted[id] || controller.transitions[id] != nil ||
+		if item == nil || controller.transitions[id] != nil ||
 			!item.RuntimeConfirmed || item.Selected != item.RuntimeSelected || item.Mode != contract.Mode ||
 			item.CandidateSignature != strings.Join(uniqueCandidates(contract.Candidates), "\n") ||
-			!sameHotPolicyContract(previous, target, id) {
+			!sameHotPolicyContract(previous, target, id) || !hotPolicyFingerprintsMatch(item, contract) {
 			continue
 		}
 		actual, err := controller.runtime.Current(id)
@@ -27,9 +27,26 @@ func (controller *healthController) retainUnchangedHotPolicies(previous, target 
 			continue
 		}
 		item.RuntimeObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		if !controller.warmStarted[id] {
+			// Serving the same forwarding contract is independent of finishing its
+			// first quality survey. Keep that survey due after the hot acknowledgement.
+			if controller.regularNext == nil {
+				controller.regularNext = make(map[string]time.Time)
+			}
+			controller.regularNext[id] = time.Time{}
+		}
 		preserved[id] = true
 	}
 	return preserved
+}
+
+func hotPolicyFingerprintsMatch(item *policyHealthState, contract healthPolicyContract) bool {
+	for _, id := range contract.Candidates {
+		if fingerprint := contract.Nodes[id].Fingerprint; fingerprint != "" && item.CandidateNodes[id].Fingerprint != fingerprint {
+			return false
+		}
+	}
+	return true
 }
 
 func sameHotPolicyContract(previous, target healthPool, id string) bool {
