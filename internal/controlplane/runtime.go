@@ -227,13 +227,13 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 		}
 		// A companion Nginx/DNS/monitor edit does not prove the new selectors.
 		// Capture the forwarding scope before replacing any live artifact.
-		if hotPolicyWithoutCoreRestart(changed) {
+		if containsRuntimeArtifact(changed, "urltest-pool.json") {
 			var scopeErr error
 			policyScope, scopeErr = hotPolicyScope(runtime.options.XrayHealthPool, candidate.Files["urltest-pool.json"])
 			if scopeErr != nil {
 				return scopeErr
 			}
-			if beforeHotPolicy != nil {
+			if hotPolicyWithoutCoreRestart(changed) && beforeHotPolicy != nil {
 				if err := beforeHotPolicy(ctx); err != nil {
 					return err
 				}
@@ -278,7 +278,7 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 			return receipt, fmt.Errorf("probe runtime: %w", err)
 		}
 	}
-	if hotPolicyWithoutCoreRestart(receipt.Changed()) {
+	if containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json") {
 		// Companion programs are now ready. Let the agent consume the published
 		// pool; holding its planned-restart guard while waiting would deadlock.
 		releaseGuard()
@@ -346,7 +346,15 @@ func (runtime *nativeRuntime) activateSubscriptionWithXrayRestartHook(ctx contex
 	}
 	changed := receipt.Changed()
 	if restartCore {
-		return receipt, runtime.restartSubscriptionCore(ctx, changed, beforeXrayRestart)
+		if err := runtime.restartSubscriptionCore(ctx, changed, beforeXrayRestart); err != nil {
+			return receipt, err
+		}
+		releaseGuard()
+		releaseGuard = func() {}
+		if containsRuntimeArtifact(changed, "urltest-pool.json") {
+			return receipt, runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
+		}
+		return receipt, nil
 	}
 	if !containsRuntimeArtifact(changed, "xray.json") && !containsRuntimeArtifact(changed, "urltest-pool.json") {
 		return receipt, runtime.restartChangedWithoutXray(ctx, changed)
@@ -438,7 +446,15 @@ func (runtime *nativeRuntime) rollbackSubscriptionWithXrayRestartHook(ctx contex
 		return err
 	}
 	if restartCore {
-		return runtime.restartSubscriptionCore(ctx, receipt.Changed(), beforeXrayRestart)
+		if err := runtime.restartSubscriptionCore(ctx, receipt.Changed(), beforeXrayRestart); err != nil {
+			return err
+		}
+		releaseGuard()
+		releaseGuard = func() {}
+		if containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json") {
+			return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
+		}
+		return nil
 	}
 	if err := runtime.restartChangedWithoutXray(ctx, receipt.Changed()); err != nil {
 		return err
@@ -611,7 +627,7 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 			return fmt.Errorf("create watchdog rollback guard: %w", guardErr)
 		}
 	}
-	if hotPolicyWithoutCoreRestart(receipt.Changed()) {
+	if containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json") {
 		policyScope, err = runtime.restoreHotPolicyScope(receipt)
 	} else {
 		err = runtime.store.Rollback(receipt)
@@ -635,7 +651,7 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 			return err
 		}
 	}
-	if hotPolicyWithoutCoreRestart(receipt.Changed()) {
+	if containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json") {
 		releaseGuard()
 		releaseGuard = func() {}
 		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)

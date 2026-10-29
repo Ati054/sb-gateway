@@ -250,23 +250,25 @@ type policyReconciliation struct {
 }
 
 type healthController struct {
-	probeBudget         *healthProbeBudget
-	priorityPolicy      string
-	opts                Options
-	runtime             selectorRuntime
-	warmStarted         map[string]bool
-	reconciled          map[string]policyReconciliation
-	state               healthState
-	stateLoaded         bool
-	regularNext         map[string]time.Time
-	livenessAt          map[string]time.Time
-	forceLiveness       map[string]bool
-	lastSignalAt        map[string]time.Time
-	yielded             bool
-	transitions         map[string]*policyTransition
-	processedPool       healthPool
-	processedGeneration hotRuntimeGeneration
-	eventSink           func(healthEvent)
+	probeBudget          *healthProbeBudget
+	priorityPolicy       string
+	opts                 Options
+	runtime              selectorRuntime
+	warmStarted          map[string]bool
+	reconciled           map[string]policyReconciliation
+	state                healthState
+	stateLoaded          bool
+	regularNext          map[string]time.Time
+	livenessAt           map[string]time.Time
+	forceLiveness        map[string]bool
+	lastSignalAt         map[string]time.Time
+	yielded              bool
+	transitions          map[string]*policyTransition
+	processedPool        healthPool
+	processedGeneration  hotRuntimeGeneration
+	hotPendingGeneration hotRuntimeGeneration
+	eventSink            func(healthEvent)
+	hotPublisher         func(Options, hotRuntimeAcknowledgement) error
 }
 
 func runHealth(ctx context.Context, opts Options) error {
@@ -503,11 +505,22 @@ func (controller *healthController) Tick(now time.Time) error {
 	}
 	settingsOnly := runtimeReset && previousGeneration.XrayPID > 0 &&
 		previousGeneration.XrayPID == controller.processedGeneration.XrayPID && healthSettingsOnly(previousPool, pool)
+	hotReload := runtimeReset && previousGeneration.XrayPID > 0 && previousGeneration.XrayPID == controller.processedGeneration.XrayPID
+	if runtimeReset {
+		controller.hotPendingGeneration = hotRuntimeGeneration{}
+		if controller.processedGeneration.XrayPID > 0 {
+			controller.hotPendingGeneration = controller.processedGeneration
+		}
+	}
+	preserved := map[string]bool{}
 	if runtimeReset && !settingsOnly {
-		controller.warmStarted = make(map[string]bool)
+		if hotReload {
+			preserved = controller.retainUnchangedHotPolicies(previousPool, pool)
+		}
+		controller.warmStarted = preserved
 		controller.reconciled = nil
-		controller.regularNext = nil
-		controller.livenessAt = nil
+		controller.regularNext = retainedPolicyTimes(controller.regularNext, preserved)
+		controller.livenessAt = retainedPolicyTimes(controller.livenessAt, preserved)
 	}
 	if controller.regularNext == nil {
 		controller.regularNext = make(map[string]time.Time)
@@ -527,6 +540,9 @@ func (controller *healthController) Tick(now time.Time) error {
 	}
 	if runtimeReset && !settingsOnly {
 		for policyID, item := range controller.state {
+			if preserved[policyID] {
+				continue
+			}
 			if item != nil {
 				clearOptimizationCandidate(item)
 				failures := item.AvailabilityFailures[item.Selected]
@@ -557,6 +573,9 @@ func (controller *healthController) Tick(now time.Time) error {
 			if err := controller.publishHotRuntimeReady(); err != nil {
 				return fmt.Errorf("acknowledge health settings: %w", err)
 			}
+			if controller.hotRuntimeReconciled() {
+				controller.hotPendingGeneration = hotRuntimeGeneration{}
+			}
 		} else {
 			// A failed/different readback needs the ordinary reconciliation path.
 			controller.warmStarted = make(map[string]bool)
@@ -576,17 +595,22 @@ func (controller *healthController) Tick(now time.Time) error {
 		if policyIDs[i] == controller.priorityPolicy || policyIDs[j] == controller.priorityPolicy {
 			return policyIDs[i] == controller.priorityPolicy
 		}
-		urgent := func(id string) bool {
+		urgency := func(id string) int {
 			item := controller.state[id]
 			// A policy which has just appeared in the applied contract has no
 			// persisted state yet. Run it before routine quality checks for older
 			// policies so a newly assigned client does not remain fail-closed while
 			// unrelated route lists are being sampled.
-			return item == nil || !item.RuntimeConfirmed || item.Selected == "" ||
-				item.Selected == "block" || item.AvailabilityFailures[item.Selected] > 0
+			if item == nil || !item.RuntimeConfirmed || item.Selected == "" || item.Selected == "block" || item.AvailabilityFailures[item.Selected] > 0 {
+				return 0
+			}
+			if !controller.warmStarted[id] {
+				return 1
+			}
+			return 2
 		}
-		if urgent(policyIDs[i]) != urgent(policyIDs[j]) {
-			return urgent(policyIDs[i])
+		if urgency(policyIDs[i]) != urgency(policyIDs[j]) {
+			return urgency(policyIDs[i]) < urgency(policyIDs[j])
 		}
 		firstPair := optimizationPairHalfPending(now, pool.HealthPolicies[policyIDs[i]], controller.state[policyIDs[i]])
 		secondPair := optimizationPairHalfPending(now, pool.HealthPolicies[policyIDs[j]], controller.state[policyIDs[j]])
@@ -602,6 +626,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		return firstDue && first.Before(second)
 	})
 	var failures []error
+	earlyHotAcknowledgement := controller.hotPendingGeneration.XrayPID > 0 && controller.hotPendingGeneration == controller.processedGeneration
 	dirty := runtimeReset || len(pool.HealthPolicies) != len(controller.state)
 	for _, policyID := range policyIDs {
 		if policyID == controller.priorityPolicy {
@@ -677,6 +702,24 @@ func (controller *healthController) Tick(now time.Time) error {
 				ReserveSelection: item.LastEmergencySelection})
 		}
 		managed[policyID] = item
+		if earlyHotAcknowledgement && len(failures) == 0 && controller.hotRuntimeReconciled() {
+			// The changed policies are reconciled; unrelated due quality work
+			// must not delay Apply. Persist the same public state before its ack.
+			snapshot := make(healthState, len(policyIDs))
+			for _, id := range policyIDs {
+				if value := controller.state[id]; value != nil {
+					snapshot[id] = value
+				}
+			}
+			if err := publishHealthState(stateFile, snapshot); err != nil {
+				return err
+			}
+			if err := controller.publishHotRuntimeReady(); err != nil {
+				return err
+			}
+			controller.hotPendingGeneration = hotRuntimeGeneration{}
+			earlyHotAcknowledgement = false
+		}
 		if controller.yielded {
 			// Do not start another policy's slow job before handling this failure.
 			for _, id := range policyIDs {

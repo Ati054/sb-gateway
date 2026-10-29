@@ -35,14 +35,14 @@ func mixedHotFixture(t *testing.T, artifact string) (*nativeRuntime, runtimeconf
 }
 
 func TestMixedHotApplyRequiresSelectorAcknowledgement(t *testing.T) {
-	for _, artifact := range []string{"nginx.conf", "policy-dns.json", "watchdog.env"} {
+	for _, artifact := range []string{"nginx.conf", "policy-dns.json", "watchdog.env", "xray.json"} {
 		t.Run(artifact, func(t *testing.T) {
 			runtime, candidate, controller := mixedHotFixture(t, artifact)
 			hooked := false
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			receipt, err := runtime.activateWithHooks(ctx, candidate, nil, func(context.Context) error { hooked = true; return nil }, nil)
-			if !errors.Is(err, context.DeadlineExceeded) || !hooked || len(receipt.Changed()) != 2 {
+			if !errors.Is(err, context.DeadlineExceeded) || hooked != (artifact != "xray.json") || len(receipt.Changed()) != 2 {
 				t.Fatalf("mixed edit acknowledged without selectors: err=%v hook=%t changed=%v", err, hooked, receipt.Changed())
 			}
 			if len(controller.restarts) != 1 || len(controller.probes) != 1 {
@@ -61,7 +61,7 @@ func TestMixedHotApplyRequiresSelectorAcknowledgement(t *testing.T) {
 }
 
 func TestMixedHotApplyAndRollbackReleaseGuardBeforeFreshAcknowledgement(t *testing.T) {
-	for _, artifact := range []string{"nginx.conf", "policy-dns.json", "watchdog.env"} {
+	for _, artifact := range []string{"nginx.conf", "policy-dns.json", "watchdog.env", "xray.json"} {
 		t.Run(artifact, func(t *testing.T) {
 			runtime, candidate, controller := mixedHotFixture(t, artifact)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -114,7 +114,7 @@ func TestMixedHotApplyAndRollbackReleaseGuardBeforeFreshAcknowledgement(t *testi
 			}
 			for _, programs := range controller.restarts {
 				for _, p := range programs {
-					if p == "xray" {
+					if p == "xray" && artifact != "xray.json" {
 						t.Fatal("mixed hot edit restarted core")
 					}
 				}

@@ -21,6 +21,7 @@ type subscriptionGeometryController struct {
 	restarts, probes     int
 	restartErr, probeErr error
 	observe              func()
+	ready                func()
 }
 
 func (controller *subscriptionGeometryController) Restart(_ context.Context, programs []string) error {
@@ -47,6 +48,9 @@ func (controller *subscriptionGeometryController) Probe(ctx context.Context, _ [
 	}
 	if _, err := os.Stat(controller.guard); err != nil {
 		controller.t.Fatalf("core probe is not guarded: %v", err)
+	}
+	if controller.probeErr == nil && controller.ready != nil {
+		controller.ready()
 	}
 	return controller.probeErr
 }
@@ -103,7 +107,21 @@ func subscriptionGeometryFixture(t *testing.T, old, next []byte) (*nativeRuntime
 		store: store, controller: controller,
 		validate: func(context.Context, runtimeconfig.RuntimeCandidate, []string) error { return nil },
 	}
+	controller.ready = func() { acknowledgeTestPool(t, native) }
 	return native, candidate, controller
+}
+
+func TestSubscriptionColdPoolCannotCommitWithoutAgentAcknowledgement(t *testing.T) {
+	native, candidate, controller := subscriptionGeometryFixture(t, subscriptionGeometryBody(t, 1, "old"), subscriptionGeometryBody(t, 2, "new"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	controller.ready = cancel // Core is ready, but no agent generation is published.
+	if _, err := native.activateSubscription(ctx, candidate); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cold subscription completed without reconciled pool: %v", err)
+	}
+	if _, err := os.Stat(controller.guard); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("guard prevents later reconciliation")
+	}
 }
 
 func TestSubscriptionProbeGeometryColdGrowthAndShrink(t *testing.T) {

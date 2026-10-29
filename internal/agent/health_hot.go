@@ -65,7 +65,11 @@ func (controller *healthController) publishHotRuntimeReady() error {
 			selections[id] = item.RuntimeSelected
 		}
 	}
-	return publishHotRuntimeReady(controller.opts, hotRuntimeAcknowledgement{controller.processedGeneration, selections})
+	processed := hotRuntimeAcknowledgement{controller.processedGeneration, selections}
+	if controller.hotPublisher != nil {
+		return controller.hotPublisher(controller.opts, processed)
+	}
+	return publishHotRuntimeReady(controller.opts, processed)
 }
 
 // The acknowledgement names the generation consumed by Tick, never whatever
@@ -76,7 +80,7 @@ func publishHotRuntimeReady(opts Options, processed hotRuntimeAcknowledgement) e
 }
 
 func publishHotRuntimeReadyAt(opts Options, processed hotRuntimeAcknowledgement, procRoot string) error {
-	if processed.PoolSHA256 == "" || processed.PoolMTimeUnixNano == 0 || processed.XrayPID <= 0 {
+	if opts.HotRuntimeReadyFile == "" || processed.PoolSHA256 == "" || processed.PoolMTimeUnixNano == 0 || processed.XrayPID <= 0 {
 		return nil
 	}
 	file, err := os.Open(opts.HealthPoolFile)
