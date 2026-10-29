@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -121,5 +122,54 @@ func TestSupervisorReloadKeepsServingProcessAndPropagatesFailure(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNginxProcScanToleratesOnlyDisappearingChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name, failedPath string
+		failure          error
+		wantError        bool
+	}{
+		{"stat-esrch", "11/stat", syscall.ESRCH, false},
+		{"cmdline-esrch", "11/cmdline", syscall.ESRCH, false},
+		{"stat-missing", "11/stat", os.ErrNotExist, false},
+		{"cmdline-missing", "11/cmdline", os.ErrNotExist, false},
+		{"master-esrch", "5/stat", syscall.ESRCH, true},
+		{"child-permission", "11/stat", os.ErrPermission, true},
+		{"child-io", "11/cmdline", syscall.EIO, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proc := t.TempDir()
+			for _, pid := range []string{"5", "10", "11"} {
+				if err := os.MkdirAll(filepath.Join(proc, pid), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readFile := func(path string) ([]byte, error) {
+				rel, err := filepath.Rel(proc, path)
+				if err != nil {
+					return nil, err
+				}
+				rel = filepath.ToSlash(rel)
+				if rel == tc.failedPath {
+					return nil, &os.PathError{Op: "read", Path: path, Err: tc.failure}
+				}
+				if rel == "5/stat" {
+					return []byte("5 (nginx) S 1 0"), nil
+				}
+				if strings.HasSuffix(rel, "/stat") {
+					return []byte("10 (nginx) S 5 0"), nil
+				}
+				return []byte("nginx: worker process\x00"), nil
+			}
+			workers, err := nginxWorkersWithRead(proc, 5, readFile)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("workers=%v err=%v", workers, err)
+			}
+			if !tc.wantError && !reflect.DeepEqual(workers, map[string]bool{"10": true}) {
+				t.Fatalf("workers=%v", workers)
+			}
+		})
 	}
 }
