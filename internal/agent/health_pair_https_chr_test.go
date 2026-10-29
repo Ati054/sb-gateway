@@ -52,9 +52,16 @@ type chrPairOrigin struct {
 	activeMS, reserveMS, primaryMS atomic.Int64
 	failActive, armOutage          atomic.Bool
 	failureAt                      atomic.Int64
+	qualityInFlight, qualityPeak   atomic.Int64
 }
 
 func (origin *chrPairOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodHead {
+		current := origin.qualityInFlight.Add(1)
+		defer origin.qualityInFlight.Add(-1)
+		for previous := origin.qualityPeak.Load(); current > previous && !origin.qualityPeak.CompareAndSwap(previous, current); previous = origin.qualityPeak.Load() {
+		}
+	}
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	node := origin.sources[host]
 	origin.mu.Lock()
@@ -124,7 +131,7 @@ func TestCHRPairedHTTPSRuntime(t *testing.T) {
 		t.Fatal("use the installed image core")
 	}
 	scenario := os.Getenv("SB_CHR_PAIR_SCENARIO")
-	if scenario != "healthy" && scenario != "degradation" && scenario != "slow" && scenario != "outage" && scenario != "smoke" {
+	if scenario != "healthy" && scenario != "degradation" && scenario != "slow" && scenario != "outage" && scenario != "smoke" && scenario != "callback" {
 		t.Fatal("unknown acceptance scenario")
 	}
 	root := t.TempDir()
@@ -165,10 +172,14 @@ func TestCHRPairedHTTPSRuntime(t *testing.T) {
 	apiPort, fastPort, bgPort := port(), port(), port()
 	api := fmt.Sprintf("127.0.0.1:%d", apiPort)
 	pool := healthPool{Version: 4, ProbeBudget: 1, ProbeLanes: 1, Policies: map[string][]string{}, HealthPolicies: map[string]healthPolicyContract{}, Outbounds: map[string]json.RawMessage{}}
+	if scenario == "callback" {
+		pool.ProbeBudget = 2
+		origin.activeMS.Store(1300)
+	}
 	outbounds := []any{map[string]any{"tag": "block", "protocol": "blackhole"}}
 	balancers := []any{}
 	policyCount := 1
-	if scenario == "healthy" || scenario == "smoke" {
+	if scenario == "healthy" || scenario == "smoke" || scenario == "callback" {
 		policyCount = 3
 	}
 	nodes := []string{}
@@ -176,6 +187,9 @@ func TestCHRPairedHTTPSRuntime(t *testing.T) {
 		id := fmt.Sprintf("route-%d", i)
 		members := []string{id + "-active", id + "-reserve"}
 		contract := healthPolicyContract{Mode: "best", Candidates: members, Nodes: map[string]healthNode{}, Policy: healthPolicy{ActiveCheckSeconds: 60, ActiveLivenessSeconds: 3, ProbeBatchSize: 1, SwitchImprovementMS: 200, LatencyMeasurement: latencyMeasurement}}
+		if scenario == "callback" {
+			contract.Policy.ProbeBatchSize = 2
+		}
 		if scenario == "degradation" || scenario == "slow" {
 			contract.Policy.ActiveLivenessSeconds = 30
 		}
@@ -282,11 +296,21 @@ func TestCHRPairedHTTPSRuntime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	responsive.check = func() error { return controller.checkDuringProbe(time.Now(), pool) }
+	callbackDelayed := false
+	responsive.check = func() error {
+		if scenario == "callback" && !callbackDelayed {
+			callbackDelayed = true
+			time.Sleep(11 * time.Second)
+		}
+		return controller.checkDuringProbe(time.Now(), pool)
+	}
 	phaseStart := time.Now()
 	duration := 125 * time.Second
 	if scenario == "smoke" {
 		duration = 15 * time.Second
+	}
+	if scenario == "callback" {
+		duration = 25 * time.Second
 	}
 	if scenario == "degradation" || scenario == "outage" || scenario == "slow" {
 		origin.activeMS.Store(900)
@@ -410,7 +434,8 @@ func TestCHRPairedHTTPSRuntime(t *testing.T) {
 	}
 	report := map[string]any{"scenario": scenario, "elapsed_seconds": elapsed, "cycles": cycles, "https_attempts_by_target": attempts, "https_attempts_by_minute": minutes, "origin_received": len(received), "availability_gets": getCount, "quality_heads_by_node": quality, "cpu_core_percent": 100 * float64(chrPairCPU()-initialCPU) / 1e6 / elapsed, "switches": switches, "first_confirmation_seconds": confirmationSeconds, "confirmations": confirmations, "scheduler_pause_seconds": 0, "overdue_pair_seen": skewSeen}
 	report["max_https_attempts_in_rolling_60_seconds"], report["quality_concurrency_peak"] = maxRolling, measuredRuntime.qualityPeak.Load()
-	if measuredRuntime.qualityPeak.Load() > 1 {
+	report["origin_quality_concurrency_peak"] = origin.qualityPeak.Load()
+	if measuredRuntime.qualityPeak.Load() > 1 || origin.qualityPeak.Load() > 1 {
 		t.Fatal("one-slot quality concurrency exceeded")
 	}
 	if len(switches) > 0 {
@@ -435,6 +460,18 @@ func TestCHRPairedHTTPSRuntime(t *testing.T) {
 	body, _ := json.Marshal(report)
 	t.Log(string(body))
 	switch scenario {
+	case "callback":
+		if !callbackDelayed || origin.qualityPeak.Load() != 1 {
+			t.Fatal("single-lane callback scenario was not exercised")
+		}
+		for id, contract := range pool.HealthPolicies {
+			item := controller.state[id]
+			_, activeAt := latestQualityObservation(item, contract.Candidates[0])
+			_, reserveAt := latestQualityObservation(item, contract.Candidates[1])
+			if activeAt < float64(phaseStart.UnixNano())/1e9 || reserveAt < float64(phaseStart.UnixNano())/1e9 || activeAt-reserveAt > 10 || reserveAt-activeAt > 10 {
+				t.Fatalf("single-lane pair delayed behind the active callback for %s: active=%f reserve=%f", id, activeAt, reserveAt)
+			}
+		}
 	case "healthy":
 		for _, node := range nodes {
 			if len(quality[node]) == 0 {

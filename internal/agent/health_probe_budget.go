@@ -28,6 +28,19 @@ type parallelQualityRuntime interface {
 
 func (controller *healthController) sharedQualityBatch(policyID string, contract healthPolicyContract, nodes []string) map[string]probeEvidence {
 	result := make(map[string]probeEvidence, len(nodes))
+	if controller.sharedPairWouldExpire(policyID, contract, nodes) {
+		// Give the ordinary fair scheduler the whole pair on the next turn.
+		// Do not spend requests or retain reservations for an unusable half.
+		for _, node := range nodes {
+			result[node] = probeEvidence{Deferred: true}
+			key := controller.probeKey(policyID, node, contract)
+			if !controller.probeBudget.QualityAttempted[key] {
+				delete(controller.probeBudget.Used, key)
+			}
+		}
+		controller.deferSharedProbe(policyID)
+		return result
+	}
 	pending := []string{}
 	for _, node := range nodes {
 		key := controller.probeKey(policyID, node, contract)
@@ -55,6 +68,45 @@ func (controller *healthController) sharedQualityBatch(policyID string, contract
 		}
 	}
 	return result
+}
+
+// Raw results may be shared for longer than the comparison skew. A URLTest
+// wave containing its active node must still fit the existing pair window,
+// including primary requests which have not started yet.
+func (controller *healthController) sharedPairWouldExpire(policyID string, contract healthPolicyContract, nodes []string) bool {
+	item := controller.state[policyID]
+	lanes := controller.qualitySurveyLanes()
+	if contract.Mode != "best" || item == nil || !contains(nodes, item.Selected) || lanes <= 0 || controller.probeBudget == nil {
+		return false
+	}
+	now := time.Now()
+	var first, last time.Time
+	pending := 0
+	for _, node := range nodes {
+		key := controller.probeKey(policyID, node, contract)
+		cached, ok := controller.probeBudget.Quality[key]
+		age := now.Sub(cached.At)
+		if !ok || age < 0 || age > sharedProbeLifetime {
+			if !controller.probeBudget.QualityAttempted[key] {
+				pending++
+			}
+			continue
+		}
+		if first.IsZero() || cached.At.Before(first) {
+			first = cached.At
+		}
+		if cached.At.After(last) {
+			last = cached.At
+		}
+	}
+	if first.IsZero() {
+		return false
+	}
+	if pending > 0 {
+		waves := (pending + lanes - 1) / lanes
+		last = now.Add(time.Duration(waves) * qualityProbeTimeout)
+	}
+	return last.Sub(first) > optimizationPairSkew
 }
 
 func probeObservedAt(evidence probeEvidence) time.Time {
