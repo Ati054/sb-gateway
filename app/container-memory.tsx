@@ -23,6 +23,8 @@ export function ContainerMemory({ container, onChanged }: { container: JsonObjec
     setActual(live);
     setAvailable(live.inventory_available === true);
     setPending(operation.pending === true);
+    setFailed(false);
+    setMessage("");
     if (operation.state === "completed") {
       setMessage(tr("Лимиты подтверждены RouterOS, панель восстановлена."));
       setFailed(false);
@@ -34,15 +36,22 @@ export function ContainerMemory({ container, onChanged }: { container: JsonObjec
   }, [tr]);
   useEffect(() => {
     let active = true;
-    queueMicrotask(() => {
+    let retryTimer: number | undefined;
+    let busyAttempts = 0;
+    const initialize = () => {
       if (!active) return;
       void load().then((live) => {
         if (active) { setHigh(memoryMiB(live.memory_high)); setMaximum(memoryMiB(live.memory_max)); }
-      }).catch(() => {
+      }).catch((error) => {
+        if (active && error instanceof GatewayApiError && error.code === "state_mutation_in_progress" && busyAttempts++ < 36) {
+          retryTimer = window.setTimeout(initialize, 5000);
+          return;
+        }
         if (active) { setAvailable(false); setFailed(true); setMessage(tr("Не удалось получить текущие лимиты RouterOS.")); }
       });
-    });
-    return () => { active = false; };
+    };
+    queueMicrotask(initialize);
+    return () => { active = false; window.clearTimeout(retryTimer); };
   }, [load, tr]);
   useEffect(() => {
     if (!pending) return;
