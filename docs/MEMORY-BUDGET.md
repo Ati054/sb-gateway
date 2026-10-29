@@ -179,7 +179,7 @@ compare CPU, latency, throughput and cgroup pressure under the same workload.
 Separate startup and rule compilation from steady traffic when reading GC traces.
 The pinned Xray matcher builders include explicit `runtime.GC` calls to limit
 temporary construction memory, including in the
-[IP-set builder](https://github.com/XTLS/Xray-core/blob/1b1647cd9ddf0abc34b981d4611fc03bcac1ca74/common/geodata/ip_matcher.go).
+[IP-set builder](https://github.com/XTLS/Xray-core/blob/0afec66085a85191e9dd2a4a6646c7c9a94688d1/common/geodata/ip_matcher.go).
 A trace marked `(forced)` does not by itself establish a too-small soft limit.
 Do not remove construction-time collection without measuring compilation peaks
 and large rule sets as well as startup CPU.
