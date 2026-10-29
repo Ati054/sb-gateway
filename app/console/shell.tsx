@@ -4,6 +4,7 @@ import { GatewayApiError, JsonObject, createCollectionItem, deleteCollectionItem
 import { DraftAutosave } from "../draft-autosave";
 import { useLanguage } from "../i18n";
 import { mergeRuntimeStatus } from "../runtime-status";
+import { mergeOverviewState } from "../overview-state";
 import { ApplyDialog, ResetDraftDialog } from "./apply-dialog";
 import { AddDialog } from "./client-dialog";
 import { Clients } from "./clients";
@@ -289,7 +290,7 @@ export function GatewayConsole({
     runtimeRefreshInFlight.current = true;
     try {
       const response = await getOverview<JsonObject>();
-      setOverviewData(response);
+      setOverviewData((current) => mergeOverviewState(current, response));
       setRuntimeStatus((current) =>
         mergeRuntimeStatus(current, asObject(response.status)),
       );
@@ -337,7 +338,7 @@ export function GatewayConsole({
       ]);
       const overview = asObject(response.overview);
       const draft = asObject(response.draft) as DraftEnvelope;
-      setOverviewData(overview);
+      setOverviewData((current) => mergeOverviewState(current, overview));
       setRuntimeStatus((current) =>
         detailedStatus
           ? mergeRuntimeStatus(
