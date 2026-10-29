@@ -8,10 +8,14 @@ const (
 )
 
 func qualityObservationAt(now time.Time, evidence probeEvidence) float64 {
+	return float64(probeObservationTime(now, evidence).UnixNano()) / float64(time.Second)
+}
+
+func probeObservationTime(now time.Time, evidence probeEvidence) time.Time {
 	if !evidence.ObservedAt.IsZero() {
-		return float64(evidence.ObservedAt.UnixNano()) / float64(time.Second)
+		return evidence.ObservedAt
 	}
-	return float64(now.UnixNano()) / float64(time.Second)
+	return now
 }
 
 func latestQualityObservation(item *policyHealthState, node string) (healthSample, float64) {
