@@ -489,7 +489,6 @@ func (controller *healthController) Tick(now time.Time) error {
 	previousGeneration := controller.processedGeneration
 	previousPool := controller.processedPool
 	controller.yielded = false
-	controller.processedGeneration = hotRuntimeGeneration{}
 	for _, item := range controller.state {
 		if item != nil {
 			item.OutageBatchStartedAt = time.Time{}
@@ -500,6 +499,7 @@ func (controller *healthController) Tick(now time.Time) error {
 		return err
 	}
 	controller.processedPool = pool
+	controller.processedGeneration = hotRuntimeGeneration{}
 	if source, ok := controller.runtime.(hotRuntimeGenerationSource); ok {
 		controller.processedGeneration = source.hotRuntimeGeneration()
 	}

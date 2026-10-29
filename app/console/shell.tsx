@@ -1,10 +1,11 @@
 "use client";
 
-import { GatewayApiError, JsonObject, createCollectionItem, deleteCollectionItem, getBootstrapState, getClientTelemetry, getCurrentDraft, getOverview, getRouterOsContainerStatus, getSelectorStatus, getStatus, isUncertainOperationError, logout, runDraftOperation, saveCurrentDraft, updateCollectionItem } from "../api-client";
+import { GatewayApiError, JsonObject, createCollectionItem, deleteCollectionItem, getBootstrapState, getClientTelemetry, getCurrentDraft, getOverview, getRouterOsContainerStatus, getSelectorStatus, getStatus, getTrafficReadiness, isUncertainOperationError, logout, runDraftOperation, saveCurrentDraft, updateCollectionItem } from "../api-client";
 import { DraftAutosave } from "../draft-autosave";
 import { useLanguage } from "../i18n";
 import { mergeRuntimeStatus } from "../runtime-status";
 import { mergeOverviewState } from "../overview-state";
+import { recoveredApplyConfirmed } from "../apply-recovery";
 import { ApplyDialog, ResetDraftDialog } from "./apply-dialog";
 import { AddDialog } from "./client-dialog";
 import { Clients } from "./clients";
@@ -936,7 +937,8 @@ export function GatewayConsole({
                           status.active_revision,
                           asText(asObject(status.last_apply).revision, ""),
                         );
-                        if (appliedRevision === targetRevision) {
+                        if (appliedRevision === targetRevision && status.apply_pending === false &&
+                            recoveredApplyConfirmed(targetRevision, status, await getTrafficReadiness<JsonObject>())) {
                           return {
                             ok: true,
                             operation: "applied_after_reconnect",

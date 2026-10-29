@@ -6,6 +6,7 @@ import {
   apiRequest,
   getSystemLogs,
   getXrayLogs,
+  getTrafficReadiness,
   isUncertainOperationError,
 } from "../app/api-client.ts";
 
@@ -25,6 +26,17 @@ globalThis.window = {
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("traffic confirmation uses the real readiness endpoint without changing configuration", async () => {
+  let requestedURL = "";
+  globalThis.fetch = async (url, init) => {
+    requestedURL = String(url);
+    assert.equal(init.method, "GET");
+    return new Response(JSON.stringify({ ready: true, traffic_ready: true }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  assert.equal((await getTrafficReadiness()).traffic_ready, true);
+  assert.equal(requestedURL, "/api/health/traffic-ready");
 });
 
 test("turns an HTML 502 proxy page into a bounded operational error", async () => {

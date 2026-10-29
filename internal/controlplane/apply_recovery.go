@@ -70,6 +70,7 @@ func (server *Server) pendingApplyRecovery() (map[string]any, error) {
 // active commit point, so its journal names a separately persisted safe
 // installation generation that is restored without publishing active.json.
 func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
+	defer server.plannedRuntimeApply.Store(false)
 	operation, err := server.pendingApplyRecovery()
 	if err != nil || operation == nil {
 		return false, err
@@ -159,12 +160,17 @@ func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
 		fallbackRouterOS = desiredRouterOS
 	}
 	activated := false
+	var trafficProofAfter time.Time
 	activate := func(recoveryContext context.Context) error {
 		if activated {
 			return nil
 		}
-		if _, activateErr := server.runtime.activate(recoveryContext, candidate); activateErr != nil {
+		receipt, activateErr := server.runtime.activate(recoveryContext, candidate)
+		if activateErr != nil {
 			return activateErr
+		}
+		if len(affectedPrograms(receipt.Changed())) > 0 {
+			trafficProofAfter = server.now()
 		}
 		activated = true
 		return nil
@@ -186,6 +192,19 @@ func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
 		}
 		if confirmedRevision != "" {
 			return true, fmt.Errorf("first Apply recovery observed a new active revision %s", confirmedRevision)
+		}
+	}
+	if !firstApplyRecovery && server.waitApplyTraffic != nil {
+		if err := server.markApplyRecoveryState("active_committed"); err != nil {
+			return true, err
+		}
+		server.plannedRuntimeApply.Store(true)
+		proofContext, cancel := context.WithTimeout(ctx, 100*time.Second)
+		err := server.waitApplyTraffic(proofContext, desiredConfig, trafficProofAfter)
+		cancel()
+		if err != nil {
+			_ = server.markApplyRecoveryState("recovery_pending")
+			return true, err
 		}
 	}
 	if err := server.clearApplyRecovery(); err != nil {

@@ -14,12 +14,13 @@ import (
 )
 
 type fakeRuntimeApplier struct {
-	revision      string
-	prepareCalls  int
-	activateCalls int
-	commitCalls   int
-	rollbackCalls int
-	commitErr     error
+	activationReceipt runtimeconfig.ActivationReceipt
+	revision          string
+	prepareCalls      int
+	activateCalls     int
+	commitCalls       int
+	rollbackCalls     int
+	commitErr         error
 }
 
 func (runtime *fakeRuntimeApplier) prepare(map[string]any, []map[string]any) (runtimeconfig.RuntimeCandidate, error) {
@@ -29,7 +30,7 @@ func (runtime *fakeRuntimeApplier) prepare(map[string]any, []map[string]any) (ru
 
 func (runtime *fakeRuntimeApplier) activate(context.Context, runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, error) {
 	runtime.activateCalls++
-	return runtimeconfig.ActivationReceipt{}, nil
+	return runtime.activationReceipt, nil
 }
 
 func (runtime *fakeRuntimeApplier) activateSubscription(ctx context.Context, candidate runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, error) {
@@ -483,7 +484,8 @@ func TestApplyRuntimeLKGWriteFailureRemainsRecoverable(t *testing.T) {
 		return routerOSApplyOutput{Kind: "delta"}, nil
 	}
 	result, status, err := server.applyConfiguration(context.Background(), desired, "admin")
-	if err != nil || status != http.StatusOK || result["cleanup_pending"] != true {
+	var failure *applyFailureError
+	if status != http.StatusConflict || !errors.As(err, &failure) || failure.state != applyRecoveryPending || result != nil {
 		t.Fatalf("status=%d result=%#v err=%v", status, result, err)
 	}
 	operation, err := server.repository.auxiliary("apply-operation")
@@ -491,8 +493,16 @@ func TestApplyRuntimeLKGWriteFailureRemainsRecoverable(t *testing.T) {
 		t.Fatalf("missing recovery journal: %#v, %v", operation, err)
 	}
 	runtime.commitErr = nil
+	waited := false
+	server.waitApplyTraffic = func(context.Context, map[string]any, time.Time) error {
+		waited = true
+		if !server.plannedRuntimeApply.Load() {
+			t.Fatal("recovery did not permit fresh readiness proof")
+		}
+		return nil
+	}
 	worked, err := server.reconcilePendingApply(context.Background())
-	if err != nil || !worked {
+	if err != nil || !worked || !waited {
 		t.Fatalf("LKG recovery worked=%t err=%v", worked, err)
 	}
 	operation, _ = server.repository.auxiliary("apply-operation")

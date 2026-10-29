@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/routeros"
 )
@@ -45,7 +46,7 @@ func TestRouterOSApplyWaitsForTrafficAfterTransactionCommits(t *testing.T) {
 				return routerOSApplyOutput{Kind: "delta"}, nil
 			}
 			waited := false
-			server.waitApplyTraffic = func(context.Context, map[string]any) error {
+			server.waitApplyTraffic = func(context.Context, map[string]any, time.Time) error {
 				waited = true
 				operation, err := server.repository.auxiliary("apply-operation")
 				if err != nil || !transactionDone || !plannedRuntimeActivationReady(operation, server.plannedRuntimeApply.Load()) {
