@@ -378,7 +378,10 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 		runtime.interrupted = errHealthYield
 		return measured
 	}
-	if !runtime.parallelEnabled || len(lanes) < 2 || len(candidates) < 2 {
+	// Even one quality worker must own the whole admitted wave. Waiting for
+	// controller callbacks between its requests can age an otherwise close pair.
+	// Single-lane emergency availability retains its immediate early-stop path.
+	if !runtime.parallelEnabled || len(lanes) == 0 || len(candidates) < 2 || (!quality && len(lanes) < 2) {
 		for _, candidate := range candidates {
 			if generationStamp(runtime.generationPaths) != stamp || (runtime.ctx != nil && runtime.ctx.Err() != nil) {
 				runtime.interrupted = errHealthYield
