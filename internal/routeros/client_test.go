@@ -289,6 +289,7 @@ func TestEnforceStartupTrafficSafetyMigratesOwnedWatchdogBeforeFailOpen(t *testi
 		"PATCH /rest/system/script/*11",
 		"GET /rest/system/script/*11?.proplist=source",
 		"POST /rest/system/script/run",
+		"GET /rest/system/script?.proplist=.id,name,comment",
 		"POST /rest/system/script/run",
 	}
 	if strings.Join(requests, "\n") != strings.Join(want, "\n") {

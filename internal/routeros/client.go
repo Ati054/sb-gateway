@@ -58,20 +58,24 @@ type Client struct {
 	actionHTTP *http.Client
 }
 
-// HTTPError preserves the RouterOS response class so callers can distinguish
-// a command that was explicitly rejected from a transport failure where the
-// command may already have been accepted and only its response was lost.
+// HTTPError distinguishes rejection from interruption or a lost response.
+// An interrupted command may already have changed state; its raw body is not
+// retained because RouterOS error details can contain configuration values.
 type HTTPError struct {
-	StatusCode int
+	StatusCode         int
+	CommandInterrupted bool
 }
 
 func (err HTTPError) Error() string {
+	if err.CommandInterrupted {
+		return fmt.Sprintf("RouterOS REST returned HTTP %d (command interrupted)", err.StatusCode)
+	}
 	return fmt.Sprintf("RouterOS REST returned HTTP %d", err.StatusCode)
 }
 
 func DefinitiveRequestRejection(err error) bool {
 	var httpErr HTTPError
-	return errors.As(err, &httpErr) && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500
+	return errors.As(err, &httpErr) && !httpErr.CommandInterrupted && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500
 }
 
 func NewClient(options Options) (*Client, error) {
@@ -229,9 +233,32 @@ func (client *Client) RunManagedScript(ctx context.Context, name string) (map[st
 // restart. RouterOS user environments are isolated, so the script's startup
 // flag is not relied on to bypass the watchdog's recovery hysteresis.
 func (client *Client) EnterPlannedApplyFailOpen(ctx context.Context) error {
+	// Replay only this idempotent helper after an explicit interruption, never
+	// arbitrary RouterOS mutations. Every attempt resolves ownership afresh.
+	for attempt := 0; ; attempt++ {
+		id, err := client.ownedStartupFailOpenID(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": id})
+		var interrupted HTTPError
+		if attempt == 2 || !errors.As(err, &interrupted) || !interrupted.CommandInterrupted {
+			return err
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (client *Client) ownedStartupFailOpenID(ctx context.Context) (string, error) {
 	rows, err := client.list(ctx, "/rest/system/script?.proplist=.id,name,comment")
 	if err != nil {
-		return err
+		return "", err
 	}
 	id := ""
 	for _, row := range rows {
@@ -239,15 +266,14 @@ func (client *Client) EnterPlannedApplyFailOpen(ctx context.Context) error {
 			continue
 		}
 		if id != "" || text(row["comment"]) != "SB-GATEWAY startup fail-open" || text(row[".id"]) == "" {
-			return errors.New("planned Apply safety script is ambiguous or unowned")
+			return "", errors.New("planned Apply safety script is ambiguous or unowned")
 		}
 		id = text(row[".id"])
 	}
 	if id == "" {
-		return errors.New("planned Apply safety script is missing")
+		return "", errors.New("planned Apply safety script is missing")
 	}
-	_, err = client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": id})
-	return err
+	return id, nil
 }
 
 // WaitManagedDiversion prevents Apply from claiming success while the RouterOS
@@ -375,7 +401,7 @@ func (client *Client) EnforceStartupTrafficSafety(ctx context.Context) (bool, er
 	if _, err := client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": config.item.id}); err != nil {
 		return false, fmt.Errorf("load traffic-ready watchdog config: %w", err)
 	}
-	if _, err := client.requestAction(ctx, http.MethodPost, "/rest/system/script/run", map[string]any{".id": failOpen.item.id}); err != nil {
+	if err := client.EnterPlannedApplyFailOpen(ctx); err != nil {
 		return false, fmt.Errorf("enter startup fail-open: %w", err)
 	}
 	return migrated, nil
@@ -632,7 +658,12 @@ func (client *Client) requestValueWithHTTP(ctx context.Context, requester *http.
 		return nil, errors.New("RouterOS REST response exceeds 4 MiB")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, HTTPError{StatusCode: response.StatusCode}
+		var failure struct {
+			Detail string `json:"detail"`
+		}
+		interrupted := response.StatusCode == http.StatusBadRequest &&
+			json.Unmarshal(responseBody, &failure) == nil && failure.Detail == "interrupted"
+		return nil, HTTPError{StatusCode: response.StatusCode, CommandInterrupted: interrupted}
 	}
 	if len(bytes.TrimSpace(responseBody)) == 0 {
 		return nil, nil
