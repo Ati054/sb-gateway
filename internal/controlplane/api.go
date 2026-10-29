@@ -107,7 +107,7 @@ type Server struct {
 	checkPersistentMounts     func() (bool, []string)
 	runtime                   runtimeApplier
 	applyRouterOS             routerOSApplyFunc
-	waitApplyTraffic          func(context.Context, map[string]any) error
+	waitApplyTraffic          func(context.Context, map[string]any, time.Time) error
 	fetchCDNFeed              cdnfeed.Fetcher
 	syncCDNFeed               cdnSourceSync
 

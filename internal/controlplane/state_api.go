@@ -211,10 +211,10 @@ func plannedUnchangedReadiness(operation map[string]any, liveApply bool) bool {
 		previousSource != "" && previousSource == text(operation["target_routeros_source"])
 }
 
-// Only the live native publication callback can set this flag, after proving
-// that urltest-pool is the sole changed artifact. Keep the existing traffic
-// lease while a new eligible leaf is prepared; stale journals after a crash
-// and every routing/process restart still take the normal recovery path.
+// Only the live native publication callback can set this flag for a pool
+// change without a core restart. Companion service edits use their own guard;
+// completion still requires fresh traffic proof. A recovered journal never
+// inherits the live allowance while a new eligible leaf is prepared.
 func plannedHotPolicyReadiness(operation map[string]any, liveApply bool) bool {
 	state := operation["state"]
 	previousSource := text(operation["previous_routeros_source"])
@@ -352,6 +352,10 @@ func (server *Server) statusPayload() (map[string]any, error) {
 }
 
 func (server *Server) statusPayloadWithSelectors(selector any) (map[string]any, error) {
+	applyOperation, err := server.repository.auxiliary("apply-operation")
+	if err != nil {
+		return nil, err
+	}
 	active, err := server.repository.activeRevision()
 	if err != nil {
 		return nil, err
@@ -398,8 +402,9 @@ func (server *Server) statusPayloadWithSelectors(selector any) (map[string]any, 
 		"state": state, "container": valueOrEmpty(container), "watchdog": valueOrEmpty(watchdog),
 		"routing":         map[string]any{"local_on_outage": "wan-direct", "remote_on_outage": "drop"},
 		"active_revision": nullableString(active), "last_apply": publicApplyMetadata(metadata), "selector_health": selector,
-		"cdn_feeds": cdnStatus,
-		"acme":      acmeStatus,
+		"apply_pending": applyOperation["pending"] == true,
+		"cdn_feeds":     cdnStatus,
+		"acme":          acmeStatus,
 	}, nil
 }
 

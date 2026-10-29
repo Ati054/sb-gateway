@@ -69,7 +69,7 @@ export const englishText: Record<string, string> = {
   "Добавить правило": "Add rule",
   "Перед применением: {count} правил; порядок сверху вниз. IP- и портовые правила не перехватывают все DNS-запросы.": "Before Apply: {count} rules, evaluated top to bottom. IP and port rules do not intercept every DNS query.",
   "Новая конфигурация отклонена, предыдущая конфигурация восстановлена.": "The new configuration was rejected and the previous configuration was restored.",
-  "Применение не завершено. Аварийный откат RouterOS остаётся активным, восстановление ожидается. Проверьте статус перед повтором.": "Apply did not complete. The RouterOS rollback guard remains active and recovery is pending. Check status before retrying.",
+  "Применение ещё не подтверждено. Ожидается восстановление. Проверьте статус перед повтором.": "Apply is not confirmed yet. Recovery is pending. Check status before retrying.",
   "Итог применения не подтверждён. Перед повтором проверьте состояние RouterOS и контейнера.": "The final Apply state is unconfirmed. Check RouterOS and container status before retrying.",
   "TLS-профиль публичного входа": "Public inbound TLS profile",
   "TLS-профиль клиентской подписки": "Client subscription TLS profile",

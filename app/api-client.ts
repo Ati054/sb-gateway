@@ -100,6 +100,7 @@ export async function apiRequest<T>(
     timeoutMs?: number;
     retries?: number;
     retryDelayMs?: number;
+    apiRoot?: "/api/v1" | "/api";
   } = {},
 ): Promise<T> {
   const method = (init.method ?? "GET").toUpperCase();
@@ -107,6 +108,7 @@ export async function apiRequest<T>(
     timeoutMs = 30_000,
     retries = 0,
     retryDelayMs = 400,
+    apiRoot = API_PREFIX,
     ...requestInit
   } = init;
   const headers = new Headers(requestInit.headers);
@@ -127,7 +129,7 @@ export async function apiRequest<T>(
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${API_PREFIX}${path}`, {
+      const response = await fetch(`${apiRoot}${path}`, {
         ...requestInit,
         method,
         headers,
@@ -286,6 +288,10 @@ export function getClientTelemetry<T = JsonObject>(): Promise<T> {
 
 export function getStatus<T = JsonObject>(): Promise<T> {
   return apiRequest<T>("/status");
+}
+
+export function getTrafficReadiness<T = JsonObject>(): Promise<T> {
+  return apiRequest<T>("/health/traffic-ready", { apiRoot: "/api", timeoutMs: 6_000 });
 }
 
 export function getSelectorStatus<T = JsonObject>(): Promise<T> {

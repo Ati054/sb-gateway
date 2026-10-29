@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/routeros"
@@ -64,7 +65,7 @@ func applyFailureResponse(err error) (string, string) {
 	case applyRolledBack:
 		return "apply_rolled_back", "The candidate was rejected and the previous configuration was restored."
 	case applyRecoveryPending:
-		return "apply_recovery_pending", "Apply did not start or complete because a RouterOS rollback guard remains armed. Check status before retrying."
+		return "apply_recovery_pending", "Apply recovery has not completed. Check runtime and traffic status before retrying."
 	default:
 		return "apply_state_unconfirmed", "Apply ended without a confirmed final state. Check RouterOS and container status before retrying."
 	}
@@ -276,7 +277,9 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	var stateCommitted bool
 	runtimeCleanupPending := false
 	runtimeCommitPending := false
+	var runtimeCommitErr error
 	runtimeReady := false
+	var trafficProofAfter time.Time
 	activate := func(operationContext context.Context) error {
 		if runtimeReady {
 			return nil
@@ -312,6 +315,9 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			receipt, activateErr = server.runtime.activate(operationContext, candidate)
 		}
 		activated = len(receipt.Changed()) > 0
+		if activateErr == nil && len(affectedPrograms(receipt.Changed())) > 0 {
+			trafficProofAfter = server.now()
+		}
 		if activateErr == nil {
 			activateErr = server.markApplyRecoveryState("runtime_activated")
 		}
@@ -360,6 +366,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		if err := server.runtime.commit(candidate); err != nil {
 			runtimeCleanupPending = true
 			runtimeCommitPending = true
+			runtimeCommitErr = err
 		}
 		return nil
 	}
@@ -381,22 +388,6 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			server.finishFailedApplyRecovery(failure)
 			return nil, http.StatusConflict, failure
 		}
-		if server.waitApplyTraffic != nil && runtimeReady && stateCommitted && !runtimeCommitPending {
-			// The guarded RouterOS transaction has finished. Allow its verified
-			// committed runtime to renew the lease and recover without outage
-			// hysteresis, then prove the owned gate before reporting success.
-			server.plannedRuntimeApply.Store(true)
-			gateContext, cancelGate := context.WithTimeout(ctx, 100*time.Second)
-			gateErr := server.waitApplyTraffic(gateContext, config)
-			cancelGate()
-			if gateErr != nil {
-				// The active commit is authoritative; do not roll back just Xray
-				// or claim that the committed RouterOS transaction was undone.
-				failure := &applyFailureError{state: applyRecoveryPending, err: gateErr}
-				server.finishFailedApplyRecovery(failure)
-				return nil, http.StatusConflict, failure
-			}
-		}
 	} else {
 		if err := activate(ctx); err != nil {
 			failure := classifyApplyFailure(err, rollbackRuntime())
@@ -409,6 +400,22 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			return nil, http.StatusInternalServerError, failure
 		}
 	}
+	if server.waitApplyTraffic != nil && runtimeReady && stateCommitted && !runtimeCommitPending && (routerOSChanged || activated) {
+		// Any guarded runtime edit can withdraw the lease, even a graceful
+		// Nginx reload. After commit, allow fresh local proof and verify the
+		// owned RouterOS gate before reporting successful traffic restoration.
+		server.plannedRuntimeApply.Store(true)
+		gateContext, cancelGate := context.WithTimeout(ctx, 100*time.Second)
+		gateErr := server.waitApplyTraffic(gateContext, config, trafficProofAfter)
+		cancelGate()
+		if gateErr != nil {
+			// The active commit is authoritative; do not roll back just Xray
+			// or claim that the committed RouterOS transaction was undone.
+			failure := &applyFailureError{state: applyRecoveryPending, err: gateErr}
+			server.finishFailedApplyRecovery(failure)
+			return nil, http.StatusConflict, failure
+		}
+	}
 	if _, err := server.repository.saveDraft(config); err != nil {
 		runtimeCleanupPending = true
 	}
@@ -417,6 +424,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		if err := server.markApplyRecoveryState("recovery_pending"); err != nil {
 			log.Printf("control-plane: runtime LKG recovery journal update failed: %v", err)
 		}
+		return nil, http.StatusConflict, &applyFailureError{state: applyRecoveryPending, err: runtimeCommitErr}
 	} else if err := server.clearApplyRecovery(); err != nil {
 		runtimeCleanupPending = true
 		log.Printf("control-plane: successful Apply journal cleanup pending: %v", err)
@@ -427,13 +435,39 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	return result, http.StatusOK, nil
 }
 
-func (server *Server) waitRouterOSApplyTraffic(ctx context.Context, config map[string]any) error {
+func (server *Server) waitRouterOSApplyTraffic(ctx context.Context, config map[string]any, notBefore time.Time) error {
+	if err := server.waitLocalApplyTraffic(ctx, config, notBefore); err != nil {
+		return err
+	}
 	client, _, err := server.newRouterOSRESTClient(config)
 	if err != nil {
 		return err
 	}
 	defer client.CloseIdleConnections()
 	return client.WaitManagedDiversion(ctx)
+}
+
+func (server *Server) waitLocalApplyTraffic(ctx context.Context, config map[string]any, notBefore time.Time) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		ready, _ := server.routerReadinessState(config)
+		selectors, err := server.repository.selectorReadiness()
+		_, pending := trafficReadyPolicies(config, selectors, server.trafficReadyAfter)
+		fresh := true
+		if !notBefore.IsZero() {
+			info, statErr := os.Stat(envOr("SB_ROUTER_READY_MARKER", "/run/sb-gateway/router-ready"))
+			fresh = statErr == nil && !info.ModTime().Before(notBefore)
+		}
+		if ready && fresh && err == nil && len(pending) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("local traffic readiness did not recover after Apply: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func firstApplyRollbackConfig(config map[string]any) map[string]any {

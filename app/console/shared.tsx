@@ -382,7 +382,7 @@ export function errorMessage(error: unknown, locale: Locale = currentUiLocale())
       error.code === "apply_rolled_back"
         ? "Новая конфигурация отклонена, предыдущая конфигурация восстановлена."
       : error.code === "apply_recovery_pending"
-        ? "Применение не завершено. Аварийный откат RouterOS остаётся активным, восстановление ожидается. Проверьте статус перед повтором."
+        ? "Применение ещё не подтверждено. Ожидается восстановление. Проверьте статус перед повтором."
       : error.code === "apply_state_unconfirmed"
         ? "Итог применения не подтверждён. Перед повтором проверьте состояние RouterOS и контейнера."
       : error.code === "storage_root_required"
