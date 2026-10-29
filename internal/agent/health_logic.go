@@ -573,7 +573,7 @@ func updateHistories(item *policyHealthState, candidates []string, measured map[
 		}
 		clear(previous[len(history):])
 		if evidence, ok := measured[candidate]; ok {
-			history = append(history, healthSample{At: float64(now.Unix()), OK: evidence.OK, DelayMS: evidence.DelayMS})
+			history = append(history, healthSample{At: float64(probeObservationTime(now, evidence).Unix()), OK: evidence.OK, DelayMS: evidence.DelayMS})
 			change.daily, change.period = true, true
 		}
 		if len(history) > 1440 {

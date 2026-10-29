@@ -37,6 +37,19 @@ type responsiveSelectorRuntime struct {
 	currentPool     healthPool
 	signals         <-chan xrayFailureSignal
 	acceptSignal    func(xrayFailureSignal) bool
+	backgroundDone  <-chan struct{}
+}
+
+func (runtime *responsiveSelectorRuntime) backgroundJobComplete() bool {
+	if runtime.backgroundDone == nil {
+		return false
+	}
+	select {
+	case <-runtime.backgroundDone:
+		return true
+	default:
+		return false
+	}
 }
 
 func (runtime *responsiveSelectorRuntime) Reload() (healthPool, bool, error) {
@@ -211,6 +224,13 @@ func awaitProbeJobWithSignals(ctx context.Context, cadence time.Duration, check 
 			<-done
 			return probeJobResult{err: ctx.Err()}
 		case <-timer.C:
+			// A slow callback can outlive the worker. Do not let an already-ready
+			// timer start another network pass ahead of its completed result.
+			select {
+			case result := <-done:
+				return result
+			default:
+			}
 			if err := check(); err != nil {
 				cancel()
 				<-done
@@ -244,7 +264,12 @@ func (runtime *responsiveSelectorRuntime) run(operation func() probeJobResult) p
 		}
 		return runtime.check()
 	}
+	completed := make(chan struct{})
+	previous := runtime.backgroundDone
+	runtime.backgroundDone = completed
+	defer func() { runtime.backgroundDone = previous }()
 	result := awaitProbeJobWithSignals(runtime.ctx, time.Second, check, func(ctx context.Context) probeJobResult {
+		defer close(completed)
 		runtime.background.probeContext = ctx
 		if _, _, err := runtime.background.Reload(); err != nil {
 			return probeJobResult{err: err, abort: true}
@@ -439,6 +464,9 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 		workers.Wait()
 		close(done)
 	}()
+	previous := runtime.backgroundDone
+	runtime.backgroundDone = done
+	defer func() { runtime.backgroundDone = previous }()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var signals <-chan xrayFailureSignal
@@ -513,6 +541,11 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 				return measured
 			}
 		case <-ticker.C:
+			// Buffered evidence is ready to be consumed. A periodic callback
+			// must not repeatedly postpone it behind unrelated active checks.
+			if len(results) > 0 {
+				continue
+			}
 			if generationStamp(runtime.generationPaths) != stamp {
 				cancel()
 				<-done
@@ -591,6 +624,13 @@ func (controller *healthController) checkDuringProbe(now time.Time, pool healthP
 	dirty := false
 	var result error
 	for _, id := range ids {
+		if urgentRank(id) == 2 {
+			if worker, ok := controller.runtime.(interface{ backgroundJobComplete() bool }); ok && worker.backgroundJobComplete() {
+				// The main loop resumes due healthy policies after consuming the
+				// finished batch. Forced and pending-failure proofs still run first.
+				break
+			}
+		}
 		item := controller.state[id]
 		if item == nil || item.Selected == "" || item.Selected == "block" {
 			continue

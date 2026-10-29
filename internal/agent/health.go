@@ -653,6 +653,13 @@ func (controller *healthController) Tick(now time.Time) error {
 			delete(controller.forceLiveness, policyID)
 			delete(controller.probeBudget.DeferredPolicies, policyID)
 			err = controller.tickPolicy(now, policyID, contract, item)
+			if err == nil {
+				// A preceding policy or callback may have spent most of a cycle
+				// waiting. Schedule from the completed observations, not its start.
+				if observed, parseErr := time.Parse(time.RFC3339, item.CheckedAt); parseErr == nil && observed.After(now) {
+					now = observed
+				}
+			}
 			if !errors.Is(err, errHealthYield) {
 				controller.regularNext[policyID] = now.Add(controller.remainingProbeInterval(now, contract, item))
 			}
@@ -1124,11 +1131,19 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	}
 	controller.warmStarted[policyID] = true
 
+	// Each worker dates its own evidence. Batch waiting must neither age a new
+	// observation before it completes nor refresh a shared, older observation.
+	for _, evidence := range measured {
+		if evidence.ObservedAt.After(now) {
+			now = evidence.ObservedAt
+		}
+	}
 	// Commit timestamps with the batch results, never for an interrupted batch.
 	for candidate, evidence := range measured {
-		item.LastProbeAt[candidate] = float64(now.Unix())
+		observed := float64(probeObservationTime(now, evidence).Unix())
+		item.LastProbeAt[candidate] = observed
 		if evidence.OK {
-			item.LastGoodAt[candidate] = float64(now.Unix())
+			item.LastGoodAt[candidate] = observed
 		}
 	}
 
@@ -1147,7 +1162,7 @@ func (controller *healthController) tickPolicy(now time.Time, policyID string, c
 	for _, candidate := range candidates {
 		samples := append([]healthSample(nil), item.Samples[candidate]...)
 		if evidence, ok := measured[candidate]; ok && (!evidence.OK || evidence.PrimaryQualityFailed || evidence.DelayMS != nil && !evidence.QualityUnmeasured) {
-			samples = append(samples, healthSample{At: float64(now.Unix()), ObservedAt: qualityObservationAt(now, evidence), OK: evidence.OK, DelayMS: evidence.DelayMS})
+			samples = append(samples, healthSample{At: float64(probeObservationTime(now, evidence).Unix()), ObservedAt: qualityObservationAt(now, evidence), OK: evidence.OK, DelayMS: evidence.DelayMS})
 		}
 		if contract.Mode == "best" {
 			samples = recentQualitySamples(now, samples, p)
