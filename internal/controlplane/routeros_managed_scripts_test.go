@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	routerosassets "github.com/sb-gateway/sb-gateway/routeros"
@@ -25,7 +26,12 @@ func TestManagedScriptSyncMigratesWithoutBrowserAndRecoversJournal(t *testing.T)
 			schedules := []map[string]any{}
 			container := map[string]any{".id": "*A", "comment": "SB-GATEWAY container", "root-dir": "/usb1/sb-gateway/root-1.7.2", "start-on-boot": "true"}
 			armed := 0
+			var failSync atomic.Bool
 			api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if failSync.Load() {
+					http.Error(w, "temporary API failure", http.StatusServiceUnavailable)
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/rest/container":
@@ -119,6 +125,59 @@ func TestManagedScriptSyncMigratesWithoutBrowserAndRecoversJournal(t *testing.T)
 			if err != nil || journal["pending"] != false || armed != 1 {
 				t.Fatalf("journal stuck or restarted twice: %#v armed=%d err=%v", journal, armed, err)
 			}
+			server.wakeRouterOSManagedScripts()
+			select {
+			case <-server.routerOSScriptWake:
+				t.Fatal("unchanged successful script inputs unnecessarily woke the RouterOS reconciler")
+			default:
+			}
+			// Periodic checks must still access RouterOS with identical inputs.
+			failSync.Store(true)
+			if err := server.syncRouterOSManagedScripts(context.Background()); err == nil {
+				t.Fatal("periodic reconciliation incorrectly reused the foreground wake cache")
+			}
+			failSync.Store(false)
+			server.wakeRouterOSManagedScripts()
+			select {
+			case <-server.routerOSScriptWake:
+			default:
+				t.Fatal("failed reconciliation suppressed a retry wake")
+			}
 		})
+	}
+}
+
+func TestManagedScriptInputSignatureTracksOnlyRelevantSettings(t *testing.T) {
+	server := newTestServer(t)
+	bootstrapSession(t, server)
+	config, err := server.getDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["transports"] = []any{}
+	config["ingress"] = map[string]any{
+		"subscription_hostname": "sub.example.test", "subscription_origin_server_name": "origin.example.test",
+		"subscription_endpoint_mode": "separate", "subscription_cdn_provider": "cloudflare",
+		"subscription_origin_protection_mode": "auto-cidr", "subscription_listen_port": 18443,
+	}
+	original, err := routerOSManagedScriptInputSignature(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["system"].(map[string]any)["name"] = "Renamed gateway"
+	config["ingress"].(map[string]any)["subscription_origin_server_name"] = "new-origin.example.test"
+	metadata, err := routerOSManagedScriptInputSignature(config)
+	if err != nil || metadata != original {
+		t.Fatalf("unrelated metadata or Nginx settings changed script identity: err=%v", err)
+	}
+	config["ingress"].(map[string]any)["subscription_origin_protection_mode"] = "secret-header"
+	protection, err := routerOSManagedScriptInputSignature(config)
+	if err != nil || protection == original {
+		t.Fatalf("changed updater requirement kept old script identity: err=%v", err)
+	}
+	config["routeros"].(map[string]any)["base_url"] = "https://other-router.example.test"
+	target, err := routerOSManagedScriptInputSignature(config)
+	if err != nil || target == protection {
+		t.Fatalf("changed RouterOS target kept old script identity: err=%v", err)
 	}
 }

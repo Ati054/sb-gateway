@@ -95,6 +95,7 @@ type Server struct {
 	subscriptionWake          chan struct{}
 	subscriptionRuntimeIdle   subscriptionRuntimeIdle
 	routerOSScriptWake        chan struct{}
+	routerOSScriptInputs      atomic.Value
 	xrayLoggingWake           chan struct{}
 	syncSubscriptionEndpoints func(context.Context, map[string]any, []string, bool) error
 	servicePackMu             sync.Mutex

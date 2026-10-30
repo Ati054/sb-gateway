@@ -42,10 +42,32 @@ func (server *Server) runRouterOSManagedScriptsScheduler(ctx context.Context) {
 }
 
 func (server *Server) wakeRouterOSManagedScripts() {
+	if previous, _ := server.routerOSScriptInputs.Load().(string); previous != "" {
+		config, err := server.repository.loadActive()
+		if err == nil {
+			current, inputErr := routerOSManagedScriptInputSignature(config)
+			if inputErr == nil && current == previous {
+				return
+			}
+		}
+	}
 	select {
 	case server.routerOSScriptWake <- struct{}{}:
 	default:
 	}
+}
+
+// Only the RouterOS target and the optional updater requirement affect this
+// reconciler. Successful Apply must not enqueue the same network work again.
+// Periodic checks call sync directly, so external drift is still repaired.
+func routerOSManagedScriptInputSignature(config map[string]any) (string, error) {
+	required, err := runtimeconfig.RequiresRouterOSCloudflareUpdater(config)
+	if err != nil {
+		return "", err
+	}
+	return revisionFor(map[string]any{
+		"routeros": config["routeros"], "cloudflare_required": required,
+	})
 }
 
 func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
@@ -57,6 +79,9 @@ func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
 		return errRouterOSScriptSyncDeferred
 	}
 	defer server.configMu.Unlock()
+	// A failed or deferred check must not suppress a later foreground wake.
+	// This cache is intentionally process-local and is empty after an update.
+	server.routerOSScriptInputs.Store("")
 	revision, err := server.repository.activeRevision()
 	if err != nil {
 		return err
@@ -83,6 +108,10 @@ func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
 		return errRouterOSScriptSyncDeferred
 	}
 	required, err := runtimeconfig.RequiresRouterOSCloudflareUpdater(config)
+	if err != nil {
+		return err
+	}
+	inputs, err := routerOSManagedScriptInputSignature(config)
 	if err != nil {
 		return err
 	}
@@ -133,5 +162,6 @@ func (server *Server) syncRouterOSManagedScripts(ctx context.Context) error {
 	if pending {
 		return errRouterOSScriptSyncDeferred
 	}
+	server.routerOSScriptInputs.Store(inputs)
 	return nil
 }
