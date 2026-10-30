@@ -314,7 +314,7 @@ func (server *Server) imageUpdateTrafficAdmitted(ctx context.Context, client *ro
 	if err != nil {
 		return false
 	}
-	if _, pending := trafficReadyPolicies(active, selector, server.trafficReadyAfter); len(pending) > 0 {
+	if _, pending, scopeErr := server.scopedTrafficReadyPolicies(active, selector, server.trafficReadyAfter); scopeErr != nil || len(pending) > 0 {
 		return false
 	}
 	rows, err := client.List(ctx, "/rest/ip/firewall/mangle?.proplist=.id,comment,disabled")

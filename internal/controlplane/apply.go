@@ -461,13 +461,13 @@ func (server *Server) waitLocalApplyTraffic(ctx context.Context, config map[stri
 	for {
 		ready, _ := server.routerReadinessState(config)
 		selectors, err := server.repository.selectorReadiness()
-		_, pending := trafficReadyPolicies(config, selectors, server.trafficReadyAfter)
+		_, pending, scopeErr := server.scopedTrafficReadyPolicies(config, selectors, server.trafficReadyAfter)
 		fresh := true
 		if !notBefore.IsZero() {
 			info, statErr := os.Stat(envOr("SB_ROUTER_READY_MARKER", "/run/sb-gateway/router-ready"))
 			fresh = statErr == nil && !info.ModTime().Before(notBefore)
 		}
-		if ready && fresh && err == nil && len(pending) == 0 {
+		if ready && fresh && err == nil && scopeErr == nil && len(pending) == 0 {
 			return nil
 		}
 		select {
