@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/applyguard"
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
 
@@ -41,6 +42,7 @@ func TestNativeNginxPublicationKeepsHealthyForwarding(t *testing.T) {
 			}
 			root := t.TempDir()
 			marker := filepath.Join(root, "router-ready")
+			guard := filepath.Join(root, "apply-in-progress")
 			t.Setenv("SB_ROUTER_READY_MARKER", marker)
 			leaseTime := server.now()
 			if test.condition == "expired" {
@@ -79,6 +81,13 @@ func TestNativeNginxPublicationKeepsHealthyForwarding(t *testing.T) {
 			observed := 0
 			controller := &recordingRuntimeController{observe: func() {
 				observed++
+				// The independent readiness publisher withdraws its lease while
+				// a guarded dataplane restart is in progress.
+				if applyguard.Active(guard, server.now()) {
+					if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+				}
 				response := performRequest(t, server, http.MethodGet, "/api/health/traffic-ready", nil, nil)
 				want := http.StatusServiceUnavailable
 				if test.wantReady {
@@ -88,7 +97,7 @@ func TestNativeNginxPublicationKeepsHealthyForwarding(t *testing.T) {
 					t.Fatalf("forwarding health during publication: %d, want %d: %s", response.Code, want, response.Body.String())
 				}
 			}}
-			runtime := &nativeRuntime{store: store, controller: controller,
+			runtime := &nativeRuntime{store: store, controller: controller, options: RuntimeOptions{ApplyGuardFile: guard},
 				validate: func(context.Context, runtimeconfig.RuntimeCandidate, []string) error { return nil }}
 			if _, err := runtime.activateWithHooks(context.Background(), candidate, nil, nil, server.prepareNativePublication); err != nil {
 				t.Fatal(err)

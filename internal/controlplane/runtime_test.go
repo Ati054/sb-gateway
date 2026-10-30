@@ -70,12 +70,8 @@ func TestNativeRuntimeValidatesAndRestartsOnlyChangedPrograms(t *testing.T) {
 	guardPath := filepath.Join(root, "run", "apply-in-progress")
 	guardObservations := 0
 	controller := &recordingRuntimeController{observe: func() {
-		body, readErr := os.ReadFile(guardPath)
-		if readErr != nil {
-			t.Fatalf("runtime operation has no watchdog guard: %v", readErr)
-		}
-		if fields := strings.Fields(string(body)); len(fields) != 3 {
-			t.Fatalf("invalid watchdog guard %q", body)
+		if _, err := os.Stat(guardPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("graceful Nginx operation armed a dataplane-restart guard: %v", err)
 		}
 		guardObservations++
 	}}
@@ -109,8 +105,12 @@ func TestNativeRuntimeValidatesAndRestartsOnlyChangedPrograms(t *testing.T) {
 	if len(controller.restarts) != 2 || len(controller.probes) != 2 {
 		t.Fatalf("rollback did not reconcile process: %#v %#v", controller.restarts, controller.probes)
 	}
-	if guardObservations != 4 {
-		t.Fatalf("watchdog guard observations = %d, want 4", guardObservations)
+	if err := runtime.restartChangedWithoutXray(context.Background(), []string{"nginx.conf"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(controller.restarts) != 3 || len(controller.probes) != 3 || guardObservations != 6 {
+		t.Fatalf("graceful apply/rollback/subscription reload: restarts=%v probes=%v observations=%d",
+			controller.restarts, controller.probes, guardObservations)
 	}
 }
 
@@ -125,15 +125,15 @@ func TestArtifactRevisionIsStableAndContentAddressed(t *testing.T) {
 
 func TestNativeRuntimeDoesNotPublishIfGuardCannotBeCreated(t *testing.T) {
 	root := t.TempDir()
-	live := filepath.Join(root, "nginx.conf")
+	live := filepath.Join(root, "xray.json")
 	if err := os.WriteFile(live, []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{"nginx.conf": live})
+	store, err := runtimeconfig.NewCandidateStore(filepath.Join(root, "state"), map[string]string{"xray.json": live})
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := store.Prepare(strings.Repeat("e", 64), map[string][]byte{"nginx.conf": []byte("new\n")})
+	candidate, err := store.Prepare(strings.Repeat("e", 64), map[string][]byte{"xray.json": []byte("new\n")})
 	if err != nil {
 		t.Fatal(err)
 	}
