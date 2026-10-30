@@ -161,10 +161,10 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 }
 
 func (server *Server) applyConfiguration(ctx context.Context, config map[string]any, actor string) (map[string]any, int, error) {
-	defer server.plannedRuntimeApply.Store(false)
-	defer server.plannedHotPolicyApply.Store(false)
-	defer server.plannedUnchangedApply.Store(false)
-	defer server.plannedNginxReload.Store(false)
+	defer server.storeApplyReadiness(&server.plannedRuntimeApply, false)
+	defer server.storeApplyReadiness(&server.plannedHotPolicyApply, false)
+	defer server.storeApplyReadiness(&server.plannedUnchangedApply, false)
+	defer server.storeApplyReadiness(&server.plannedNginxReload, false)
 	normalizeConfigCompatibility(config)
 	check := validateCurrentConfig(config)
 	if !check.Valid {
@@ -262,7 +262,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	// this live-only allowance before changing any artifact; stale journals never
 	// inherit it after a crash. An unchanged publication may keep it through commit.
 	_, nativeApply := server.runtime.(*nativeRuntime)
-	server.plannedUnchangedApply.Store(nativeApply && !routerOSChanged)
+	server.storeApplyReadiness(&server.plannedUnchangedApply, nativeApply && !routerOSChanged)
 	if err := server.beginApplyRecovery(activeRevision, recoveryRevision, stagedRevision, previousRouterOS, desiredRouterOS, candidate.Revision); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -302,11 +302,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 				recoveryRouterOS = client
 				return nil
 			}, func(context.Context) error {
-				if err := server.markApplyRecoveryState("runtime_hot_activating"); err != nil {
-					return err
-				}
-				server.plannedHotPolicyApply.Store(true)
-				return nil
+				return server.prepareHotPolicyReadiness()
 			}, server.prepareNativePublication)
 		} else {
 			receipt, activateErr = server.runtime.activate(operationContext, candidate)
@@ -319,7 +315,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			activateErr = server.markApplyRecoveryState("runtime_activated")
 		}
 		if activateErr == nil && recoveryRouterOS != nil {
-			server.plannedRuntimeApply.Store(true)
+			server.storeApplyReadiness(&server.plannedRuntimeApply, true)
 			gateContext, cancelGate := context.WithTimeout(operationContext, 100*time.Second)
 			activateErr = recoveryRouterOS.WaitManagedDiversion(gateContext)
 			cancelGate()
@@ -398,10 +394,9 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		}
 	}
 	if server.waitApplyTraffic != nil && runtimeReady && stateCommitted && !runtimeCommitPending && (routerOSChanged || activated) {
-		// Any guarded runtime edit can withdraw the lease, even a graceful
-		// Nginx reload. After commit, allow fresh local proof and verify the
-		// owned RouterOS gate before reporting successful traffic restoration.
-		server.plannedRuntimeApply.Store(true)
+		// After service publication and commit, require fresh local proof and
+		// verify the owned RouterOS gate before reporting traffic restoration.
+		server.storeApplyReadiness(&server.plannedRuntimeApply, true)
 		gateContext, cancelGate := context.WithTimeout(ctx, 100*time.Second)
 		gateErr := server.waitApplyTraffic(gateContext, config, trafficProofAfter)
 		cancelGate()
@@ -434,6 +429,12 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 
 func (server *Server) prepareNativePublication(changed []string) {
 	if len(changed) > 0 {
+		if hotPolicyWithoutCoreRestart(changed) {
+			// The hot-policy hook hands preparation over before publication.
+			return
+		}
+		server.applyReadinessMu.Lock()
+		defer server.applyReadinessMu.Unlock()
 		// A graceful Nginx-only reload leaves managed forwarding intact. Hand
 		// over the live allowance before revoking preparation readiness so a
 		// concurrent health poll cannot trigger a needless WAN diversion.

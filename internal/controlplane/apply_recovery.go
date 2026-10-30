@@ -70,7 +70,7 @@ func (server *Server) pendingApplyRecovery() (map[string]any, error) {
 // active commit point, so its journal names a separately persisted safe
 // installation generation that is restored without publishing active.json.
 func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
-	defer server.plannedRuntimeApply.Store(false)
+	defer server.storeApplyReadiness(&server.plannedRuntimeApply, false)
 	operation, err := server.pendingApplyRecovery()
 	if err != nil || operation == nil {
 		return false, err
@@ -198,7 +198,7 @@ func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
 		if err := server.markApplyRecoveryState("active_committed"); err != nil {
 			return true, err
 		}
-		server.plannedRuntimeApply.Store(true)
+		server.storeApplyReadiness(&server.plannedRuntimeApply, true)
 		proofContext, cancel := context.WithTimeout(ctx, 100*time.Second)
 		err := server.waitApplyTraffic(proofContext, desiredConfig, trafficProofAfter)
 		cancel()
