@@ -162,8 +162,7 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 		ready = active != nil && age <= ttl
 	}
 	mountsWritable, blockedMounts := server.checkPersistentMounts()
-	applyOperation, _ := server.repository.auxiliary("apply-operation")
-	applyRecoveryPending := applyOperation["pending"] == true && !server.liveApplyReadinessAllowed(applyOperation)
+	applyRecoveryPending, plannedRuntimeReady := server.applyReadinessSnapshot(nil)
 	ready = ready && mountsWritable && !applyRecoveryPending
 	payload := map[string]any{
 		"ready": ready, "configured": active != nil,
@@ -171,7 +170,7 @@ func (server *Server) routerReadinessState(active map[string]any) (bool, map[str
 		"outage_policy_active":       outagePolicy(active),
 		"persistent_mounts_writable": mountsWritable,
 		"apply_recovery_pending":     applyRecoveryPending,
-		"planned_runtime_ready":      ready && plannedRuntimeActivationReady(applyOperation, server.plannedRuntimeApply.Load()),
+		"planned_runtime_ready":      ready && plannedRuntimeReady,
 	}
 	if len(blockedMounts) != 0 {
 		payload["blocked_persistent_mounts"] = blockedMounts

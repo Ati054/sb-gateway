@@ -72,6 +72,7 @@ type Server struct {
 	plannedHotPolicyApply     atomic.Bool
 	plannedUnchangedApply     atomic.Bool
 	plannedNginxReload        atomic.Bool
+	applyReadinessMu          sync.RWMutex
 	mu                        sync.RWMutex
 	passwordMu                sync.Mutex
 	mutationMu                sync.Mutex
