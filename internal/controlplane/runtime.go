@@ -113,6 +113,7 @@ type nativeRuntime struct {
 	validate                   func(context.Context, runtimeconfig.RuntimeCandidate, []string) error
 	nginxCommand               func(context.Context, ...string) error
 	subscriptionRestartPending atomic.Bool
+	selectorScope              localSelectorScopeCache
 }
 
 func newNativeRuntime(options RuntimeOptions, secrets *secretStore, controller RuntimeController) (*nativeRuntime, error) {

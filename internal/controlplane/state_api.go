@@ -224,8 +224,9 @@ func plannedHotPolicyReadiness(operation map[string]any, liveApply bool) bool {
 
 // trafficReadiness is deliberately stricter than the image probation health
 // endpoint. A new container may be healthy enough to keep while its selected
-// exits are still being restored. Every local policy needs a fresh confirmed
-// selector. A confirmed blackhole is a policy outage, not a container outage:
+// exits are still being restored. Every local health-managed policy needs a
+// fresh confirmed selector; static direct and empty routes have no selector.
+// A confirmed blackhole is a policy outage, not a container outage:
 // keep unrelated policies active and enforce that policy's fail-closed route.
 func (server *Server) trafficReadiness(response http.ResponseWriter, request *http.Request) {
 	active, err := server.repository.loadActive()
@@ -241,7 +242,11 @@ func (server *Server) trafficReadiness(response http.ResponseWriter, request *ht
 		server.internalStateError(response, request, err)
 		return
 	}
-	required, pending := trafficReadyPolicies(active, selector, server.trafficReadyAfter)
+	required, pending, err := server.scopedTrafficReadyPolicies(active, selector, server.trafficReadyAfter)
+	if err != nil {
+		server.internalStateError(response, request, err)
+		return
+	}
 	ready := baseReady && len(pending) == 0
 	payload["planned_runtime_ready"] = ready && payload["planned_runtime_ready"] == true
 	payload["ready"] = ready
@@ -257,6 +262,10 @@ func (server *Server) trafficReadiness(response http.ResponseWriter, request *ht
 }
 
 func trafficReadyPolicies(active, selector map[string]any, notBefore time.Time) ([]string, []string) {
+	return trafficReadyPoliciesInScope(active, selector, notBefore, nil)
+}
+
+func trafficReadyPoliciesInScope(active, selector map[string]any, notBefore time.Time, scope map[string]bool) ([]string, []string) {
 	requiredSet := make(map[string]bool)
 	for _, client := range objects(active["local_clients"]) {
 		if !boolDefault(client, "enabled", true) {
@@ -265,6 +274,9 @@ func trafficReadyPolicies(active, selector map[string]any, notBefore time.Time) 
 		policyID := strings.TrimSpace(text(client["policy_id"]))
 		policy := enabledClientPolicy(active, policyID)
 		if policy == nil {
+			continue
+		}
+		if scope != nil && !scope[policyID] {
 			continue
 		}
 		requiredSet[policyID] = true
