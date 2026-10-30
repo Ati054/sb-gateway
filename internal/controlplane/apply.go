@@ -164,6 +164,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	defer server.plannedRuntimeApply.Store(false)
 	defer server.plannedHotPolicyApply.Store(false)
 	defer server.plannedUnchangedApply.Store(false)
+	defer server.plannedNginxReload.Store(false)
 	normalizeConfigCompatibility(config)
 	check := validateCurrentConfig(config)
 	if !check.Valid {
@@ -306,11 +307,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 				}
 				server.plannedHotPolicyApply.Store(true)
 				return nil
-			}, func(changed []string) {
-				if len(changed) > 0 {
-					server.plannedUnchangedApply.Store(false)
-				}
-			})
+			}, server.prepareNativePublication)
 		} else {
 			receipt, activateErr = server.runtime.activate(operationContext, candidate)
 		}
@@ -433,6 +430,16 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	result["routeros_guard_mode"] = guardMode
 	result["check"] = check.payload()
 	return result, http.StatusOK, nil
+}
+
+func (server *Server) prepareNativePublication(changed []string) {
+	if len(changed) > 0 {
+		// A graceful Nginx-only reload leaves managed forwarding intact. Hand
+		// over the live allowance before revoking preparation readiness so a
+		// concurrent health poll cannot trigger a needless WAN diversion.
+		server.plannedNginxReload.Store(len(changed) == 1 && changed[0] == "nginx.conf")
+		server.plannedUnchangedApply.Store(false)
+	}
 }
 
 func (server *Server) waitRouterOSApplyTraffic(ctx context.Context, config map[string]any, notBefore time.Time) error {
