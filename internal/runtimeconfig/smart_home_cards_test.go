@@ -41,7 +41,11 @@ func TestSmartHomeCardsRouteTrafficAndDNSTogether(t *testing.T) {
 			for _, placement := range []string{"policy", "client"} {
 				for _, target := range []string{"direct-wan", "other", "missing"} {
 					t.Run(card.id+"/"+mode+"/"+placement+"/"+target, func(t *testing.T) {
-						policy := map[string]any{"id": "route", "enabled": true, "mode": "urltest", "traffic_mode": mode, "torrent_direct": false}
+						policy := map[string]any{
+							"id": "route", "enabled": true, "mode": "best", "traffic_mode": mode, "torrent_direct": false,
+							"selection_order": []any{"group:fixture"},
+							"node_groups":     []any{map[string]any{"id": "fixture", "subscription_ids": []any{"fixture"}}},
+						}
 						client := map[string]any{"id": "device", "enabled": true, "policy_id": "route", "source_cidrs": []any{"192.168.88.10/32"}}
 						owner := policy
 						if placement == "client" {
@@ -53,12 +57,16 @@ func TestSmartHomeCardsRouteTrafficAndDNSTogether(t *testing.T) {
 							owner["service_routes"] = map[string]any{card.id: target}
 						}
 						config := map[string]any{
-							"dns":           map[string]any{"internal_server": "192.168.88.1", "direct_resolver": map[string]any{"provider": "yandex", "protocol": "doh"}, "vpn_resolver": map[string]any{"provider": "cloudflare", "protocol": "dot"}},
-							"policies":      []any{policy, map[string]any{"id": "other", "enabled": true, "mode": "priority", "torrent_direct": false}},
+							"dns": map[string]any{"internal_server": "192.168.88.1", "direct_resolver": map[string]any{"provider": "yandex", "protocol": "doh"}, "vpn_resolver": map[string]any{"provider": "cloudflare", "protocol": "dot"}},
+							"policies": []any{policy, map[string]any{
+								"id": "other", "enabled": true, "mode": "priority", "torrent_direct": false,
+								"selection_order": []any{"group:fixture"},
+								"node_groups":     []any{map[string]any{"id": "fixture", "subscription_ids": []any{"fixture"}}},
+							}},
 							"local_clients": []any{client},
 						}
 						selectable := map[string]struct{}{"route": {}, "other": {}}
-						source, err := BuildXrayRouteSource(config, nil, []map[string]any{{"tag": "route"}, {"tag": "other"}, {"tag": "direct-wan"}, {"tag": "block"}})
+						source, err := BuildXrayRouteSource(config, []map[string]any{{"id": "node", "subscription_id": "fixture"}}, []map[string]any{{"tag": "node"}, {"tag": "route"}, {"tag": "other"}, {"tag": "direct-wan"}, {"tag": "block"}})
 						if err != nil {
 							t.Fatal(err)
 						}

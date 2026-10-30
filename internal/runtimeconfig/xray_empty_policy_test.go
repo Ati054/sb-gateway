@@ -6,9 +6,11 @@ func TestEmptyCanonicalPolicyCannotReuseStableSelectorLeaf(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		selection []any
+		omitted   bool
 		node      map[string]any
 		want      string
 	}{
+		{name: "omitted-selection", omitted: true, node: map[string]any{"id": "node", "subscription_id": "source", "enabled": true}, want: "block"},
 		{name: "cleared-selection", selection: []any{}, node: map[string]any{"id": "node", "subscription_id": "source", "enabled": true}, want: "block"},
 		{name: "unmatched-group", selection: []any{"group:selected"}, want: "block"},
 		{name: "disabled-node", selection: []any{"group:selected"}, node: map[string]any{"id": "node", "subscription_id": "source", "enabled": false}, want: "block"},
@@ -23,6 +25,9 @@ func TestEmptyCanonicalPolicyCannotReuseStableSelectorLeaf(t *testing.T) {
 					"node_groups":     []any{map[string]any{"id": "selected", "name": "Selected", "subscription_ids": []any{"source"}}},
 				}},
 				"local_clients": []any{map[string]any{"id": "client", "enabled": true, "policy_id": "route", "source_kind": "lan", "source_cidrs": []any{"198.51.100.30/32"}}},
+			}
+			if tc.omitted {
+				delete(objectSlice(config["policies"])[0], "selection_order")
 			}
 			nodes := []map[string]any{}
 			if tc.node != nil {
