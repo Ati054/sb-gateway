@@ -27,6 +27,32 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 			available[tag] = struct{}{}
 		}
 	}
+	// Stable selectors retain the process inventory across eligibility edits.
+	// Their presence is not permission to reuse a previous leaf after the
+	// canonical selection becomes empty. Keep the physical selector available
+	// for a later hot update, but compile new VLESS traffic to block meanwhile.
+	selectable := make([]map[string]any, 0, len(nodes))
+	for _, node := range nodes {
+		if node["enabled"] == false || textValue(node["subscription_reserve_id"]) != "" {
+			continue
+		}
+		if _, exists := available[textValue(node["id"])]; exists {
+			selectable = append(selectable, node)
+		}
+	}
+	for _, policy := range enabledObjects(config["policies"]) {
+		if _, canonical := policy["selection_order"]; !canonical {
+			continue // Legacy source graphs do not carry canonical eligibility.
+		}
+		if len(policyCandidateGroups(policy, selectable)) != 0 {
+			continue
+		}
+		policyID := textValue(policy["id"])
+		delete(available, policyID)
+		for _, serviceID := range candidateServiceIDs(policy) {
+			delete(available, policyServiceSelectorTag(policyID, serviceID))
+		}
+	}
 	candidateCount := healthProbeInventoryCount(nodes)
 	rules := []map[string]any{
 		{"action": "sniff"},
