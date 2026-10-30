@@ -16,6 +16,8 @@ func TestBuildXrayRouteSourceBuildsOrderedManagedRoutes(t *testing.T) {
 		"networks":   []any{map[string]any{"id": "lan", "enabled": true, "kind": "internal", "cidrs": []any{"192.168.3.0/24"}}},
 		"policies": []any{map[string]any{
 			"id": "europe", "enabled": true, "mode": "priority", "traffic_mode": "vless_with_wan_exceptions",
+			"selection_order":       []any{"group:fixture"},
+			"node_groups":           []any{map[string]any{"id": "fixture", "subscription_ids": []any{"fixture"}}},
 			"candidate_service_ids": []any{"claude"}, "direct_services": []any{"torrent"},
 		}},
 		"remote_users": []any{map[string]any{
@@ -28,11 +30,12 @@ func TestBuildXrayRouteSourceBuildsOrderedManagedRoutes(t *testing.T) {
 	}
 	outbounds := []map[string]any{
 		{"tag": "direct-wan"}, {"tag": "block"}, {"tag": "subscription-update-egress"}, {"tag": "outbound-health-probe"},
+		{"tag": "domain-node"},
 		{"tag": "europe"}, {"tag": serviceSelector}, {"tag": "outbound-health-background"},
 		{"tag": "outbound-health-background-2"}, {"tag": "outbound-health-background-3"},
 	}
 	route, err := BuildXrayRouteSource(config, []map[string]any{
-		{"id": "domain-node", "server": "edge.example"}, {"id": "ip-node", "server": "203.0.113.7"},
+		{"id": "domain-node", "server": "edge.example", "subscription_id": "fixture"}, {"id": "ip-node", "server": "203.0.113.7"},
 		{"id": "third-node", "server": "reserve.example"},
 	}, outbounds)
 	if err != nil {
@@ -135,6 +138,8 @@ func TestBuildXrayRouteSourceCustomRulesPrecedeServicePacks(t *testing.T) {
 		"dns": map[string]any{},
 		"policies": []any{map[string]any{
 			"id": "route", "enabled": true, "traffic_mode": "vless_with_wan_exceptions",
+			"selection_order": []any{"group:fixture"},
+			"node_groups":     []any{map[string]any{"id": "fixture", "subscription_ids": []any{"fixture"}}},
 			"custom_routes": []any{
 				map[string]any{"kind": "domain", "value": "example.com", "target": "vless"},
 				map[string]any{"kind": "ip", "value": "203.0.113.42", "protocols": "http", "target": "wan"},
@@ -145,7 +150,7 @@ func TestBuildXrayRouteSourceCustomRulesPrecedeServicePacks(t *testing.T) {
 		}},
 		"local_clients": []any{map[string]any{"id": "pc", "enabled": true, "policy_id": "route", "source_cidrs": []any{"192.0.2.5/32"}}},
 	}
-	result, err := BuildXrayRouteSource(config, nil, []map[string]any{{"tag": "route"}, {"tag": "direct-wan"}, {"tag": "block"}})
+	result, err := BuildXrayRouteSource(config, []map[string]any{{"id": "node", "subscription_id": "fixture"}}, []map[string]any{{"tag": "node"}, {"tag": "route"}, {"tag": "direct-wan"}, {"tag": "block"}})
 	if err != nil {
 		t.Fatal(err)
 	}

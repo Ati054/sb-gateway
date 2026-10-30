@@ -41,9 +41,6 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 		}
 	}
 	for _, policy := range enabledObjects(config["policies"]) {
-		if _, canonical := policy["selection_order"]; !canonical {
-			continue // Legacy source graphs do not carry canonical eligibility.
-		}
 		if len(policyCandidateGroups(policy, selectable)) != 0 {
 			continue
 		}
