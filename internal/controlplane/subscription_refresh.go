@@ -44,6 +44,8 @@ type subscriptionRefreshChannel struct {
 
 type subscriptionCommitError struct{ err error }
 
+var errSubscriptionCommitBusy = errors.New("another configuration-changing operation is in progress")
+
 func (failure subscriptionCommitError) Error() string { return failure.err.Error() }
 func (failure subscriptionCommitError) Unwrap() error { return failure.err }
 
@@ -220,6 +222,11 @@ func (server *Server) refreshSubscription(response http.ResponseWriter, request 
 	}
 	result, err := server.refreshSubscriptionNow(request.Context(), subscription)
 	if err != nil {
+		if errors.Is(err, errSubscriptionCommitBusy) {
+			server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "busy"})
+			server.writeErrorResponse(response, request, http.StatusConflict, "state_mutation_in_progress", "Another configuration-changing operation is still in progress. Prior subscription nodes were preserved; retry after it completes.")
+			return
+		}
 		var commitFailure subscriptionCommitError
 		if errors.As(err, &commitFailure) {
 			server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "state_commit"})
@@ -302,13 +309,13 @@ func (server *Server) commitSubscriptionNodes(subscription map[string]any, body 
 	// inventory is a state mutation. Do not wait while holding subscriptionMu:
 	// a concurrent Apply/recovery owns mutationMu and must finish first.
 	if !server.mutationMu.TryLock() {
-		return nil, errors.New("another configuration-changing operation is in progress")
+		return nil, errSubscriptionCommitBusy
 	}
 	defer server.mutationMu.Unlock()
 	if conflict, err := server.stateMutationConflict(mutationSubscription); err != nil {
 		return nil, err
 	} else if conflict != "" {
-		return nil, errors.New("another configuration-changing operation is in progress")
+		return nil, errSubscriptionCommitBusy
 	}
 	server.configMu.Lock()
 	defer server.configMu.Unlock()
