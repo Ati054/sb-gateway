@@ -197,12 +197,12 @@ func plannedRuntimeActivationReady(operation map[string]any, liveApply bool) boo
 func (server *Server) liveApplyReadinessAllowed(operation map[string]any) bool {
 	return plannedRuntimeActivationReady(operation, server.plannedRuntimeApply.Load()) ||
 		plannedHotPolicyReadiness(operation, server.plannedHotPolicyApply.Load()) ||
-		plannedUnchangedReadiness(operation, server.plannedUnchangedApply.Load())
+		plannedUnchangedReadiness(operation, server.plannedUnchangedApply.Load() || server.plannedNginxReload.Load())
 }
 
-// The previous runtime remains usable during preparation. The native store
-// clears this allowance under its publication lock before any artifact changes.
-// Only a no-change receipt can retain it during commit; process restart loses it.
+// Preparation and a graceful Nginx-only reload preserve existing forwarding.
+// Native publication hands over their process-local allowances under its lock.
+// Normal lease and selector checks still apply; recovery inherits neither flag.
 func plannedUnchangedReadiness(operation map[string]any, liveApply bool) bool {
 	state := operation["state"]
 	previousSource := text(operation["previous_routeros_source"])
