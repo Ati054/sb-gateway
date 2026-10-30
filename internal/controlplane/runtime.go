@@ -246,7 +246,7 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 			var guardErr error
 			// Protect publication itself: new listener inventory must not be
 			// compared with the previous core before Restart is called.
-			releaseGuard, guardErr = runtime.beginApplyGuard()
+			releaseGuard, guardErr = runtime.beginProgramApplyGuard(runtime.restartOrder(changed))
 			if guardErr != nil {
 				releaseGuard = func() {}
 				return fmt.Errorf("create watchdog apply guard: %w", guardErr)
@@ -382,7 +382,7 @@ func (runtime *nativeRuntime) restartChangedWithoutXray(ctx context.Context, cha
 	if len(filtered) == 0 {
 		return nil
 	}
-	releaseGuard, err := runtime.beginApplyGuard()
+	releaseGuard, err := runtime.beginProgramApplyGuard(filtered)
 	if err != nil {
 		return err
 	}
@@ -621,7 +621,7 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 	defer func() { releaseGuard() }()
 	if len(runtime.restartOrder(receipt.Changed())) > 0 {
 		var guardErr error
-		releaseGuard, guardErr = runtime.beginApplyGuard()
+		releaseGuard, guardErr = runtime.beginProgramApplyGuard(runtime.restartOrder(receipt.Changed()))
 		if guardErr != nil {
 			releaseGuard = func() {}
 			return fmt.Errorf("create watchdog rollback guard: %w", guardErr)
@@ -657,6 +657,18 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 		return runtime.waitHotRuntime(ctx, runtime.options.XrayHealthPool, policyScope)
 	}
 	return nil
+}
+
+func (runtime *nativeRuntime) beginProgramApplyGuard(programs []string) (func(), error) {
+	// A graceful Nginx reload keeps the existing workers and forwarding live.
+	// Continue normal health checks instead of withdrawing their readiness
+	// lease with a dataplane-restart guard. Unknown programs stay guarded.
+	for _, program := range programs {
+		if program != "nginx" {
+			return runtime.beginApplyGuard()
+		}
+	}
+	return func() {}, nil
 }
 
 func (runtime *nativeRuntime) beginApplyGuard() (func(), error) {
