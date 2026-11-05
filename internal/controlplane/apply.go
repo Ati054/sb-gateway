@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/applytiming"
 	"github.com/sb-gateway/sb-gateway/internal/routeros"
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
@@ -160,11 +161,27 @@ func (server *Server) applyDraft(response http.ResponseWriter, request *http.Req
 	server.writeJSON(response, http.StatusOK, result)
 }
 
-func (server *Server) applyConfiguration(ctx context.Context, config map[string]any, actor string) (map[string]any, int, error) {
+func (server *Server) applyConfiguration(ctx context.Context, config map[string]any, actor string) (responseBody map[string]any, httpStatus int, applyErr error) {
+	requestID, _ := ctx.Value(requestIDKey{}).(string)
+	ctx, finishTiming := applytiming.Begin(ctx, requestID, func(body []byte) {
+		log.Printf("control-plane: apply-timing %s", body)
+	})
+	defer func() {
+		outcome := applytiming.Error
+		if applyErr == nil && httpStatus >= 200 && httpStatus < 300 {
+			outcome = applytiming.Success
+			if responseBody["operation"] == "unchanged" {
+				outcome = applytiming.Unchanged
+			}
+		}
+		finishTiming(outcome)
+	}()
 	defer server.storeApplyReadiness(&server.plannedRuntimeApply, false)
 	defer server.storeApplyReadiness(&server.plannedHotPolicyApply, false)
 	defer server.storeApplyReadiness(&server.plannedUnchangedApply, false)
 	defer server.storeApplyReadiness(&server.plannedNginxReload, false)
+	prepareDone := applytiming.Start(ctx, applytiming.Prepare)
+	defer prepareDone()
 	normalizeConfigCompatibility(config)
 	check := validateCurrentConfig(config)
 	if !check.Valid {
@@ -200,11 +217,18 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		return nil, http.StatusInternalServerError, err
 	}
 	desiredNodes := server.routerOSNodesForRevision(check.Revision, nodes)
+	// Only a real Apply may bind a stopped predecessor and physical producer.
+	// This precedes native v5 preparation, the transaction journal and jobs.
+	if hasSubscriptionCatalogNodes(desiredNodes) {
+		if err := server.prepareSubscriptionCatalogRuntimeCompatibility(ctx, config); err != nil {
+			return nil, http.StatusConflict, err
+		}
+	}
 	candidate, err := server.runtime.prepare(config, desiredNodes)
 	if err != nil {
 		return nil, http.StatusUnprocessableEntity, err
 	}
-	desiredRouterOS, err := runtimeconfig.RenderRouterOSTrafficCandidate(config, desiredNodes, server.opts.Runtime.RuleSetDir)
+	desiredRouterOS, err := server.renderRouterOSTrafficCandidate(config, desiredNodes)
 	if err != nil {
 		return nil, http.StatusUnprocessableEntity, err
 	}
@@ -221,13 +245,13 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		if err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("persist first-apply recovery generation: %w", err)
 		}
-		previousRouterOS, err = runtimeconfig.RenderRouterOSTrafficCandidate(firstApplyRecovery, nil, server.opts.Runtime.RuleSetDir)
+		previousRouterOS, err = server.renderRouterOSTrafficCandidate(firstApplyRecovery, nil)
 		if err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("render first-apply fail-open rollback: %w", err)
 		}
 	} else if previousRouterOS == "" {
 		previousNodes := server.routerOSNodesForRevision(activeRevision, nodes)
-		previousRouterOS, err = runtimeconfig.RenderRouterOSTrafficCandidate(active, previousNodes, server.opts.Runtime.RuleSetDir)
+		previousRouterOS, err = server.renderRouterOSTrafficCandidate(active, previousNodes)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
@@ -266,6 +290,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	if err := server.beginApplyRecovery(activeRevision, recoveryRevision, stagedRevision, previousRouterOS, desiredRouterOS, candidate.Revision); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	prepareDone()
 
 	var receipt runtimeconfig.ActivationReceipt
 	var activated bool
@@ -285,6 +310,8 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		if runtimeReady {
 			return nil
 		}
+		activationDone := applytiming.Start(operationContext, applytiming.RuntimeActivate)
+		defer activationDone()
 		if err := server.ensureCDNFeeds(operationContext, config); err != nil {
 			return err
 		}
@@ -307,6 +334,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		} else {
 			receipt, activateErr = server.runtime.activate(operationContext, candidate)
 		}
+		activationDone()
 		activated = len(receipt.Changed()) > 0
 		if activateErr == nil && len(affectedPrograms(receipt.Changed())) > 0 {
 			trafficProofAfter = server.now()
@@ -317,7 +345,9 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		if activateErr == nil && recoveryRouterOS != nil {
 			server.storeApplyReadiness(&server.plannedRuntimeApply, true)
 			gateContext, cancelGate := context.WithTimeout(operationContext, 100*time.Second)
-			activateErr = recoveryRouterOS.WaitManagedDiversion(gateContext)
+			activateErr = applytiming.Run(gateContext, applytiming.TrafficWait, func() error {
+				return recoveryRouterOS.WaitManagedDiversion(gateContext)
+			})
 			cancelGate()
 		}
 		runtimeReady = activateErr == nil
@@ -336,12 +366,14 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		return err
 	}
 	commit := func(backup any) error {
+		commitDone := applytiming.Start(ctx, applytiming.ActiveCommit)
 		published, commitErr := server.repository.commitActiveDetailed(commitMetadata{
 			RouterOSSource: desiredRouterOS,
 			Revision:       stagedRevision, PreviousRevision: activeRevision,
 			RuntimeRevision: candidate.Revision, PreviousRuntimeRevision: previousRuntimeRevision,
 			BackupRef: backup, Actor: actor, CommittedAt: server.now(),
 		})
+		commitDone()
 		if !published {
 			return commitErr
 		}
@@ -356,7 +388,7 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 			runtimeCleanupPending = true
 			log.Printf("control-plane: active commit published; derivative pointer repair pending: %v", commitErr)
 		}
-		if err := server.runtime.commit(candidate); err != nil {
+		if err := applytiming.Run(ctx, applytiming.RuntimeLKG, func() error { return server.runtime.commit(candidate) }); err != nil {
 			runtimeCleanupPending = true
 			runtimeCommitPending = true
 			runtimeCommitErr = err
@@ -372,7 +404,15 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 	if routerOSChanged {
 		output, applyErr := server.applyRouterOS(ctx, config, desiredRouterOS, previousRouterOS, activate, func(_ context.Context, reference routeros.BackupRef) error {
 			backup = reference
-			return commit(reference)
+			if err := commit(reference); err != nil {
+				return err
+			}
+			if stateCommitted && runtimeReady && !runtimeCommitPending {
+				// Finalize follows rollback-guard disarm. Let the watchdog prove
+				// the committed runtime while optional housekeeping completes.
+				server.storeApplyReadiness(&server.plannedRuntimeApply, true)
+			}
+			return nil
 		})
 		applyKind, sections, cleanupPending = output.Kind, output.Sections, output.Result.CleanupPending
 		guardMode = output.Result.GuardMode
@@ -398,7 +438,9 @@ func (server *Server) applyConfiguration(ctx context.Context, config map[string]
 		// verify the owned RouterOS gate before reporting traffic restoration.
 		server.storeApplyReadiness(&server.plannedRuntimeApply, true)
 		gateContext, cancelGate := context.WithTimeout(ctx, 100*time.Second)
-		gateErr := server.waitApplyTraffic(gateContext, config, trafficProofAfter)
+		gateErr := applytiming.Run(gateContext, applytiming.TrafficWait, func() error {
+			return server.waitApplyTraffic(gateContext, config, trafficProofAfter)
+		})
 		cancelGate()
 		if gateErr != nil {
 			// The active commit is authoritative; do not roll back just Xray
@@ -533,7 +575,7 @@ func (server *Server) runRouterOSApply(
 			if err := health(probeContext); err != nil {
 				return err
 			}
-			return stack.REST.Health(probeContext)
+			return applytiming.Run(probeContext, applytiming.RouterOSHealth, func() error { return stack.REST.Health(probeContext) })
 		},
 		Finalize: func(finalizeContext context.Context) error { return finalize(finalizeContext, backup) },
 	}
@@ -552,7 +594,10 @@ func (server *Server) runRouterOSApply(
 		storageRoot, rootErr := validateLifecycleStorageRoot(text(objectAt(config, "storage")["root"]))
 		if rootErr == nil {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_, cleanupErr := stack.REST.PruneManagedFiles(cleanupContext, storageRoot)
+			cleanupErr := applytiming.Run(ctx, applytiming.Prune, func() error {
+				_, err := stack.REST.PruneManagedFiles(cleanupContext, storageRoot)
+				return err
+			})
 			cancel()
 			if cleanupErr != nil {
 				output.Result.CleanupPending = true

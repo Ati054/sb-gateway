@@ -576,11 +576,6 @@ func readJSON(path string, destination any) error {
 }
 
 func writeJSONAtomic(path string, value any) error {
-	body, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	body = append(body, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -594,7 +589,9 @@ func writeJSONAtomic(path string, value any) error {
 		_ = temporary.Close()
 		return err
 	}
-	if _, err := temporary.Write(body); err != nil {
+	// Encoder still buffers one complete value, but writes that buffer directly:
+	// avoid Marshal's result copy and potential growth for the trailing newline.
+	if err := json.NewEncoder(temporary).Encode(value); err != nil {
 		_ = temporary.Close()
 		return err
 	}

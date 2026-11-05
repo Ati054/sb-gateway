@@ -1252,7 +1252,7 @@ func runACMEWorkerWithProgress(ctx context.Context, request acmejob.Request, pro
 	defer releaseMemory()
 	command := acmeWorkerCommand(ctx, envOr("SB_ACME_BIN", "sb-acme"))
 	command.Stdin = bytes.NewReader(body)
-	command.Env = []string{"GOMAXPROCS=1", fmt.Sprintf("GOMEMLIMIT=%d", memorybudget.Current().Worker), "GOGC=50", "GODEBUG=disablethp=1", "PATH=/usr/local/bin:/usr/bin:/bin"}
+	command.Env = []string{"GOMAXPROCS=1", fmt.Sprintf("GOMEMLIMIT=%d", memorybudget.Current().Worker), "GOGC=50", "GODEBUG=disablethp=1,multipathtcp=0", "PATH=/usr/local/bin:/usr/bin:/bin"}
 	if os.Getenv("SB_MEMORY_BUDGET") == "1" {
 		command.Env = append(command.Env, "SB_MEMORY_BUDGET=1", "SB_GATEWAY_STATE_DIR="+os.Getenv("SB_GATEWAY_STATE_DIR"))
 	}

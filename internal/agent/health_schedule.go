@@ -12,12 +12,19 @@ func (controller *healthController) qualitySurveyLanes() int {
 	return 0 // Legacy/custom runtimes without a known physical lane count.
 }
 
-// Limit ordinary quality work to the waves that fit the comparison window.
+// A best-mode comparison occupies one actual physical wave. Sequential work
+// keeps its ordinary continuation and cannot claim parallel-wave identity.
 // Emergency discovery keeps its own early-success and cancellation behavior.
 func (controller *healthController) surveySettings(p effectivePolicySettings) effectivePolicySettings {
 	if lanes := controller.qualitySurveyLanes(); lanes > 0 {
 		waves := max(1, int(optimizationPairSkew/qualityProbeTimeout))
+		if p.mode == "best" && lanes > 1 {
+			waves = 1
+		}
 		p.batch = min(p.batch, lanes*waves)
+	}
+	if budget := controller.probeBudget; budget != nil && budget.Limit > 0 {
+		p.batch = min(p.batch, budget.Limit)
 	}
 	return p
 }
@@ -27,14 +34,30 @@ func (controller *healthController) surveySettings(p effectivePolicySettings) ef
 // could otherwise finish outside the comparison window. This consumes an
 // ordinary batch slot, not an extra lane or an immediate retry.
 func (controller *healthController) withSurveyBaseline(now time.Time, selected string, targets []string, item *policyHealthState, p effectivePolicySettings) []string {
+	original := item
+	item = warmPlanningScheduleView(item)
+	defer func() { original.ScanQueue = item.ScanQueue }()
 	if p.batch < 2 || len(targets) == 0 || selected == "block" || contains(targets, selected) ||
-		!item.RuntimeConfirmed || item.RuntimeSelected != selected || item.UnderlayFailure != "" || item.AvailabilityFailures[selected] > 0 ||
-		(item.OptimizationCandidate != "" && item.OptimizationBaseline == selected && freshComparisonAt(now, item.OptimizationLastResult, p)) {
+		!item.RuntimeConfirmed || item.RuntimeSelected != selected || item.UnderlayFailure != "" || item.AvailabilityFailures[selected] > 0 {
+		return targets
+	}
+	concurrent := p.mode == "best" && qualityProbeWidth(controller.runtime) > 1
+	if !concurrent && item.OptimizationCandidate != "" && item.OptimizationBaseline == selected && freshComparisonAt(now, item.OptimizationLastResult, p) {
 		return targets
 	}
 	// A failed primary must keep its normal retry cadence. Availability success
 	// alone supplies neither a new quality baseline nor an accelerated retry.
 	baseline, at := latestQualityObservation(item, selected)
+	if concurrent {
+		// A failed primary is handled by the separate degraded-pair path and
+		// retains its normal retry cadence; it supplies no latency baseline.
+		if primaryDegradationPending(item, selected) {
+			return targets
+		}
+		result := append([]string{selected}, targets[:min(len(targets), p.batch-1)]...)
+		item.ScanQueue = uniqueCandidates(append(targets[len(result)-1:], item.ScanQueue...))
+		return result
+	}
 	waves := 1
 	if lanes := controller.qualitySurveyLanes(); lanes > 0 {
 		count := min(p.batch, len(targets)+1)
@@ -60,6 +83,9 @@ func (controller *healthController) withSurveyBaseline(now time.Time, selected s
 // Continue a bounded sweep without waiting another full quality interval.
 func (controller *healthController) remainingProbeInterval(now time.Time, contract healthPolicyContract, item *policyHealthState) time.Duration {
 	p := controller.surveySettings(policySettings(contract.Policy, contract.Mode))
+	if isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)) {
+		p.batch = min(p.batch, 2)
+	}
 	// The quality interval is not the delay between the two sides of one pair.
 	// A completed inconclusive pair returns no targets and cools normally.
 	if item.RuntimeConfirmed && item.UnderlayFailure == "" && item.AvailabilityFailures[item.Selected] == 0 &&
@@ -67,6 +93,7 @@ func (controller *healthController) remainingProbeInterval(now time.Time, contra
 		return 0
 	}
 	interval := controller.regularInterval(contract)
+	item = warmPlanningScheduleView(item)
 	for _, candidate := range contract.Candidates {
 		remaining := time.Duration(p.active)*time.Second - now.Sub(time.Unix(int64(item.LastProbeAt[candidate]), 0))
 		if item.LastProbeAt[candidate] == 0 || remaining <= 0 {
@@ -83,6 +110,9 @@ func (controller *healthController) remainingProbeInterval(now time.Time, contra
 // node shares a batch whenever due, but a one-slot budget cannot starve others.
 func regularProbeTargets(now time.Time, selected string, candidates, shortlist []string, item *policyHealthState, p effectivePolicySettings) []string {
 	result := optimizationPairProbeTargets(now, selected, candidates, item, p)
+	original := item
+	item = warmPlanningScheduleView(item)
+	defer func() { original.ScanQueue = item.ScanQueue }()
 	due := func(candidate string) bool {
 		last := item.LastProbeAt[candidate]
 		return last == 0 || float64(now.Unix())-last >= float64(p.active)

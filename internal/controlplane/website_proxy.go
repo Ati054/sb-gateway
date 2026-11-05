@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sb-gateway/sb-gateway/internal/netpolicy"
 	"golang.org/x/net/netutil"
 )
 
@@ -168,7 +169,7 @@ func newWebsiteProxy(repository *stateRepository) *websiteProxy {
 }
 
 func startWebsiteProxy(repository *stateRepository) (*websiteProxy, *http.Server, net.Listener, error) {
-	listener, err := net.Listen("tcp4", websiteProxyAddress)
+	listener, err := netpolicy.ListenTCP("tcp4", websiteProxyAddress)
 	if err != nil {
 		return nil, nil, nil, err
 	}

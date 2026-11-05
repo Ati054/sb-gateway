@@ -44,7 +44,7 @@ func TestSingleOriginQualityHEADAndFallback(t *testing.T) {
 					t.Fatalf("healthy HEAD queried other origins: %+v calls=%d", evidence, calls.Load())
 				}
 			} else {
-				if evidence.OK != (outcome != "all-failed") || evidence.DelayMS != nil || !evidence.QualityUnmeasured || !evidence.PrimaryQualityFailed {
+				if evidence.OK != (outcome != "all-failed") || evidence.DelayMS != nil || !evidence.QualityUnmeasured || evidence.PrimaryQualityFailed != (outcome != "head-rejected") {
 					t.Fatalf("fallback supplied ranking latency or wrong availability: %+v", evidence)
 				}
 				if calls.Load() > 4 {
@@ -102,7 +102,7 @@ func TestColdChoiceIgnoresToleranceButRestartKeepsWorkingLeaf(t *testing.T) {
 func TestLatencyOriginMigrationKeepsWorkingSelectionAndRequiresFreshQuality(t *testing.T) {
 	controller, item, runtime := stagedOptimizationController(t)
 	contract := runtime.pool.HealthPolicies["europe"]
-	contract.Policy.LatencyMeasurement = "gstatic-head-v1"
+	contract.Policy.LatencyMeasurement = latencyMeasurement
 	runtime.pool.HealthPolicies["europe"] = contract
 	controller.warmStarted["europe"] = false
 	item.OptimizationChecks = 1
@@ -113,9 +113,38 @@ func TestLatencyOriginMigrationKeepsWorkingSelectionAndRequiresFreshQuality(t *t
 	}
 	if item.Selected != "active" || item.OptimizationChecks != 0 ||
 		len(item.Samples["active"]) != 1 || *item.Samples["active"][0].DelayMS != 600 ||
-		item.LatencyMeasurement != "gstatic-head-v1" {
+		item.LatencyMeasurement != latencyMeasurement {
 		t.Fatal("old-origin quality influenced migrated selection")
 	}
+}
+
+func TestColdHTTPMetricMigrationDiscardsOldProofButPreservesHistory(t *testing.T) {
+	controller, item, runtime := stagedOptimizationController(t)
+	contract := runtime.pool.HealthPolicies["europe"]
+	contract.Policy.LatencyMeasurement = latencyMeasurement
+	runtime.pool.HealthPolicies["europe"] = contract
+	controller.warmStarted["europe"] = false
+	item.LatencyMeasurement = "gstatic-head-v1"
+	item.OptimizationChecks = 1
+	oldDelay := 30000
+	old := healthSample{At: 940, OK: true, DelayMS: &oldDelay}
+	item.Samples["active"] = []healthSample{old}
+	item.DailySamples["active"] = []healthSample{old}
+	if err := controller.Tick(time.Unix(1060, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if item.LatencyMeasurement != latencyMeasurement || item.Selected != "active" || item.OptimizationChecks != 0 {
+		t.Fatalf("metric migration reused an old proof or changed the working route: metric=%q selected=%q checks=%d", item.LatencyMeasurement, item.Selected, item.OptimizationChecks)
+	}
+	if samples := item.Samples["active"]; len(samples) != 1 || samples[0].DelayMS == nil || *samples[0].DelayMS != 600 {
+		t.Fatalf("old H2-eligible planning sample survived migration: %+v", samples)
+	}
+	for _, sample := range item.DailySamples["active"] {
+		if sample.At == old.At && sample.DelayMS != nil && *sample.DelayMS == oldDelay {
+			return
+		}
+	}
+	t.Fatal("metric migration erased historical full-request evidence")
 }
 
 func TestReachableFallbackIsNotHistoricalPacketLoss(t *testing.T) {

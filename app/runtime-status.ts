@@ -41,10 +41,29 @@ export function mergeRuntimeStatus(
       const merged = { ...old, ...next };
       const oldTime = Date.parse(String(old.runtime_observed_at ?? ""));
       const nextTime = Date.parse(String(next.runtime_observed_at ?? ""));
+      const warmFields = ["warm_planning_marker", "warm_latency_comparisons", "warm_last_latency_comparisons"];
+      const markerChanged = (old.warm_planning_marker ?? "") !== (next.warm_planning_marker ?? "");
       // A slow history response must not roll back a newer runtime readback.
-      if (Number.isFinite(oldTime) && (!Number.isFinite(nextTime) || nextTime < oldTime)) {
-        for (const field of ["runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_count", "availability_ok", "shortlist", "latency_comparisons", "last_latency_comparisons"]) {
+      if (Number.isFinite(oldTime) && (!Number.isFinite(nextTime) || nextTime < oldTime
+        || (nextTime === oldTime && markerChanged))) {
+        for (const field of ["runtime_selected", "runtime_confirmed", "runtime_observed_at", "runtime_error", "candidate_labels", "candidate_count", "availability_ok", "shortlist", "latency_comparisons", "last_latency_comparisons", ...warmFields]) {
           if (field in old) merged[field] = old[field];
+          else if (warmFields.includes(field)) delete merged[field];
+        }
+      } else if (Number.isFinite(nextTime)) {
+        // An updated cold image omits the experimental fields. Do not retain
+        // a previous image's planning metric after rollback or disabling it.
+        for (const field of warmFields) if (!(field in next)) delete merged[field];
+      }
+      // A partial response can announce a new metric without a runtime clock.
+      // Keep the newer selected route, but never carry pairs across metrics.
+      if (!Number.isFinite(nextTime) && "warm_planning_marker" in next
+        && next.warm_planning_marker !== old.warm_planning_marker) {
+        merged.warm_planning_marker = next.warm_planning_marker;
+        for (const field of ["latency_comparisons", "last_latency_comparisons",
+          "warm_latency_comparisons", "warm_last_latency_comparisons"]) {
+          if (field in next) merged[field] = next[field];
+          else delete merged[field];
         }
       }
       return [key, merged];

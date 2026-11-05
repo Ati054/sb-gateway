@@ -108,3 +108,74 @@ test("a failed latency probe does not refresh old active metrics after a window 
   assert.deepEqual(activeQualityMetrics(health, "active", 211), { median: null, medianAt: null });
   assert.deepEqual(activeQualityMetrics({ ...health, last_good_at: {} }, "active"), { median: null, medianAt: null });
 });
+
+test("comparison retains its measurement identity independently of historical HTTPS latency", () => {
+  const health = { runtime_selected: "active", runtime_confirmed: true,
+    warm_planning_marker: "gstatic-warm-head-v1",
+    warm_latency_comparisons: { reserve: { measurement: "gstatic-warm-head-v1",
+      active: "active", active_delay_ms: 100, candidate_delay_ms: 80,
+      active_at: 200, candidate_at: 201, expires_at: 320 } },
+    daily_stats: { active: { median_ms: 600 }, reserve: { median_ms: 700 } } };
+  assert.deepEqual(freshLatencyComparison(health, "reserve", 215),
+    { percent: -20, activeAt: 200, candidateAt: 201, measurement: "gstatic-warm-head-v1" });
+  assert.equal(freshLatencyComparison({ ...health, warm_latency_comparisons: null,
+    latency_comparisons: { reserve: { active: "active", active_delay_ms: 600,
+      candidate_delay_ms: 300, active_at: 200, candidate_at: 201, expires_at: 320 } } }, "reserve", 215), null);
+});
+
+test("warm display survives a failed or expired comparison without supplying fresh switch evidence", () => {
+  const pair = { measurement: "gstatic-warm-head-v1", active: "active",
+    active_delay_ms: 100, candidate_delay_ms: 80,
+    active_at: 200, candidate_at: 201, expires_at: 320 };
+  const health = { runtime_selected: "active", runtime_confirmed: true,
+    warm_planning_marker: "gstatic-warm-head-v1", warm_latency_comparisons: null,
+    warm_last_latency_comparisons: { reserve: pair },
+    availability_ok: { active: true, reserve: false } };
+  assert.equal(freshLatencyComparison(health, "reserve", 1000), null);
+  assert.deepEqual(displayedLatencyComparison(health, "reserve", 1000),
+    { percent: -20, activeAt: 200, candidateAt: 201, measurement: "gstatic-warm-head-v1" });
+  assert.equal(displayedLatencyComparison({ ...health, runtime_selected: "other" }, "reserve", 1000), null);
+});
+
+test("paired display accepts only evidence for the current known measurement", () => {
+  for (const marker of ["gstatic-warm-head-v1", "gstatic-fresh-paired-head-v1"]) {
+    const pair = { measurement: marker, active: "active", active_delay_ms: 600,
+      candidate_delay_ms: 350, active_at: 200, candidate_at: 201, expires_at: 320 };
+    const health = { runtime_selected: "active", runtime_confirmed: true,
+      warm_planning_marker: marker, warm_latency_comparisons: { reserve: pair },
+      warm_last_latency_comparisons: { reserve: pair } };
+    assert.deepEqual(freshLatencyComparison(health, "reserve", 215), {
+      percent: -41.7, activeAt: 200, candidateAt: 201, measurement: marker,
+    });
+    assert.equal(freshLatencyComparison(health, "reserve", 1000), null);
+    assert.equal(displayedLatencyComparison(health, "reserve", 1000).percent, -41.7);
+    for (const measurement of [undefined, "gstatic-head-v1", "gstatic-h1-head-v2", "unknown-metric",
+      marker === "gstatic-warm-head-v1" ? "gstatic-fresh-paired-head-v1" : "gstatic-warm-head-v1"]) {
+      const wrongPair = { ...pair, measurement };
+      const incompatible = { ...health, warm_latency_comparisons: { reserve: wrongPair },
+        warm_last_latency_comparisons: { reserve: wrongPair } };
+      assert.equal(freshLatencyComparison(incompatible, "reserve", 215), null);
+      assert.equal(displayedLatencyComparison(incompatible, "reserve", 1000), null);
+    }
+    assert.equal(freshLatencyComparison({ ...health, runtime_selected: undefined,
+      warm_latency_comparisons: { reserve: { ...pair, active: undefined } } }, "reserve", 215), null);
+    for (const unknown of ["future-metric", 1, {}]) {
+      assert.equal(displayedLatencyComparison({ ...health, warm_planning_marker: unknown,
+        latency_comparisons: { reserve: { ...pair, measurement: "gstatic-head-v1" } },
+        last_latency_comparisons: { reserve: { ...pair, measurement: "gstatic-head-v1" } },
+      }, "reserve", 215), null);
+    }
+  }
+});
+
+test("legacy full-HTTPS comparisons keep the current backend measurement identity", () => {
+  const pair = { measurement: "gstatic-h1-head-v2", active: "active",
+    active_delay_ms: 600, candidate_delay_ms: 350,
+    active_at: 200, candidate_at: 201, expires_at: 320 };
+  const health = { runtime_selected: "active", runtime_confirmed: true,
+    latency_comparisons: { reserve: pair }, last_latency_comparisons: { reserve: pair } };
+  assert.deepEqual(freshLatencyComparison(health, "reserve", 215), {
+    percent: -41.7, activeAt: 200, candidateAt: 201, measurement: "gstatic-h1-head-v2",
+  });
+  assert.equal(displayedLatencyComparison(health, "reserve", 1000).measurement, "gstatic-h1-head-v2");
+});

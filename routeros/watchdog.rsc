@@ -101,7 +101,7 @@
   } else={
   :local gate $exactGates
   # NAT is selected only on the first packet. Expire just managed-client DNS
-  # flows to local router addresses after admitting managed DNS marking.
+  # flows eligible for local/public DNS diversion after admitting marking.
   # Clearing before admission lets a concurrent query recreate the outage path.
   :local clearRecoveredDNS do={
     :local dnsNat [/ip/firewall/nat/find where comment="SB-GATEWAY managed DNS UDP" and disabled=no]
@@ -132,6 +132,22 @@
       }
     }
     :if ([:len $networks] = 0) do={ :return true }
+    :local bypassNetworks [:toarray ""]
+    :local bypassBits [:toarray ""]
+    :foreach listName in={"SB_INTERNAL_NETWORKS";"SB_BYPASS_ENDPOINTS"} do={
+      :foreach entry in=[/ip/firewall/address-list/find where list=$listName] do={
+        :local prefix [:tostr [/ip/firewall/address-list/get $entry address]]
+        :local slash [:find $prefix "/"]
+        :local bits 32
+        :local network $prefix
+        :if ([:typeof $slash] != "nil") do={ :set network [:pick $prefix 0 $slash]; :set bits [:tonum [:pick $prefix ($slash + 1) [:len $prefix]]] }
+        :local networkIP [:toip $network]
+        :if (([:typeof $networkIP] = "ip") && ([:typeof $bits] = "num") && ($bits >= 0) && ($bits <= 32)) do={
+          :set bypassNetworks ($bypassNetworks, $networkIP)
+          :set bypassBits ($bypassBits, $bits)
+        }
+      }
+    }
     :foreach flow in=$dnsFlows do={
       :do {
       :local connectionMark [/ip/firewall/connection/get $flow connection-mark]
@@ -149,7 +165,23 @@
         :foreach localIP in=$localIPs do={
           :if ($localIP = $destinationIP) do={ :set localDestination true }
         }
-        :if (($localDestination = true) && ([:tostr $sourceIP] != [:tostr $containerIP])) do={
+        :local dnsEligible $localDestination
+        :if ($dnsEligible = false) do={
+          :local targetIP [:toip $destinationIP]
+          :set dnsEligible ([:typeof $targetIP] = "ip")
+          :if ([:len $bypassNetworks] > 0) do={
+            :for index from=0 to=([:len $bypassNetworks] - 1) do={
+              :local bits [:pick $bypassBits $index]
+              :local networkIP [:pick $bypassNetworks $index]
+              :if ($dnsEligible = true) do={
+                :if ($bits = 0) do={ :set dnsEligible false } else={
+                  :if (($targetIP >> (32 - $bits)) = ($networkIP >> (32 - $bits))) do={ :set dnsEligible false }
+                }
+              }
+            }
+          }
+        }
+        :if (($dnsEligible = true) && ([:tostr $sourceIP] != [:tostr $containerIP])) do={
           :local managed false
           :for index from=0 to=([:len $networks] - 1) do={
             :local bits [:pick $networkBits $index]

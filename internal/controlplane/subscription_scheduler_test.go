@@ -19,6 +19,7 @@ func TestRefreshOneDueSubscriptionRunsOneAndSleepsUntilDeadline(t *testing.T) {
 	if err := server.secrets.write("subscriptions/provider.url", "https://provider.example.test/sub", false); err != nil {
 		t.Fatal(err)
 	}
+	installCatalogCompatibilityRESTFixture(t, server, config)
 	revision, err := server.repository.stageGeneration(config)
 	if err != nil {
 		t.Fatal(err)

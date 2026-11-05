@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sb-gateway/sb-gateway/internal/cdnfeed"
+	"github.com/sb-gateway/sb-gateway/internal/netpolicy"
 	"github.com/sb-gateway/sb-gateway/internal/rulesets"
 )
 
@@ -91,7 +92,7 @@ type Server struct {
 	validationMu              sync.Mutex
 	validationRevision        string
 	validationResult          configValidation
-	subscriptionMu            sync.Mutex
+	subscriptionMu            subscriptionGate
 	subscriptionWake          chan struct{}
 	subscriptionRuntimeIdle   subscriptionRuntimeIdle
 	routerOSScriptWake        chan struct{}
@@ -197,6 +198,7 @@ func Run(ctx context.Context, opts Options) error {
 	defer cancel()
 	defer websiteListener.Close()
 	go server.runSubscriptionScheduler(runContext)
+	go server.runSubscriptionCatalogRetention(runContext)
 	go server.runApplyRecoveryScheduler(runContext)
 	go server.runRouterOSLiveNetworkScheduler(runContext)
 	go server.runRouterOSFetchLogScheduler(runContext)
@@ -239,8 +241,13 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	errorChannel := make(chan error, 2)
 	go func() {
+		listener, err := netpolicy.ListenTCP("tcp", httpServer.Addr)
+		if err != nil {
+			errorChannel <- err
+			return
+		}
 		log.Printf("control-plane: listening on %s", httpServer.Addr)
-		errorChannel <- httpServer.ListenAndServe()
+		errorChannel <- httpServer.Serve(listener)
 	}()
 	go func() {
 		errorChannel <- websiteServer.Serve(websiteListener)
@@ -307,9 +314,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		controller := http.NewResponseController(response)
 		_ = controller.SetWriteDeadline(server.now().Add(applyResponseTimeout))
 	} else if isSubscriptionRefreshRequest(request) {
-		// A refresh is bounded by its own 30-second context. Keep the HTTP
-		// response deadline outside that bound so an upstream timeout is returned
-		// as a structured API error instead of being truncated into proxy 504.
+		// Admission and download share a context of at most 30 seconds. Leave
+		// response headroom for the separate bounded local import, atomic
+		// publication and structured errors instead of a proxy 504.
 		controller := http.NewResponseController(response)
 		_ = controller.SetWriteDeadline(server.now().Add(subscriptionRefreshResponseTimeout))
 	}

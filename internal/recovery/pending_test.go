@@ -31,7 +31,7 @@ func TestApplyPendingRestore(t *testing.T) {
 		"operation_id": operationID,
 		"archive_name": "SB-GATEWAY-state-test.sbgw",
 		"staging_path": staging,
-		"manifest": map[string]any{"files": []any{map[string]any{
+		"manifest": map[string]any{"format_version": 2, "files": []any{map[string]any{
 			"path": "state/draft.json", "size_bytes": len(payload), "sha256": hex.EncodeToString(digest[:]),
 		}}},
 	}
@@ -71,7 +71,7 @@ func TestApplyPendingRejectsChecksumWithoutOverwriting(t *testing.T) {
 	}
 	pending := map[string]any{
 		"operation_id": operationID, "staging_path": staging,
-		"manifest": map[string]any{"files": []any{map[string]any{
+		"manifest": map[string]any{"format_version": 2, "files": []any{map[string]any{
 			"path": "config/gateway.yaml", "size_bytes": 6, "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
 		}}},
 	}

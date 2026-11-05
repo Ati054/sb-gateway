@@ -14,25 +14,40 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
 
 // TestXrayPinnedRendererCompatibility runs only when XRAY_TEST_BINARY names the
-// pinned Xray 26.10.17 executable. It verifies syntax of complete renderer
+// Xray executable pinned by the maintained Dockerfile. It verifies syntax of complete renderer
 // output; it deliberately does not claim a Hysteria or Reverse data-plane
 // handshake.
 func TestXrayPinnedRendererCompatibility(t *testing.T) {
 	binary := strings.TrimSpace(os.Getenv("XRAY_TEST_BINARY"))
 	if binary == "" {
-		t.Skip("set XRAY_TEST_BINARY to the pinned Xray 26.10.17 binary")
+		t.Skip("set XRAY_TEST_BINARY to the Xray binary pinned by Dockerfile")
+	}
+	dockerfile, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins := regexp.MustCompile(`(?m)^ARG XRAY_VERSION=([0-9]+\.[0-9]+\.[0-9]+)\r?$`).FindAllSubmatch(dockerfile, -1)
+	if len(pins) == 0 {
+		t.Fatal("Dockerfile has no Xray version pin")
+	}
+	expectedVersion := string(pins[0][1])
+	for _, pin := range pins[1:] {
+		if string(pin[1]) != expectedVersion {
+			t.Fatal("Dockerfile stages disagree on the Xray version pin")
+		}
 	}
 	contextWithDeadline, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	version, err := exec.CommandContext(contextWithDeadline, binary, "version").CombinedOutput()
-	if err != nil || !strings.Contains(string(version), "Xray 26.10.17") {
-		t.Fatalf("XRAY_TEST_BINARY must be Xray 26.10.17: %v: %s", err, version)
+	if err != nil || !strings.Contains(string(version), "Xray "+expectedVersion+" ") {
+		t.Fatalf("XRAY_TEST_BINARY must be Xray %s: %v: %s", expectedVersion, err, version)
 	}
 
 	certificatePath, keyPath := writeXrayCompatCertificate(t)
@@ -102,7 +117,7 @@ func TestXrayPinnedRendererCompatibility(t *testing.T) {
 			}
 			output, runErr := exec.CommandContext(contextWithDeadline, binary, "run", "-test", "-config", configPath).CombinedOutput()
 			if runErr != nil {
-				t.Fatalf("Xray 26.10.17 rejected renderer output: %v: %s", runErr, output)
+				t.Fatalf("Xray %s rejected renderer output: %v: %s", expectedVersion, runErr, output)
 			}
 		})
 	}
@@ -135,7 +150,7 @@ func TestXrayPinnedRendererCompatibility(t *testing.T) {
 	}
 	output, err := exec.CommandContext(contextWithDeadline, binary, "run", "-test", "-config", configPath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("Xray 26.10.17 rejected UDP hopping client profile: %v: %s", err, output)
+		t.Fatalf("Xray %s rejected UDP hopping client profile: %v: %s", expectedVersion, err, output)
 	}
 }
 

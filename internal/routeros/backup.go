@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+
+	"github.com/sb-gateway/sb-gateway/internal/applytiming"
 )
 
 var managedBackupBasePattern = regexp.MustCompile(`^SB-GATEWAY-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$`)
@@ -27,14 +29,19 @@ func (client *Client) CreateBackup(ctx context.Context, name, password string) (
 	// RouterOS action endpoints are inconsistent across releases: successful
 	// /export may return either an object or an empty JSON array. The command's
 	// HTTP status is authoritative here; its response body is not used.
-	if _, err := client.requestAction(ctx, http.MethodPost, "/rest/export", map[string]any{
-		"compact": "", "file": exportName,
+	if err := applytiming.Run(ctx, applytiming.BackupExport, func() error {
+		_, err := client.requestAction(ctx, http.MethodPost, "/rest/export", map[string]any{
+			"compact": "", "file": exportName,
+		})
+		return err
 	}); err != nil {
 		return BackupRef{}, err
 	}
+	binaryDone := applytiming.Start(ctx, applytiming.BackupBinary)
 	result, err := client.requestAction(ctx, http.MethodPost, "/rest/system/backup/save", map[string]any{
 		"name": name, "password": password, "encryption": "aes-sha256", "dont-encrypt": "no",
 	})
+	binaryDone()
 	if err != nil {
 		return BackupRef{}, err
 	}

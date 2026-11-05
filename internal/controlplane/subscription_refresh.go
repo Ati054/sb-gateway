@@ -17,15 +17,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/subscriptioncatalog"
 )
 
 const (
 	defaultSubscriptionBytes = 8 << 20
-	defaultSubscriptionNodes = 500
-	// One manual refresh may briefly wait behind the bounded scheduler refresh
-	// before starting its own 30-second channel budget. Leave enough time for
-	// both operations and for the structured result to reach nginx.
-	subscriptionRefreshResponseTimeout = 2 * time.Minute
+	// Network admission/download and local import have separate bounded budgets.
+	// Keep response headroom for their sum and the atomic publication result.
+	subscriptionCatalogImportTimeout   = 2 * time.Minute
+	subscriptionRefreshResponseTimeout = 3 * time.Minute
 )
 
 func isSubscriptionRefreshRequest(request *http.Request) bool {
@@ -214,14 +215,48 @@ func (server *Server) refreshSubscription(response http.ResponseWriter, request 
 		return
 	}
 	subscriptionID := request.PathValue("subscription")
-	server.subscriptionMu.Lock()
-	defer server.subscriptionMu.Unlock()
+	admissionStarted := time.Now()
 	subscription, ok := server.draftEntity(response, request, "subscriptions", subscriptionID)
 	if !ok {
 		return
 	}
-	result, err := server.refreshSubscriptionNow(request.Context(), subscription)
+	ctx, cancel := context.WithDeadline(request.Context(), admissionStarted.Add(subscriptionDownloadTimeout(subscription)))
+	defer cancel()
+	if err := server.subscriptionMu.LockContext(ctx); err != nil {
+		server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "admission_cancelled"})
+		server.writeErrorResponse(response, request, http.StatusConflict, "state_mutation_in_progress", "Subscription refresh could not start within its request budget. Prior nodes remain unchanged; retry after the current operation completes.")
+		return
+	}
+	defer server.subscriptionMu.Unlock()
+	current, ok := server.draftEntity(response, request, "subscriptions", subscriptionID)
+	if !ok {
+		return
+	}
+	if mustSubscriptionSourceRevision(current) != mustSubscriptionSourceRevision(subscription) {
+		server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "source_changed"})
+		server.writeErrorResponse(response, request, http.StatusConflict, "subscription_source_changed", "Subscription settings changed while refresh was waiting. Prior nodes remain unchanged; refresh the current subscription again.")
+		return
+	}
+	ctx = context.WithValue(ctx, subscriptionCatalogDraftGuardKey{}, mustSubscriptionSourceRevision(current))
+	importParent := context.WithValue(request.Context(), subscriptionCatalogDraftGuardKey{}, mustSubscriptionSourceRevision(current))
+	result, err := server.refreshSubscriptionWithContexts(importParent, ctx, current)
 	if err != nil {
+		var unconfirmed subscriptionCatalogPublicationUnconfirmed
+		if errors.As(err, &unconfirmed) {
+			server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "unconfirmed", map[string]any{"id": subscriptionID, "published": true})
+			server.writeErrorResponse(response, request, http.StatusInternalServerError, "subscription_publication_unconfirmed", "The complete new catalog is visible, but storage durability was not confirmed. Reload its status before retrying.")
+			return
+		}
+		if errors.Is(err, subscriptioncatalog.ErrNoSpace) {
+			server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "storage_full"})
+			server.writeErrorResponse(response, request, http.StatusInsufficientStorage, "subscription_storage_full", "Not enough storage for the subscription catalog. The previous catalog was preserved.")
+			return
+		}
+		if errors.Is(err, errSubscriptionSourceChanged) {
+			server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "source_changed"})
+			server.writeErrorResponse(response, request, http.StatusConflict, "subscription_source_changed", "Subscription settings changed while refresh was waiting. Prior nodes remain unchanged; refresh the current subscription again.")
+			return
+		}
 		if errors.Is(err, errSubscriptionCommitBusy) {
 			server.audit(request, fmt.Sprint(payload["sub"]), "subscriptions.refresh", "rejected", map[string]any{"id": subscriptionID, "error_type": "busy"})
 			server.writeErrorResponse(response, request, http.StatusConflict, "state_mutation_in_progress", "Another configuration-changing operation is still in progress. Prior subscription nodes were preserved; retry after it completes.")
@@ -240,17 +275,38 @@ func (server *Server) refreshSubscription(response http.ResponseWriter, request 
 	server.writeJSON(response, http.StatusOK, result)
 }
 
+func subscriptionDownloadTimeout(subscription map[string]any) time.Duration {
+	return time.Duration(boundedSubscriptionInteger(subscription["download_timeout_seconds"], 30, 2, 30)) * time.Second
+}
+
 func (server *Server) refreshSubscriptionNow(parent context.Context, subscription map[string]any) (map[string]any, error) {
+	return server.refreshSubscriptionWithContexts(parent, parent, subscription)
+}
+
+func (server *Server) refreshSubscriptionWithContexts(importParent, networkParent context.Context, subscription map[string]any) (map[string]any, error) {
+	if err := importParent.Err(); err != nil {
+		return nil, err
+	}
+	if err := networkParent.Err(); err != nil {
+		return nil, err
+	}
 	reference, _ := subscription["url_secret_ref"].(string)
 	value, err := server.secrets.read(strings.TrimSpace(reference), true)
 	if err != nil {
 		return nil, errors.New("subscription URL is not provisioned")
 	}
-	maxNodes := boundedSubscriptionInteger(subscription["max_nodes"], defaultSubscriptionNodes, 1, defaultSubscriptionNodes)
+	maxNodes := 0
+	if value, present := subscription["max_nodes"]; present && value != nil {
+		var valid bool
+		maxNodes, valid = jsonInteger(value)
+		if !valid || maxNodes < 1 {
+			return nil, &subscriptionParseError{code: "invalid_limit", message: "An explicit subscription node quota must be a positive integer."}
+		}
+	}
 	maxBytes := boundedSubscriptionInteger(subscription["max_download_bytes"], defaultSubscriptionBytes, 1024, defaultSubscriptionBytes)
-	timeoutSeconds := boundedSubscriptionInteger(subscription["download_timeout_seconds"], 30, 2, 30)
-	ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(networkParent, subscriptionDownloadTimeout(subscription))
 	defer cancel()
+	var importContext context.Context
 	channels, err := server.subscriptionRefreshChannels(subscription)
 	if err != nil || len(channels) == 0 {
 		if err == nil {
@@ -260,9 +316,10 @@ func (server *Server) refreshSubscriptionNow(parent context.Context, subscriptio
 	}
 	var body []byte
 	var headers http.Header
-	var nodes []map[string]any
-	var selected subscriptionRefreshChannel
 	for _, channel := range channels {
+		if err = ctx.Err(); err != nil {
+			break
+		}
 		if channel.Outbound == "direct-wan" {
 			body, headers, err = server.fetchSubscription(ctx, value, maxBytes)
 		} else {
@@ -271,27 +328,37 @@ func (server *Server) refreshSubscriptionNow(parent context.Context, subscriptio
 			}
 		}
 		if err == nil {
-			nodes, err = parseProxySubscription(body, maxNodes)
-		}
-		if err == nil && len(nodes) > 0 {
-			selected = channel
-			break
+			if err = ctx.Err(); err != nil {
+				break
+			}
+			if importContext == nil {
+				var cancelImport context.CancelFunc
+				importContext, cancelImport = context.WithTimeout(importParent, subscriptionCatalogImportTimeout)
+				defer cancelImport()
+			}
+			result, importErr := server.importSubscriptionCatalog(importContext, subscription, body, headers, maxNodes, channel)
+			if importErr == nil {
+				return result, nil
+			}
+			// A successful HTTP response can be an interstitial page. Preserve
+			// channel fallback only for typed nonterminal provider parse errors;
+			// local storage/identity/publication failures never refetch a body.
+			var parsed *subscriptionParseError
+			var local subscriptionCommitError
+			if errors.As(importErr, &local) || !errors.As(importErr, &parsed) || terminalSubscriptionRefreshError(importErr) {
+				return nil, importErr
+			}
+			err = importErr
+			continue
 		}
 		if terminalSubscriptionRefreshError(err) {
 			break
 		}
 	}
-	if err != nil || len(nodes) == 0 {
-		if err == nil {
-			err = &subscriptionParseError{code: "invalid_content", message: "Subscription contains no valid nodes."}
-		}
-		return nil, err
+	if err == nil {
+		err = &subscriptionParseError{code: "invalid_content", message: "Subscription contains no valid nodes."}
 	}
-	result, err := server.commitSubscriptionNodes(subscription, body, headers, nodes, selected)
-	if err != nil {
-		return nil, subscriptionCommitError{err: err}
-	}
-	return result, nil
+	return nil, err
 }
 
 func (server *Server) subscriptionRefreshError(response http.ResponseWriter, request *http.Request, id, actor string, err error) {
@@ -571,7 +638,7 @@ func (server *Server) subscriptionRefreshChannels(subscription map[string]any) (
 }
 
 func (server *Server) selectSubscriptionUpdateExit(ctx context.Context, _ map[string]any, outbound string) error {
-	return selectSubscriptionXrayOutbound(ctx, server.opts.Runtime, outbound, runSubscriptionXrayCommand, server.repository)
+	return selectSubscriptionXrayOutbound(ctx, server.opts.Runtime, outbound, runSubscriptionXrayCommand, server.repository, server.secrets.subscriptionCatalogRoot())
 }
 
 func terminalSubscriptionRefreshError(err error) bool {
@@ -599,6 +666,10 @@ func (server *Server) subscriptionNodes(response http.ResponseWriter, request *h
 		return
 	}
 	entry, _ := state[fmt.Sprint(subscription["id"])].(map[string]any)
+	if _, exists := entry["catalog_ref"]; exists {
+		server.subscriptionCatalogNodes(response, request, subscription, entry)
+		return
+	}
 	nodes := subscriptionNodeMetadata(subscription, collectionArray(entry["nodes"]))
 	runtimeStatus, err := server.repository.auxiliary("subscription-runtime-status")
 	if err != nil {
@@ -723,6 +794,10 @@ func runtimeSubscriptionNodes(config, state map[string]any) []map[string]any {
 		}
 		subscriptionID := subscriptionText(subscription["id"])
 		entry, _ := state[subscriptionID].(map[string]any)
+		if reference, exists := entry["catalog_ref"]; exists {
+			result = append(result, subscriptionCatalogNode(subscription, reference))
+			continue
+		}
 		for _, rawNode := range collectionArray(entry["nodes"]) {
 			node, ok := rawNode.(map[string]any)
 			if !ok || node["enabled"] == false {

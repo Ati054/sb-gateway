@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"archive/tar"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -26,7 +27,7 @@ import (
 
 const (
 	recoveryChunkBytes       = 64 << 10
-	recoveryMaxPlainBytes    = 64 << 20
+	recoveryMaxPlainBytes    = recoveryMaxLegacyPlainBytes + recoveryMaxCatalogPlainBytes + recoveryTarOverheadBytes
 	recoveryMaxFileBytes     = 16 << 20
 	recoveryRetentionLimit   = 3
 	recoveryMaxFiles         = 4096
@@ -150,13 +151,29 @@ func (server *Server) createRecoveryArchive() (recoveryArchiveMetadata, error) {
 }
 
 func (server *Server) createRecoveryArchiveAttempt(configRoot, backupRoot, stagingRoot string, attempt int) (metadata recoveryArchiveMetadata, resultErr error) {
-	files, err := collectRecoveryFiles(configRoot, server.opts.StateDir, server.opts.DataDir)
+	retained, err := server.subscriptionRetentionRevisions()
+	if err != nil {
+		return recoveryArchiveMetadata{}, recoveryArchiveFailure(recoveryFailureSourceCollection, err)
+	}
+	keepSnapshots := make(map[string]bool, len(retained))
+	for _, revision := range retained {
+		keepSnapshots[revision] = true
+	}
+	files, err := collectRecoveryFilesWithSecrets(configRoot, server.opts.SecretsDir, server.opts.StateDir, server.opts.DataDir, keepSnapshots)
 	if err != nil {
 		class := recoveryFailureSourceCollection
 		if errors.Is(err, os.ErrNotExist) {
 			class = recoveryFailureSourceChurn
 		}
 		return recoveryArchiveMetadata{}, recoveryArchiveFailure(class, err)
+	}
+	files, releaseCatalogs, err := server.appendRecoveryCatalogFiles(context.Background(), files)
+	if err != nil {
+		return recoveryArchiveMetadata{}, recoveryArchiveFailure(recoveryFailureSourceCollection, err)
+	}
+	defer releaseCatalogs()
+	if err = checkRecoverySnapshotSpace(stagingRoot, backupRoot, files); err != nil {
+		return recoveryArchiveMetadata{}, recoveryArchiveFailure(recoveryFailureStaging, err)
 	}
 	if server.recoveryBeforeSnapshot != nil {
 		server.recoveryBeforeSnapshot(attempt)
@@ -229,7 +246,7 @@ func (server *Server) createRecoveryArchiveAttempt(configRoot, backupRoot, stagi
 		return recoveryArchiveMetadata{}, recoveryArchiveFailure(recoveryFailureArchiveWrite, err)
 	}
 	digest := sha256.New()
-	destination := io.MultiWriter(temporary, digest)
+	destination := newRecoveryFileWriter(temporary, backupRoot, digest)
 	if _, err := destination.Write(prefix); err != nil {
 		temporary.Close()
 		return recoveryArchiveMetadata{}, recoveryArchiveFailure(recoveryFailureArchiveWrite, err)
@@ -276,7 +293,7 @@ func (server *Server) createRecoveryArchiveAttempt(configRoot, backupRoot, stagi
 }
 
 var (
-	recoveryAtomicTemporaryName = regexp.MustCompile(`^\.[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9]{6,}\.tmp$`)
+	recoveryAtomicTemporaryName = regexp.MustCompile(`^\.[A-Za-z0-9][A-Za-z0-9._-]*\.(?:[0-9]{1,10}|[A-Za-z0-9]{6,})\.tmp$`)
 	recoverySnapshotDirectory   = regexp.MustCompile(`^\.archive-[A-Za-z0-9]+$`)
 )
 
@@ -426,8 +443,7 @@ func snapshotRecoverySource(root string, source recoverySourceFile, buffer []byt
 		return recoverySourceFile{}, recoveryArchiveFailure(recoveryFailureStaging, err)
 	}
 	digest := sha256.New()
-	written, copyErr := io.CopyBuffer(io.MultiWriter(temporary, digest), io.LimitReader(input, recoveryMaxFileBytes+1), buffer)
-	dropRecoveryFileCache(input)
+	written, copyErr := io.CopyBuffer(newRecoveryFileWriter(temporary, filepath.Dir(target), digest), io.LimitReader(newRecoveryFileReader(input), recoveryFileByteLimit(source.archivePath)+1), buffer)
 	closeErr := input.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = temporary.Close()
@@ -436,7 +452,7 @@ func snapshotRecoverySource(root string, source recoverySourceFile, buffer []byt
 		}
 		return recoverySourceFile{}, recoveryArchiveFailure(recoveryFailureSourceCollection, errors.Join(copyErr, closeErr))
 	}
-	if written > recoveryMaxFileBytes {
+	if written > recoveryFileByteLimit(source.archivePath) {
 		_ = temporary.Close()
 		return recoverySourceFile{}, recoveryArchiveFailure(recoveryFailureSourceCollection, errors.New("recovery source exceeds the file limit"))
 	}
@@ -452,6 +468,10 @@ func snapshotRecoverySource(root string, source recoverySourceFile, buffer []byt
 	if !recoverySourceUnchanged(source, after) {
 		_ = temporary.Close()
 		return recoverySourceFile{}, recoveryArchiveFailure(recoveryFailureSourceChurn, errors.New("recovery source changed"))
+	}
+	if source.digest != "" && hex.EncodeToString(digest.Sum(nil)) != source.digest {
+		_ = temporary.Close()
+		return recoverySourceFile{}, recoveryArchiveFailure(recoveryFailureSourceCollection, errors.New("recovery catalog failed its immutable checksum"))
 	}
 	if err := temporary.Close(); err != nil {
 		return recoverySourceFile{}, recoveryArchiveFailure(recoveryFailureStaging, err)
@@ -515,30 +535,30 @@ func recoveryAtomicTemporaryArtifact(name string, info os.FileInfo) bool {
 	if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
+	return recoveryAtomicTemporaryBasename(name)
+}
+
+func recoveryAtomicTemporaryBasename(name string) bool {
 	return recoveryAtomicTemporaryName.MatchString(name)
 }
 
-func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySourceFile, error) {
+func collectRecoveryFiles(configRoot, stateRoot, dataRoot string, retainedSnapshots ...map[string]bool) ([]recoverySourceFile, error) {
+	return collectRecoveryFilesWithSecrets(configRoot, filepath.Join(configRoot, "secrets"), stateRoot, dataRoot, retainedSnapshots...)
+}
+
+func collectRecoveryFilesWithSecrets(configRoot, secretsRoot, stateRoot, dataRoot string, retainedSnapshots ...map[string]bool) ([]recoverySourceFile, error) {
+	secretsNamespace, err := configuredSecretsNamespace(configRoot, secretsRoot)
+	if err != nil {
+		return nil, err
+	}
 	selectedTop := map[string]bool{"gateway.yaml": true, "users.yaml": true, "networks.yaml": true, "policies.yaml": true, "subscriptions.yaml": true, "rulesets.yaml": true}
 	// These files are reconstructed from the committed configuration or live
 	// processes.  Including them makes a recovery snapshot race the selector,
 	// telemetry and feed workers even though their contents are not needed to
 	// restore the gateway.
-	volatileState := map[string]bool{
-		"audit.jsonl":                         true,
-		"cdn-feeds.json":                      true,
-		"client-telemetry.json":               true,
-		"rulesets-update.json":                true,
-		"runtime-status.json":                 true,
-		"selector-health.json":                true,
-		"selector-runtime.json":               true,
-		"subscription-refresh-status.json":    true,
-		"subscription-runtime-operation.json": true,
-		"subscription-runtime-status.json":    true,
-	}
-	excludedSecrets := map[string]bool{
-		"secrets/admin-password-hash": true, "secrets/session-signing-key": true, "secrets/management-api-token": true,
-		"secrets/recovery/master-key": true, "secrets/recovery/key-wrap": true, "secrets/routeros/backup-password": true,
+	excludedSecrets := map[string]bool{}
+	for _, name := range []string{"admin-password-hash", "session-signing-key", "management-api-token", "recovery/master-key", "recovery/key-wrap", "routeros/backup-password"} {
+		excludedSecrets[secretsNamespace+"/"+name] = true
 	}
 	type rootSpec struct {
 		root, prefix string
@@ -569,6 +589,18 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 				return nil
 			}
 			parts := strings.Split(filepath.ToSlash(relative), "/")
+			protectedPayload := spec.prefix == "config" && inConfiguredNamespace(relative, secretsNamespace) || spec.prefix == "data/last-known-good"
+			if spec.prefix == "state" && len(parts) == 1 && len(retainedSnapshots) > 0 {
+				if match := subscriptionSnapshotName.FindStringSubmatch(entry.Name()); len(match) == 2 && !retainedSnapshots[0][match[1]] {
+					if entry.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
+			if entry.IsDir() && ((spec.prefix == "config" && filepath.ToSlash(relative) == secretsNamespace+"/subscription-catalogs") || !protectedPayload && entry.Name() == ".catalog-compat") {
+				return filepath.SkipDir
+			}
 			if spec.prefix == "config" && parts[0] == "rulesets" && !entry.IsDir() {
 				asset := geoipasset.IsManagedName(entry.Name())
 				pack := recoveryGeoIPPackPattern.MatchString(entry.Name())
@@ -579,6 +611,9 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 			if len(parts) == 1 && entry.IsDir() && spec.skipTop[parts[0]] {
 				return filepath.SkipDir
 			}
+			if spec.prefix == "state" && !entry.IsDir() && managedControlPlaneAtomicScratch(filepath.ToSlash(relative)) {
+				return nil
+			}
 			info, err := entry.Info()
 			if err != nil {
 				return err
@@ -587,9 +622,6 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 				if entry.IsDir() {
 					return filepath.SkipDir
 				}
-				return nil
-			}
-			if recoveryAtomicTemporaryArtifact(entry.Name(), info) {
 				return nil
 			}
 			if entry.IsDir() {
@@ -607,7 +639,7 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 					return nil
 				}
 			}
-			if spec.prefix == "state" && len(parts) == 1 && volatileState[parts[0]] {
+			if spec.prefix == "state" && len(parts) == 1 && volatileControlPlaneStateFile(parts[0]) {
 				return nil
 			}
 			if !recoveryPayloadPathPattern.MatchString(archivePath) {
@@ -617,7 +649,7 @@ func collectRecoveryFiles(configRoot, stateRoot, dataRoot string) ([]recoverySou
 				return fmt.Errorf("recovery file %s exceeds 16 MiB", archivePath)
 			}
 			total += info.Size()
-			if total > recoveryMaxPlainBytes {
+			if total > recoveryMaxLegacyPlainBytes {
 				return errors.New("persistent state exceeds the 64 MiB recovery limit")
 			}
 			files = append(files, recoverySourceFile{archivePath: archivePath, path: path, size: info.Size(), modified: info.ModTime()})
@@ -649,7 +681,7 @@ func hashFile(path string, limit int64) (string, error) {
 	}
 	defer file.Close()
 	digest := sha256.New()
-	written, err := io.Copy(digest, io.LimitReader(file, limit+1))
+	written, err := io.Copy(digest, io.LimitReader(newRecoveryFileReader(file), limit+1))
 	if err != nil {
 		return "", err
 	}
@@ -664,7 +696,7 @@ func recoveryManifest(files []recoverySourceFile, createdAt, revision string) ma
 	for index, file := range files {
 		entries[index] = map[string]any{"path": file.archivePath, "size_bytes": file.size, "sha256": file.digest}
 	}
-	return map[string]any{"format_version": recoveryFormatVersion, "created_at": createdAt, "application_version": envOr("SB_GATEWAY_VERSION", "1.5.57"), "active_revision": nullableString(revision), "files": entries}
+	return map[string]any{"format_version": recoveryRequiredManifestVersion(files), "created_at": createdAt, "application_version": envOr("SB_GATEWAY_VERSION", "1.5.57"), "active_revision": nullableString(revision), "files": entries}
 }
 
 func writeRecoveryTar(destination io.Writer, files []recoverySourceFile, manifest map[string]any) error {
@@ -695,7 +727,7 @@ func writeRecoveryTar(destination io.Writer, files []recoverySourceFile, manifes
 			return errors.New("staged recovery source changed while archiving")
 		}
 		digest := sha256.New()
-		written, copyErr := io.CopyBuffer(writer, io.TeeReader(io.LimitReader(file, source.size+1), digest), buffer)
+		written, copyErr := io.CopyBuffer(writer, io.TeeReader(io.LimitReader(newRecoveryFileReader(file), source.size+1), digest), buffer)
 		dropRecoveryFileCache(file)
 		closeErr := file.Close()
 		if copyErr != nil {

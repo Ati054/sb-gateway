@@ -831,7 +831,7 @@ test("ships without starter artifacts and encodes the outage policy", async () =
   assert.match(page, /name: "OKX"/);
   assert.match(page, /Сайт, приложение, REST\/WebSocket API/);
   assert.match(page, /<th>Доступность \/ ошибки HTTPS<\/th>/);
-  assert.match(page, /<th>Медиана<\/th>/);
+  assert.match(page, /<th(?:\s[^>]*)?>Медиана<\/th>/);
   assert.doesNotMatch(page, /<th>Скорость<\/th>/);
   assert.doesNotMatch(page, /<th>p95 HTTPS<\/th>/);
   assert.doesNotMatch(page, /policy\.p95|<td>\{node\.p95/);

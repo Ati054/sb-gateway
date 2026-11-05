@@ -21,16 +21,16 @@ The screenshot uses synthetic example data, not a live installation.
 ## Technical Overview
 
 SB Gateway is a bilingual Web-managed traffic-policy gateway packaged as
-one Linux ARM64 RouterOS container. The current source pins Xray-core 26.10.29
+one Linux ARM64 RouterOS container. The current source pins Xray-core 26.10.31
 only; sing-box is not shipped and there is no core switch in the UI.
 
-The server uses Xray 26.10.29; exported Reverse VLESS bridge profiles remain pinned
+The server build targets Xray 26.10.31; exported Reverse VLESS bridge profiles remain pinned
 to 26.7.28 and advertise that requirement in their response header. Both use the
 current `streamSettings.method` transport field. Compatibility is accepted only
 after an end-to-end reverse data-plane test, not by connection status alone.
 
-The server pins upstream v26.10.29 at commit `0afec66`, built with Go 1.27.3.
-The source update includes upstream's certificate-trust security fixes;
+The server pins upstream v26.10.31 at commit `a4a3dff`, built with Go 1.27.3.
+The source update retains the certificate-trust fixes and disables MPTCP by default;
 image promotion still requires the complete
 ARM64 configuration and data-plane acceptance gate.
 

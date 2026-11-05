@@ -306,7 +306,8 @@
   :if ([:len [/ip/firewall/nat/find where comment=$natComment]] = 0) do={ /ip/firewall/nat/add chain=dstnat action=dst-nat to-addresses=$"SB_CONTAINER_IP" comment=$natComment disabled=yes }
   :local dnsNat [/ip/firewall/nat/find where comment=$natComment]
   :if ([:len $dnsNat] != 1) do={ :error "SB-GATEWAY managed DNS NAT missing or ambiguous" }
-  /ip/firewall/nat/set $dnsNat chain=dstnat action=dst-nat src-address-list="SB_MANAGED_CLIENTS" connection-mark="sb-managed" dst-address-type=local protocol=$dnsProtocol dst-port=53 to-addresses=$"SB_CONTAINER_IP" to-ports=1053 disabled=no
+  /ip/firewall/nat/unset $dnsNat dst-address-type
+  /ip/firewall/nat/set $dnsNat chain=dstnat action=dst-nat src-address-list="SB_MANAGED_CLIENTS" in-interface-list=!WAN connection-mark="sb-managed" protocol=$dnsProtocol dst-port=53 to-addresses=$"SB_CONTAINER_IP" to-ports=1053 disabled=no
   :local firstDNSNat [/ip/firewall/nat/find]
   :if (([:len $firstDNSNat] > 0) && ([:pick $firstDNSNat 0 1] != $dnsNat)) do={ /ip/firewall/nat/move $dnsNat destination=[:pick $firstDNSNat 0 1] }
 }

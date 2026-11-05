@@ -21,6 +21,10 @@ var localTransparentInbounds = []string{"tun-routeros"}
 // the already-built outbound source so invalid references fail closed without
 // keeping a second candidate graph in memory.
 func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]any) (map[string]any, error) {
+	return buildXrayRouteSource(config, nodes, outbounds, healthProbeInventoryCount(nodes), nil, nil)
+}
+
+func buildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]any, candidateCount int, eligibility map[string]bool, loopServers []string) (map[string]any, error) {
 	available := make(map[string]struct{}, len(outbounds))
 	for _, outbound := range outbounds {
 		if tag := textValue(outbound["tag"]); tag != "" {
@@ -41,7 +45,11 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 		}
 	}
 	for _, policy := range enabledObjects(config["policies"]) {
-		if len(policyCandidateGroups(policy, selectable)) != 0 {
+		eligible := len(policyCandidateGroups(policy, selectable)) != 0
+		if eligibility != nil {
+			eligible = eligibility[textValue(policy["id"])]
+		}
+		if eligible {
 			continue
 		}
 		policyID := textValue(policy["id"])
@@ -50,7 +58,6 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 			delete(available, policyServiceSelectorTag(policyID, serviceID))
 		}
 	}
-	candidateCount := healthProbeInventoryCount(nodes)
 	rules := []map[string]any{
 		{"action": "sniff"},
 		{"protocol": "dns", "action": "hijack-dns"},
@@ -86,7 +93,11 @@ func BuildXrayRouteSource(config map[string]any, nodes, outbounds []map[string]a
 			"inbound": managedInbounds, "network": "tcp", "port": 853, "action": "reject",
 		})
 	}
-	if loopRule := xrayNodeLoopRule(nodes); loopRule != nil {
+	loopRule := xrayNodeLoopRule(nodes)
+	if loopServers != nil {
+		loopRule = xrayNodeLoopRuleFromServers(loopServers)
+	}
+	if loopRule != nil {
 		rules = append(rules, loopRule)
 	}
 
@@ -387,10 +398,17 @@ func enabledInternalCIDRs(config map[string]any) []string {
 }
 
 func xrayNodeLoopRule(nodes []map[string]any) map[string]any {
+	servers := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		servers = append(servers, textValue(node["server"]))
+	}
+	return xrayNodeLoopRuleFromServers(servers)
+}
+
+func xrayNodeLoopRuleFromServers(servers []string) map[string]any {
 	domains := make([]string, 0)
 	addresses := make([]string, 0)
-	for _, node := range nodes {
-		server := textValue(node["server"])
+	for _, server := range servers {
 		if server == "" {
 			continue
 		}

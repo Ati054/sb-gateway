@@ -92,12 +92,18 @@ export function displayedLatencyComparison(rawHealth: unknown, candidate: string
 function readLatencyComparison(rawHealth: unknown, candidate: string, now: number, since: number, field: string, allowExpired: boolean) {
   const health = rawHealth && typeof rawHealth === "object"
     ? rawHealth as Record<string, unknown> : {};
-  const comparisons = health[field];
+  const marker = health.warm_planning_marker;
+  const paired = marker === "gstatic-warm-head-v1" || marker === "gstatic-fresh-paired-head-v1";
+  if (marker !== undefined && marker !== null && marker !== "" && !paired) return null;
+  const comparisons = health[paired ? `warm_${field}` : field];
   const raw = comparisons && typeof comparisons === "object"
     ? (comparisons as Record<string, unknown>)[candidate] : null;
-  if (health.runtime_confirmed !== true || health.runtime_error || candidate === health.runtime_selected
+  if (health.runtime_confirmed !== true || health.runtime_error
+    || typeof health.runtime_selected !== "string" || !health.runtime_selected
+    || candidate === health.runtime_selected
     || !raw || typeof raw !== "object") return null;
   const pair = raw as Record<string, unknown>;
+  if (paired && pair.measurement !== marker) return null;
   const numbers = [pair.active_delay_ms, pair.candidate_delay_ms, pair.active_at, pair.candidate_at, pair.expires_at];
   if (!numbers.every(value => typeof value === "number" && Number.isFinite(value) && value > 0)
     || !Number.isFinite(now) || pair.active !== health.runtime_selected || pair.active === "block") return null;
@@ -107,5 +113,6 @@ function readLatencyComparison(rawHealth: unknown, candidate: string, now: numbe
     || Math.abs(activeAt - candidateAt) > 10) return null;
   const percent = roundOne((reserve - active) * 100 / active);
   if (!Number.isFinite(percent)) return null;
-  return { percent: Object.is(percent, -0) ? 0 : percent, activeAt, candidateAt };
+  return { percent: Object.is(percent, -0) ? 0 : percent, activeAt, candidateAt,
+    ...(typeof pair.measurement === "string" ? { measurement: pair.measurement } : {}) };
 }

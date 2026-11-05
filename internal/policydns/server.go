@@ -12,9 +12,14 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/dnsroute"
+	"github.com/sb-gateway/sb-gateway/internal/netpolicy"
 )
 
 type Options struct {
+	// RouteEpochs is wired by the in-process appliance, never inferred in standalone mode.
+	RouteEpochs  *dnsroute.Registry
 	Workers      int
 	TCPSessions  int
 	CacheEntries int
@@ -23,9 +28,13 @@ type Options struct {
 }
 
 func OptionsFromEnvironment() Options {
+	workers := boundedEnvironmentInt("SB_POLICY_DNS_WORKERS", 32, 2, 64)
+	// Idle TCP sessions do not occupy upstream workers. Keep enough transport
+	// capacity for ordinary bursts while preserving the explicit session cap.
+	defaultTCPSessions := min(32, max(8, workers))
 	return Options{
-		Workers:      boundedEnvironmentInt("SB_POLICY_DNS_WORKERS", 32, 2, 64),
-		TCPSessions:  boundedEnvironmentInt("SB_POLICY_DNS_TCP_SESSIONS", 8, 2, 32),
+		Workers:      workers,
+		TCPSessions:  boundedEnvironmentInt("SB_POLICY_DNS_TCP_SESSIONS", defaultTCPSessions, 2, 32),
 		CacheEntries: boundedEnvironmentInt("SB_POLICY_DNS_CACHE_ENTRIES", 4096, 256, 65536),
 		CacheBytes:   boundedEnvironmentInt("SB_POLICY_DNS_CACHE_BYTES", 4*1024*1024, 1024*1024, 64*1024*1024),
 		StaleTTL:     boundedEnvironmentDuration("SB_POLICY_DNS_STALE_SECONDS", 3600, 0, 86400),
@@ -71,6 +80,7 @@ func Serve(ctx context.Context, path string, options Options) error {
 	if err != nil {
 		return err
 	}
+	current.attachRouteEpochs(options.RouteEpochs)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	service := &service{
@@ -132,7 +142,7 @@ func (service *service) listen(current *runtime) error {
 		if err != nil {
 			return fmt.Errorf("listen UDP lane %s: %w", lane.id, err)
 		}
-		listener, err := net.Listen("tcp", address)
+		listener, err := netpolicy.ListenTCP("tcp", address)
 		if err != nil {
 			packet.Close()
 			return fmt.Errorf("listen TCP lane %s: %w", lane.id, err)
@@ -141,6 +151,24 @@ func (service *service) listen(current *runtime) error {
 		service.wait.Add(2)
 		go service.serveUDP(lane.id, packet)
 		go service.serveTCP(lane.id, listener)
+	}
+	if current.managed != nil {
+		for _, endpoint := range current.managed.listeners {
+			address := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port))
+			packet, err := net.ListenPacket("udp", address)
+			if err != nil {
+				return fmt.Errorf("listen managed DNS UDP: %w", err)
+			}
+			listener, err := netpolicy.ListenTCP("tcp", address)
+			if err != nil {
+				_ = packet.Close()
+				return fmt.Errorf("listen managed DNS TCP: %w", err)
+			}
+			service.closers = append(service.closers, packet, listener)
+			service.wait.Add(2)
+			go service.serveUDPSource("", packet, true)
+			go service.serveTCPSource("", listener, true)
+		}
 	}
 	return nil
 }
@@ -199,6 +227,16 @@ func (service *service) closeRuntime() {
 }
 
 func (service *service) serveUDP(laneID string, connection net.PacketConn) {
+	service.serveUDPSource(laneID, connection, false)
+}
+
+func (service *service) managedLane(address net.Addr) (string, bool) {
+	service.runtimeMu.RLock()
+	defer service.runtimeMu.RUnlock()
+	return service.runtime.managedLane(managedPeer(address))
+}
+
+func (service *service) serveUDPSource(laneID string, connection net.PacketConn, managed bool) {
 	defer service.wait.Done()
 	buffer := service.udpBuffers.Get().(*[maxDNSMessage]byte)
 	defer service.udpBuffers.Put(buffer)
@@ -207,8 +245,16 @@ func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 		if err != nil {
 			return
 		}
+		selected := laneID
+		if managed {
+			var ok bool
+			selected, ok = service.managedLane(address)
+			if !ok {
+				continue
+			}
+		}
 		query := buffer[:size]
-		admission := service.admitQuery(laneID, query)
+		admission := service.admitQuery(selected, query)
 		if admission.immediate {
 			if len(admission.answer) > 0 {
 				_, _ = connection.WriteTo(admission.answer, address)
@@ -218,22 +264,32 @@ func (service *service) serveUDP(laneID string, connection net.PacketConn) {
 		// Reuse the listener buffer; handlers retain only their actual packet.
 		query = append([]byte(nil), query...)
 		service.wait.Add(1)
-		go func(admission queryAdmission, query []byte, address net.Addr) {
+		go func(admission queryAdmission, query []byte, address net.Addr, selected string) {
 			defer service.wait.Done()
-			response, resolveErr := service.resolveAdmitted(admission, laneID, query)
+			response, resolveErr := service.resolveAdmitted(admission, selected, query)
 			if resolveErr == nil && len(response) > 0 {
 				_, _ = connection.WriteTo(response, address)
 			}
-		}(admission, query, address)
+		}(admission, query, address, selected)
 	}
 }
 
 func (service *service) serveTCP(laneID string, listener net.Listener) {
+	service.serveTCPSource(laneID, listener, false)
+}
+
+func (service *service) serveTCPSource(laneID string, listener net.Listener, managed bool) {
 	defer service.wait.Done()
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
 			return
+		}
+		if managed {
+			if _, ok := service.managedLane(connection.RemoteAddr()); !ok {
+				_ = connection.Close()
+				continue
+			}
 		}
 		if !service.acquireTCP() {
 			_ = connection.Close()
@@ -265,9 +321,17 @@ func (service *service) serveTCP(laneID string, listener net.Listener) {
 				if _, err := io.ReadFull(connection, query); err != nil {
 					return
 				}
-				admission := service.admitQuery(laneID, query)
+				selected := laneID
+				if managed {
+					var ok bool
+					selected, ok = service.managedLane(connection.RemoteAddr())
+					if !ok {
+						return
+					}
+				}
+				admission := service.admitQuery(selected, query)
 				_ = connection.SetDeadline(admission.deadline)
-				answer, err := service.resolveAdmitted(admission, laneID, query)
+				answer, err := service.resolveAdmitted(admission, selected, query)
 				if err != nil || len(answer) > maxDNSMessage {
 					return
 				}

@@ -210,6 +210,10 @@ and large rule sets as well as startup CPU.
   retention behavior is preserved.
 - Documents larger than 256 KiB bypass the small map cache, avoiding another
   retained graph and deep copy. This is not a document-size limit.
+- Small state documents share an LRU cache with at most 16 entries and the
+  existing 1 MiB encoded-input ceiling. Provider-status and subscription due-time
+  checks cache only metadata, with a separate 64 KiB encoded admission ceiling;
+  they do not retain the full node graph. See [Parsed State Cache](STATE-DOCUMENT-CACHE.md).
 - Atomic-write equality checks use a bounded buffer rather than reading an
   extra full file copy.
 - Image uploads synchronize 8 MiB windows and on Linux request eviction of

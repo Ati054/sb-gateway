@@ -147,7 +147,7 @@ func TestWatchdogConsumesRestartIdentityOnlyAfterFreshTrafficReadiness(t *testin
 	}
 }
 
-func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
+func TestWatchdogExpiresOnlyRecoveredManagedEligibleDNS(t *testing.T) {
 	source := HealthWatchdogSource()
 	cleanup := strings.Index(source, "      $clearRecoveredDNS")
 	if strings.Contains(source, `dst-address~":53$"`) {
@@ -170,7 +170,10 @@ func TestWatchdogExpiresOnlyRecoveredManagedRouterDNS(t *testing.T) {
 		`:local connectionMark [/ip/firewall/connection/get $flow connection-mark]`,
 		`:if (([:len [:tostr $connectionMark]] = 0) && ([/ip/firewall/connection/get $flow dstnat] = false)) do={`,
 		`($protocol = "udp") || ($protocol = "tcp")`,
-		`($localDestination = true) && ([:tostr $sourceIP] != [:tostr $containerIP])`,
+		`($dnsEligible = true) && ([:tostr $sourceIP] != [:tostr $containerIP])`,
+		`:local dnsEligible $localDestination`,
+		`{"SB_INTERNAL_NETWORKS";"SB_BYPASS_ENDPOINTS"}`,
+		`($targetIP >> (32 - $bits)) = ($networkIP >> (32 - $bits))`,
 		`list="SB_MANAGED_CLIENTS"`,
 		`($sourceIP >> (32 - $bits)) = ($networkIP >> (32 - $bits))`,
 		`:if ($managed = true) do={ :do { /ip/firewall/connection/remove $flow } on-error={} }`,

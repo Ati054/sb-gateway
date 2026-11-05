@@ -64,6 +64,9 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 		text = updated
 		text = upgradeStartupNginxCapacity(text)
 		normalized = normalized || text != updated
+		updated = upgradeStartupNginxSubscriptionRefresh(text)
+		normalized = normalized || text != updated
+		text = updated
 		warnStartupNginxStreamingLimits(text)
 		if normalized {
 			if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
@@ -84,6 +87,7 @@ func EnsureStartupNginxTrafficReadiness(path string) (bool, error) {
 	}
 	text = runtimeconfig.UpgradeNginxStreamingLimits(text)
 	text = upgradeStartupNginxCapacity(text)
+	text = upgradeStartupNginxSubscriptionRefresh(text)
 	warnStartupNginxStreamingLimits(text)
 	if err := writeAtomic(path, []byte(text), 0o600, false); err != nil {
 		return false, err
@@ -95,6 +99,15 @@ func upgradeStartupNginxCapacity(config string) string {
 	updated, err := runtimeconfig.UpgradeNginxCapacity(config)
 	if err != nil {
 		log.Printf("startup Nginx capacity warning: %v; use Check and Apply to regenerate managed configuration", err)
+		return config
+	}
+	return updated
+}
+
+func upgradeStartupNginxSubscriptionRefresh(config string) string {
+	updated, err := runtimeconfig.UpgradeNginxSubscriptionRefreshTimeout(config)
+	if err != nil {
+		log.Printf("startup Nginx subscription refresh timeout warning: %v; use Check and Apply to regenerate managed configuration", err)
 		return config
 	}
 	return updated

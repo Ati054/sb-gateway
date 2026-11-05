@@ -78,6 +78,7 @@ func rememberWorkingSelection(contract healthPolicyContract, item *policyHealthS
 // helper. A successful CLI exit alone is not evidence of an applied override.
 func RestoreXraySelectors(ctx context.Context, configPath string, opts Options) error {
 	runtime := newXraySelectorRuntime(opts)
+	defer runtime.poolCache.closeDefinitions()
 	runtime.probeContext = ctx
 	control, err := newXrayControlClient(opts.XrayAPIServer)
 	if err != nil {
@@ -156,10 +157,11 @@ func xrayStartupPlan(configPath string, opts Options) (startupSelectionPlan, err
 	// Decode only startup fields, not the multi-day sample history or node
 	// inventory. Reboot restoration does not need a second telemetry cache.
 	var pool struct {
-		Version          int                 `json:"version"`
-		Policies         map[string][]string `json:"policies"`
-		PolicyPrefixes   map[string]string   `json:"policy_prefixes"`
-		BaseOutboundTags []string            `json:"base_outbound_tags"`
+		Version          int                   `json:"version"`
+		Policies         map[string][]string   `json:"policies"`
+		PolicyPrefixes   map[string]string     `json:"policy_prefixes"`
+		BaseOutboundTags []string              `json:"base_outbound_tags"`
+		Nodes            map[string]healthNode `json:"nodes"`
 		HealthPolicies   map[string]struct {
 			Mode       string                `json:"mode"`
 			Candidates []string              `json:"candidates"`
@@ -175,6 +177,12 @@ func xrayStartupPlan(configPath string, opts Options) (startupSelectionPlan, err
 	var state map[string]*startupHealthStateItem
 	if readJSON(opts.HealthPoolFile, &pool) != nil || pool.Version < 2 {
 		return startupSelectionPlan{Balancers: balancers}, nil
+	}
+	if pool.Version >= 5 {
+		for id, contract := range pool.HealthPolicies {
+			contract.Nodes = pool.Nodes
+			pool.HealthPolicies[id] = contract
+		}
 	}
 	if readJSON(statePath(opts.StateRoot, "selector-health"), &state) != nil || state == nil {
 		state = make(map[string]*startupHealthStateItem)

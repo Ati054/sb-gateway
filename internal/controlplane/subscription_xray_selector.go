@@ -8,12 +8,14 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
+	"github.com/sb-gateway/sb-gateway/internal/subscriptioncatalog"
 )
 
 const subscriptionUpdateDynamicPrefix = "sb-subscription-update-"
@@ -37,7 +39,7 @@ func runSubscriptionXrayCommand(ctx context.Context, binary string, args ...stri
 	return exec.CommandContext(ctx, binary, args...).CombinedOutput()
 }
 
-func selectSubscriptionXrayOutbound(ctx context.Context, options RuntimeOptions, outbound string, command subscriptionXrayCommand, repository *stateRepository) error {
+func selectSubscriptionXrayOutbound(ctx context.Context, options RuntimeOptions, outbound string, command subscriptionXrayCommand, repository *stateRepository, catalogRoots ...string) error {
 	outbound = strings.TrimSpace(outbound)
 	if outbound == "" {
 		return errors.New("subscription update outbound is empty")
@@ -56,13 +58,49 @@ func selectSubscriptionXrayOutbound(ctx context.Context, options RuntimeOptions,
 		return errors.New("Xray health-pool contract is unavailable")
 	}
 	var pool struct {
-		Outbounds map[string]json.RawMessage `json:"outbounds"`
+		Version            int                                        `json:"version"`
+		Outbounds          map[string]json.RawMessage                 `json:"outbounds"`
+		Catalogs           map[string]subscriptioncatalog.Ref         `json:"catalogs"`
+		CatalogDefinitions map[string]runtimeconfig.CatalogDefinition `json:"catalog_definitions"`
 	}
 	if json.Unmarshal(poolBody, &pool) != nil {
 		return errors.New("Xray health-pool contract is invalid")
 	}
-	if raw := pool.Outbounds[outbound]; len(raw) != 0 {
-		runtimeTag = runtimeconfig.DynamicOutboundTag(subscriptionUpdateDynamicPrefix, outbound, raw)
+	raw := pool.Outbounds[outbound]
+	if definition, exists := pool.CatalogDefinitions[outbound]; exists {
+		ref, found := pool.Catalogs[definition.Generation]
+		if pool.Version != 5 || !found || ref.Generation != definition.Generation || definition.FingerprintKind != runtimeconfig.CatalogFingerprintKind {
+			return errors.New("invalid subscription update catalog contract")
+		}
+		root := filepath.Join(envOr("SB_GATEWAY_SECRETS_DIR", "/config/secrets"), "subscription-catalogs")
+		if len(catalogRoots) > 0 && catalogRoots[0] != "" {
+			root = catalogRoots[0]
+		}
+		reader, err := subscriptioncatalog.Open(root, ref)
+		if err != nil {
+			return errors.New("subscription update catalog is unavailable")
+		}
+		record, err := reader.Get(ctx, outbound)
+		_ = reader.Close()
+		if err != nil {
+			return errors.New("subscription update catalog node is unavailable")
+		}
+		var metadata struct {
+			Fingerprint string `json:"definition_fingerprint"`
+		}
+		if json.Unmarshal(record.Metadata, &metadata) != nil || metadata.Fingerprint != definition.Fingerprint {
+			return errors.New("subscription update catalog fingerprint mismatch")
+		}
+		raw, err = runtimeconfig.RenderCatalogOutbound(record)
+		if err != nil {
+			return err
+		}
+		runtimeTag = runtimeconfig.CatalogDynamicOutboundTag(subscriptionUpdateDynamicPrefix, outbound, definition)
+	}
+	if len(raw) != 0 {
+		if runtimeTag == outbound {
+			runtimeTag = runtimeconfig.DynamicOutboundTag(subscriptionUpdateDynamicPrefix, outbound, raw)
+		}
 		if previous == runtimeTag {
 			// The deterministic handler is already live and selected. Re-adding
 			// it is rejected by Xray and would make a normal repeated refresh

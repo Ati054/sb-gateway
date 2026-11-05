@@ -5,6 +5,7 @@ import "errors"
 type NativeArtifactOptions struct {
 	RuleSetRoot string
 	Nginx       NginxRenderOptions
+	Catalog     RuntimeNodeCatalog
 }
 
 // BuildNativeRuntimeArtifacts renders every container-local artifact. The
@@ -19,6 +20,9 @@ func BuildNativeRuntimeArtifacts(
 ) (map[string][]byte, error) {
 	if readSecret == nil || secretPath == nil {
 		return nil, errors.New("native runtime artifacts require secret and path resolvers")
+	}
+	if options.Catalog != nil {
+		return buildNativeCatalogArtifacts(config, nodes, readSecret, secretPath, options)
 	}
 	secretValues := make(map[string]string)
 	uncachedRead := readSecret

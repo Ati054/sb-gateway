@@ -314,7 +314,7 @@ func (server *Server) status(response http.ResponseWriter, request *http.Request
 		return
 	}
 	if request.URL.Query().Get("view") == "subscriptions" {
-		state, err := server.repository.auxiliary("subscription-nodes")
+		state, err := server.repository.subscriptionMetadata()
 		if err != nil {
 			server.internalStateError(response, request, err)
 			return
@@ -501,6 +501,9 @@ func managedDNSRulesNeedUpdate(active string, metadata map[string]any) bool {
 	source, _ := metadata["routeros_source"].(string)
 	if active == "" || source == "" {
 		return false
+	}
+	if !strings.Contains(source, `/ip/firewall/nat/unset $dnsNat dst-address-type`) {
+		return true
 	}
 	if strings.Contains(source, "connection-mark=no-mark and dst-address") {
 		return true
@@ -972,7 +975,7 @@ func runtimeBuildInfo() map[string]any {
 			break
 		}
 	}
-	version := envOr("SB_XRAY_VERSION", "26.10.17")
+	version := envOr("SB_XRAY_VERSION", "26.10.31")
 	runtimeCore := "starting"
 	if running {
 		runtimeCore = "xray"

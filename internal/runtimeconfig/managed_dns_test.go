@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestManagedDNSIngressPreservesClientPolicyAndRejectsUnknownSources(t *testing.T) {
+func TestLegacyManagedDNSIngressPreservesClientPolicyAndRejectsUnknownSources(t *testing.T) {
 	for _, mode := range []string{"priority", "best"} {
 		t.Run(mode, func(t *testing.T) {
 			config := map[string]any{
@@ -74,7 +74,7 @@ func TestManagedDNSIngressPreservesClientPolicyAndRejectsUnknownSources(t *testi
 	}
 }
 
-func TestManagedDNSNoClientsHasNoResolverFallback(t *testing.T) {
+func TestLegacyManagedDNSNoClientsHasNoResolverFallback(t *testing.T) {
 	_, rules := managedDNSIngress("198.18.0.2", []map[string]any{{"port": "53", "outboundTag": "global-dns"}})
 	if len(rules) != 1 || rules[0]["outboundTag"] != "block" {
 		t.Fatalf("empty allowlist must reject: %#v", rules)
@@ -92,16 +92,23 @@ func TestRouterOSManagedDNSUsesSharedGateAndPreservesLocalBypass(t *testing.T) {
 		`/ip/firewall/mangle/unset $gate dst-address-type`,
 		`chain="sb-gateway-divert" action=return disabled=no dst-address-type=local`,
 		`chain="sb-gateway-divert" action=return disabled=no dst-address-list="SB_INTERNAL_NETWORKS"`,
+		`action=dst-nat src-address-list="SB_MANAGED_CLIENTS" in-interface-list=!WAN connection-mark="sb-managed"`,
 	} {
 		if !strings.Contains(source, fragment) {
 			t.Fatalf("missing scope or bypass %q", fragment)
 		}
 	}
 	for _, proto := range []string{"udp", "tcp"} {
-		want := `connection-mark="sb-managed" dst-address-type=local protocol=` + proto + ` dst-port=53 to-addresses="172.31.255.2" to-ports=1053 disabled=no`
+		want := `connection-mark="sb-managed" protocol=` + proto + ` dst-port=53 to-addresses="172.31.255.2" to-ports=1053 disabled=no`
 		if !strings.Contains(source, want) {
 			t.Fatalf("DNS NAT must require the shared connection mark: %s", proto)
 		}
+	}
+	if strings.Count(source, `/ip/firewall/nat/unset $dnsNat dst-address-type`) != 2 {
+		t.Fatal("upgrading DNS NAT must remove the previous local-only restriction for TCP and UDP")
+	}
+	if strings.Contains(source, `connection-mark="sb-managed" dst-address-type=local protocol=`) {
+		t.Fatal("public client DNS still traverses the Xray frontend")
 	}
 	objectValue(config["dns"])["hijack_managed_clients"] = false
 	disabled, err := RenderRouterOSTrafficCandidate(config, nil)

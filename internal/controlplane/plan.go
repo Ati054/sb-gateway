@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-
-	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
 
 type planChange struct {
@@ -104,9 +102,9 @@ func (server *Server) buildPlan(config map[string]any) (map[string]any, error) {
 		before := committedRouterOS
 		var beforeErr error
 		if before == "" {
-			before, beforeErr = runtimeconfig.RenderRouterOSTrafficCandidate(active, beforeNodes, server.opts.Runtime.RuleSetDir)
+			before, beforeErr = server.renderRouterOSTrafficCandidate(active, beforeNodes)
 		}
-		after, afterErr := runtimeconfig.RenderRouterOSTrafficCandidate(config, afterNodes, server.opts.Runtime.RuleSetDir)
+		after, afterErr := server.renderRouterOSTrafficCandidate(config, afterNodes)
 		if beforeErr != nil || afterErr != nil {
 			check.Valid = false
 			check.Errors = append(check.Errors, validationIssue{

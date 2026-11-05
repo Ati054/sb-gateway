@@ -103,7 +103,7 @@ func TestSubscriptionRuntimeIdleReadsReplacementWithSameSizeAndTime(t *testing.T
 	if worked, err := s.activatePendingSubscription(context.Background()); !worked || err != nil {
 		t.Fatalf("atomic replacement: %v %v", worked, err)
 	}
-	if runtime.activateCalls != 2 || runtime.nodes[len(runtime.nodes)-1]["server"] != "alt.example.test" {
+	if runtime.activateCalls != 2 || runtime.nodes[0]["id"] != "one-new" || runtime.nodes[0]["server"] != "alt.example.test" {
 		t.Fatal("the document cache concealed the new catalog")
 	}
 }

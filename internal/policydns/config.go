@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -17,12 +18,39 @@ import (
 
 const maxDNSMessage = 65535
 
+type managedIngressConfig struct {
+	Listeners []managedListenerConfig `json:"listeners"`
+	Rules     []managedSourceConfig   `json:"rules"`
+}
+
+type managedListenerConfig struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+type managedSourceConfig struct {
+	SourceCIDRs []string `json:"source_cidrs"`
+	LaneID      string   `json:"lane_id"`
+}
+
+type managedSource struct {
+	prefixes []netip.Prefix
+	laneID   string
+}
+
+type managedIngress struct {
+	listeners []managedListenerConfig
+	rules     []managedSource
+}
+
 type rawConfig struct {
-	DomainSets     map[string]domainset.Set `json:"domain_sets"`
-	Version        int                      `json:"version"`
-	Servers        map[string]serverConfig  `json:"servers"`
-	Lanes          []laneConfig             `json:"lanes"`
-	TimeoutSeconds float64                  `json:"timeout_seconds"`
+	ManagedIngress    *managedIngressConfig    `json:"managed_ingress"`
+	LaneLayoutVersion int                      `json:"lane_layout_version"`
+	DomainSets        map[string]domainset.Set `json:"domain_sets"`
+	Version           int                      `json:"version"`
+	Servers           map[string]serverConfig  `json:"servers"`
+	Lanes             []laneConfig             `json:"lanes"`
+	TimeoutSeconds    float64                  `json:"timeout_seconds"`
 }
 
 type serverConfig struct {
@@ -71,12 +99,15 @@ type lane struct {
 }
 
 type runtime struct {
-	servers map[string]upstream
-	lanes   map[string]*lane
-	ordered []*lane
-	timeout time.Duration
-	cache   *responseCache
-	flights flightGroup
+	managed       *managedIngress
+	servers       map[string]upstream
+	lanes         map[string]*lane
+	ordered       []*lane
+	serverConfigs map[string]serverConfig
+	routeProfiles map[string]*routeProfile
+	timeout       time.Duration
+	cache         *responseCache
+	flights       flightGroup
 }
 
 func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Duration) (*runtime, error) {
@@ -92,6 +123,9 @@ func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Durati
 	if raw.Version < 0 || raw.Version > 2 {
 		return nil, errors.New("unsupported policy DNS schema")
 	}
+	if raw.ManagedIngress != nil && raw.LaneLayoutVersion != 2 {
+		return nil, errors.New("managed DNS ingress requires lane layout 2")
+	}
 	if len(raw.Lanes) == 0 {
 		return nil, errNoLanes
 	}
@@ -103,10 +137,11 @@ func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Durati
 		timeout = 15 * time.Second
 	}
 	runtime := &runtime{
-		servers: make(map[string]upstream, len(raw.Servers)),
-		lanes:   make(map[string]*lane, len(raw.Lanes)),
-		timeout: timeout,
-		cache:   newResponseCache(cacheEntries, cacheBytes, staleTTL),
+		servers:       make(map[string]upstream, len(raw.Servers)),
+		serverConfigs: raw.Servers,
+		lanes:         make(map[string]*lane, len(raw.Lanes)),
+		timeout:       timeout,
+		cache:         newResponseCache(cacheEntries, cacheBytes, staleTTL),
 	}
 	for tag, config := range raw.Servers {
 		server, err := newUpstream(config, timeout)
@@ -134,6 +169,12 @@ func loadRuntime(path string, cacheEntries, cacheBytes int, staleTTL time.Durati
 		runtime.lanes[compiled.id] = compiled
 		runtime.ordered = append(runtime.ordered, compiled)
 	}
+	managed, err := compileManagedIngress(raw.ManagedIngress, runtime.lanes)
+	if err != nil {
+		runtime.close()
+		return nil, err
+	}
+	runtime.managed = managed
 	return runtime, nil
 }
 
@@ -157,7 +198,10 @@ func ProbeListeners(ctx context.Context, path string) error {
 		return err
 	}
 	var raw struct {
-		Lanes []struct {
+		Version           int                   `json:"version"`
+		LaneLayoutVersion int                   `json:"lane_layout_version"`
+		ManagedIngress    *managedIngressConfig `json:"managed_ingress"`
+		Lanes             []struct {
 			ID   string `json:"id"`
 			Host string `json:"host"`
 			Port int    `json:"port"`
@@ -169,6 +213,24 @@ func ProbeListeners(ctx context.Context, path string) error {
 	if len(raw.Lanes) == 0 {
 		return errNoLanes
 	}
+	if raw.Version < 0 || raw.Version > 2 || (raw.ManagedIngress != nil && raw.LaneLayoutVersion != 2) {
+		return errors.New("unsupported managed DNS listener schema")
+	}
+	lanes := make(map[string]*lane, len(raw.Lanes))
+	for _, value := range raw.Lanes {
+		compiled, err := compileLane(laneConfig{ID: value.ID, Host: value.Host, Port: value.Port})
+		if err != nil {
+			return err
+		}
+		if lanes[compiled.id] != nil {
+			return errors.New("duplicate policy DNS lane")
+		}
+		lanes[compiled.id] = compiled
+	}
+	managed, err := compileManagedIngress(raw.ManagedIngress, lanes)
+	if err != nil {
+		return err
+	}
 	dialer := net.Dialer{Timeout: time.Second}
 	for _, lane := range raw.Lanes {
 		address := net.JoinHostPort(lane.Host, strconv.Itoa(lane.Port))
@@ -177,6 +239,15 @@ func ProbeListeners(ctx context.Context, path string) error {
 			return fmt.Errorf("policy DNS lane %q: %w", lane.ID, dialErr)
 		}
 		_ = connection.Close()
+	}
+	if managed != nil {
+		for _, endpoint := range managed.listeners {
+			connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)))
+			if err != nil {
+				return fmt.Errorf("managed DNS listener: %w", err)
+			}
+			_ = connection.Close()
+		}
 	}
 	return nil
 }
@@ -282,12 +353,110 @@ func (runtime *runtime) topology() string {
 	for _, lane := range runtime.ordered {
 		values = append(values, fmt.Sprintf("%s|%s|%d", lane.id, lane.host, lane.port))
 	}
+	if runtime.managed != nil {
+		for _, endpoint := range runtime.managed.listeners {
+			values = append(values, fmt.Sprintf("managed|%s|%d", endpoint.Host, endpoint.Port))
+		}
+	}
 	sort.Strings(values)
 	return strings.Join(values, "\n")
 }
 
 func (runtime *runtime) close() {
-	for _, server := range runtime.servers {
-		server.close()
+	for tag, server := range runtime.servers {
+		if profile := runtime.routeProfiles[tag]; profile != nil {
+			profile.close()
+		} else {
+			server.close()
+		}
 	}
+}
+
+// Match the compiler's ordered source rules; an unknown source has no default lane.
+func compileManagedIngress(raw *managedIngressConfig, lanes map[string]*lane) (*managedIngress, error) {
+	occupied := make(map[netip.AddrPort]bool, len(lanes))
+	for _, lane := range lanes {
+		address, err := netip.ParseAddr(lane.host)
+		if err != nil {
+			return nil, errors.New("invalid DNS lane endpoint")
+		}
+		endpoint := netip.AddrPortFrom(address.Unmap(), uint16(lane.port))
+		if occupied[endpoint] {
+			return nil, errors.New("duplicate DNS lane endpoint")
+		}
+		occupied[endpoint] = true
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	if len(raw.Listeners) == 0 {
+		return nil, errors.New("managed DNS ingress has no listener")
+	}
+	result := &managedIngress{listeners: make([]managedListenerConfig, 0, len(raw.Listeners)), rules: make([]managedSource, 0, len(raw.Rules))}
+	for _, listener := range raw.Listeners {
+		address, err := netip.ParseAddr(listener.Host)
+		if err != nil || address.Zone() != "" {
+			return nil, errors.New("managed DNS listener requires a literal unicast address")
+		}
+		address = address.Unmap()
+		if !(address.IsGlobalUnicast() || address.IsLoopback() || address.IsLinkLocalUnicast()) || listener.Port < 1024 || listener.Port > 65535 {
+			return nil, errors.New("invalid managed DNS listener endpoint")
+		}
+		endpoint := netip.AddrPortFrom(address, uint16(listener.Port))
+		if occupied[endpoint] {
+			return nil, errors.New("managed DNS listener collides with another listener")
+		}
+		occupied[endpoint] = true
+		result.listeners = append(result.listeners, managedListenerConfig{Host: address.String(), Port: listener.Port})
+	}
+	for _, rule := range raw.Rules {
+		if lanes[rule.LaneID] == nil || len(rule.SourceCIDRs) == 0 {
+			return nil, errors.New("managed DNS source requires known lane and CIDRs")
+		}
+		compiled := managedSource{laneID: rule.LaneID, prefixes: make([]netip.Prefix, 0, len(rule.SourceCIDRs))}
+		for _, text := range rule.SourceCIDRs {
+			prefix, err := netip.ParsePrefix(text)
+			if err != nil {
+				return nil, errors.New("invalid managed DNS source CIDR")
+			}
+			if prefix.Addr().Is4In6() {
+				if prefix.Bits() < 96 {
+					return nil, errors.New("ambiguous mapped managed DNS source CIDR")
+				}
+				prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+			}
+			compiled.prefixes = append(compiled.prefixes, prefix.Masked())
+		}
+		result.rules = append(result.rules, compiled)
+	}
+	return result, nil
+}
+
+func (runtime *runtime) managedLane(address netip.Addr) (string, bool) {
+	if runtime.managed == nil || !address.IsValid() {
+		return "", false
+	}
+	address = address.WithZone("").Unmap()
+	for _, rule := range runtime.managed.rules {
+		for _, prefix := range rule.prefixes {
+			if prefix.Contains(address) {
+				return rule.laneID, true
+			}
+		}
+	}
+	return "", false
+}
+
+func managedPeer(address net.Addr) netip.Addr {
+	switch peer := address.(type) {
+	case *net.UDPAddr:
+		if peer != nil {
+			return peer.AddrPort().Addr().Unmap()
+		}
+	case *net.TCPAddr:
+		if peer != nil {
+			return peer.AddrPort().Addr().Unmap()
+		}
+	}
+	return netip.Addr{}
 }

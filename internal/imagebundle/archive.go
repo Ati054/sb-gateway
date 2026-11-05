@@ -58,6 +58,7 @@ type Details struct {
 	LifecycleVersion           string   `json:"lifecycle_version"`
 	ConfigSchemaVersion        int      `json:"config_schema_version"`
 	MinimumConfigSchemaVersion int      `json:"minimum_config_schema_version"`
+	SubscriptionCatalogSchema  int      `json:"subscription_catalog_schema,omitempty"`
 }
 
 // Normalize converts BuildKit's blob-oriented Docker exporter into the
@@ -257,7 +258,8 @@ func Validate(path, expectedImage, expectedVersion string) (Details, error) {
 		return Details{}, errors.New("wrong SB Gateway version label")
 	}
 	configSchema, minimumSchema, compatible := releasecontract.Compatible(labels, releasecontract.ConfigSchemaVersion)
-	if !compatible {
+	catalogSchema, catalogCompatible := releasecontract.CatalogSchema(labels)
+	if !compatible || !catalogCompatible {
 		return Details{}, errors.New("wrong SB Gateway release contract")
 	}
 	if configSchema != releasecontract.ConfigSchemaVersion {
@@ -275,6 +277,7 @@ func Validate(path, expectedImage, expectedVersion string) (Details, error) {
 		LifecycleVersion:           labels[releasecontract.LifecycleVersionLabel],
 		ConfigSchemaVersion:        configSchema,
 		MinimumConfigSchemaVersion: minimumSchema,
+		SubscriptionCatalogSchema:  catalogSchema,
 	}, nil
 }
 

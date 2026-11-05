@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestSubscriptionRefreshRequestDeadlineScope(t *testing.T) {
@@ -25,8 +24,8 @@ func TestSubscriptionRefreshRequestDeadlineScope(t *testing.T) {
 			t.Fatalf("%s %s: got %v, want %v", item.method, item.path, got, item.want)
 		}
 	}
-	if subscriptionRefreshResponseTimeout <= 60*time.Second {
-		t.Fatalf("response timeout %s must cover one queued and one active bounded refresh", subscriptionRefreshResponseTimeout)
+	if subscriptionRefreshResponseTimeout <= subscriptionDownloadTimeout(nil) {
+		t.Fatalf("response timeout %s must leave headroom after the shared admission/download budget", subscriptionRefreshResponseTimeout)
 	}
 }
 
@@ -76,7 +75,7 @@ func TestNativeSubscriptionRefreshCommitsSecretsAndReturnsPublicMetadata(t *test
 		t.Fatal(err)
 	}
 	entry := state["provider"].(map[string]any)
-	node := entry["nodes"].([]any)[0].(map[string]any)
+	node, recordSecrets := catalogIntegrationPrivateRecord(t, server, entry)
 	if _, leaked := node["_uuid"]; leaked {
 		t.Fatalf("state leaked UUID: %#v", node)
 	}
@@ -84,9 +83,9 @@ func TestNativeSubscriptionRefreshCommitsSecretsAndReturnsPublicMetadata(t *test
 	if !ok || reference == "" {
 		t.Fatalf("state has no UUID reference: %#v", node)
 	}
-	stored, err := server.secrets.read(reference, true)
-	if err != nil || stored != uuid {
-		t.Fatalf("stored UUID = %q, err=%v", stored, err)
+	stored, exists := recordSecrets[reference]
+	if !exists || stored != uuid {
+		t.Fatal("checked private catalog did not preserve the UUID")
 	}
 
 	metadata := performRequest(t, server, http.MethodGet, apiPrefix+"/subscriptions/provider/nodes", nil, nil, cookie)
@@ -168,7 +167,7 @@ func TestNativeSubscriptionRefreshRetainsProviderTLSPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := state["provider"].(map[string]any)["nodes"].([]any)[0].(map[string]any)
+	node, _ := catalogIntegrationPrivateRecord(t, server, state["provider"].(map[string]any))
 	if node["tls"].(map[string]any)["pinned_peer_cert_sha256"] != "ea1f9d54f3955fa404e7fd3135319e93b4b7d2c719bdfd249aed20f470de131c" {
 		t.Fatalf("stored node lost provider TLS pin: %#v", node)
 	}
@@ -189,6 +188,10 @@ func TestNativeSubscriptionRefreshUsesHealthyReverseFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	config["reverse_vless_exits"] = []any{map[string]any{"id": "home", "enabled": true}}
+	installCatalogCompatibilityRESTFixture(t, server, config)
+	if _, err := server.repository.saveDraft(config); err != nil {
+		t.Fatal(err)
+	}
 	revision, err := server.repository.stageGeneration(config)
 	if err != nil || server.repository.setActiveRevision(revision) != nil {
 		t.Fatalf("activate fixture: revision=%q err=%v", revision, err)

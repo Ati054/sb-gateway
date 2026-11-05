@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sb-gateway/sb-gateway/internal/routeros"
-	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
 
 const applyRecoveryRetryInterval = 15 * time.Second
@@ -105,7 +104,7 @@ func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
 				return true, loadErr
 			}
 			desiredConfig = firstApplyRollbackConfig(target)
-			rendered, renderErr := runtimeconfig.RenderRouterOSTrafficCandidate(desiredConfig, nil, server.opts.Runtime.RuleSetDir)
+			rendered, renderErr := server.renderRouterOSTrafficCandidate(desiredConfig, nil)
 			if renderErr != nil {
 				return true, renderErr
 			}
@@ -142,7 +141,7 @@ func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
 		}
 		desiredRouterOS = text(activePointer["routeros_source"])
 		if desiredRouterOS == "" {
-			desiredRouterOS, err = runtimeconfig.RenderRouterOSTrafficCandidate(desiredConfig, nodes, server.opts.Runtime.RuleSetDir)
+			desiredRouterOS, err = server.renderRouterOSTrafficCandidate(desiredConfig, nodes)
 			if err != nil {
 				return true, err
 			}
@@ -193,6 +192,8 @@ func (server *Server) reconcilePendingApply(ctx context.Context) (bool, error) {
 		if confirmedRevision != "" {
 			return true, fmt.Errorf("first Apply recovery observed a new active revision %s", confirmedRevision)
 		}
+	} else if err := server.updateRecoveredRuntimeRevision(candidate.Revision); err != nil {
+		return true, err
 	}
 	if !firstApplyRecovery && server.waitApplyTraffic != nil {
 		if err := server.markApplyRecoveryState("active_committed"); err != nil {

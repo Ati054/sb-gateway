@@ -589,11 +589,13 @@ func (upstream *dohUpstream) close() {
 }
 
 type queryPlan struct {
-	server upstream
-	tag    string
-	key    string
-	answer []byte
-	local  bool
+	profile *routeProfile
+	epoch   uint64
+	server  upstream
+	tag     string
+	key     string
+	answer  []byte
+	local   bool
 }
 
 // Local decisions, including cache hits, must not need an upstream worker.
@@ -617,14 +619,14 @@ func (runtime *runtime) planQuery(laneID string, query []byte) (queryPlan, error
 	}
 	// Only share after this lane has permitted and selected the route. Server
 	// tags distinguish resolver profiles and detours, not just resolver IPs.
-	key, err := normalizedQueryKey(target, query)
+	plan, err := runtime.profilePlan(target, query)
 	if err != nil {
 		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
-	if response, ok := runtime.cache.get(key, query[:2], time.Now()); ok {
+	if response, ok := runtime.cache.get(plan.key, query[:2], time.Now()); ok {
 		return queryPlan{answer: response, local: true}, nil
 	}
-	return queryPlan{server: server, tag: target, key: key}, nil
+	return plan, nil
 }
 
 func (runtime *runtime) resolve(ctx context.Context, laneID string, query []byte) ([]byte, error) {
@@ -639,6 +641,10 @@ func (runtime *runtime) resolve(ctx context.Context, laneID string, query []byte
 }
 
 func (runtime *runtime) exchangePlan(ctx context.Context, plan queryPlan, query []byte) ([]byte, error) {
+	// A queued old-generation plan never starts fresh work on a retired route.
+	if plan.profile != nil && !plan.profile.current(plan.epoch) {
+		return nil, errDNSRouteRetired
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -654,14 +660,16 @@ func (runtime *runtime) exchangePlan(ctx context.Context, plan queryPlan, query 
 	}
 	ttl := responseTTL(response)
 	response[0], response[1] = 0, 0
-	runtime.cache.putOwned(plan.key, response, ttl, time.Now())
+	runtime.cachePlan(plan, response, ttl)
 	return response, nil
 }
 
 func (runtime *runtime) queryResult(plan queryPlan, query, normalized []byte, err error) []byte {
 	if err != nil {
-		if stale, ok := runtime.cache.getStale(plan.key, query[:2], time.Now()); ok {
-			return stale
+		if !errors.Is(err, errDNSRouteRetired) {
+			if stale, ok := runtime.stalePlan(plan, query[:2]); ok {
+				return stale
+			}
 		}
 		return refusal(query, true)
 	}

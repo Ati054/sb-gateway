@@ -16,6 +16,13 @@ const (
 )
 
 type optimizationComparison struct {
+	ActiveRawDelayMS    *int    `json:"active_raw_delay_ms,omitempty"`
+	CandidateRawDelayMS *int    `json:"candidate_raw_delay_ms,omitempty"`
+	ActiveStartedAt     float64 `json:"active_started_at,omitempty"`
+	CandidateStartedAt  float64 `json:"candidate_started_at,omitempty"`
+	QualityWave         uint64  `json:"quality_wave,omitempty"`
+	FirstConfirmationAt string  `json:"first_confirmation_at,omitempty"`
+	ConfirmationGapMS   *int    `json:"confirmation_gap_ms,omitempty"`
 	ActiveSampleAt      float64 `json:"active_sample_at,omitempty"`
 	CandidateSampleAt   float64 `json:"candidate_sample_at,omitempty"`
 	ActiveResponseMS    *int    `json:"active_response_ms,omitempty"`
@@ -31,6 +38,7 @@ type optimizationComparison struct {
 }
 
 type latencyComparison struct {
+	Measurement      string  `json:"measurement,omitempty"`
 	Active           string  `json:"active"`
 	ActiveDelayMS    int     `json:"active_delay_ms"`
 	CandidateDelayMS int     `json:"candidate_delay_ms"`
@@ -42,6 +50,9 @@ type latencyComparison struct {
 // Publish only qualified, fresh ordinary quality evidence used by soft selection.
 // This diagnostic does not probe nodes or change their ranking.
 func currentLatencyComparisons(now time.Time, item *policyHealthState, candidates []string, p effectivePolicySettings) map[string]latencyComparison {
+	if item.WarmPlanningMarker != "" && !isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)) {
+		return nil
+	}
 	active := item.RuntimeSelected
 	if !item.RuntimeConfirmed || active == "" || active == "block" || active != item.Selected || !contains(candidates, active) {
 		return nil
@@ -55,22 +66,45 @@ func currentLatencyComparisons(now time.Time, item *policyHealthState, candidate
 	if !qualified(active, false) {
 		return nil
 	}
-	baseline := item.Samples[active][len(item.Samples[active])-1]
+	baseline, _ := latestQualityObservation(item, active)
 	if baseline.ObservedAt <= 0 {
 		return nil
 	}
+	warmView := isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker))
+	var activePhase probeEvidence
+	if warmView {
+		var valid bool
+		activePhase, valid = cachedWarmPairEvidence(now, active, item)
+		if !valid || activePhase.ObservedAt.After(now) {
+			return nil
+		}
+	}
 	medians := sampleMedians(item.Samples, candidates)
+	if medians[active] == nil {
+		return nil
+	}
 	result := make(map[string]latencyComparison)
 	for _, candidate := range candidates {
-		if candidate == active || !qualified(candidate, true) {
+		if candidate == active || !qualified(candidate, true) || medians[candidate] == nil {
 			continue
 		}
-		sample := item.Samples[candidate][len(item.Samples[candidate])-1]
+		sample, _ := latestQualityObservation(item, candidate)
 		if sample.ObservedAt <= 0 || math.Abs(sample.ObservedAt-baseline.ObservedAt) > optimizationPairSkew.Seconds() {
 			continue
 		}
+		if warmView {
+			phase, valid := cachedWarmPairEvidence(now, candidate, item)
+			if !valid || phase.ObservedAt.After(now) {
+				continue
+			}
+			if (activePhase.QualityWave != 0 || phase.QualityWave != 0) &&
+				(activePhase.QualityWave == 0 || activePhase.QualityWave != phase.QualityWave || !qualityIntervalsOverlap(activePhase, phase)) {
+				continue
+			}
+		}
 		result[candidate] = latencyComparison{
-			Active: active, ActiveDelayMS: *medians[active], CandidateDelayMS: *medians[candidate],
+			Measurement: item.WarmPlanningMarker,
+			Active:      active, ActiveDelayMS: *medians[active], CandidateDelayMS: *medians[candidate],
 			ActiveAt: baseline.ObservedAt, CandidateAt: sample.ObservedAt, ExpiresAt: min(baseline.ObservedAt, sample.ObservedAt) + window,
 		}
 	}
@@ -302,32 +336,61 @@ func selectDesired(now time.Time, mode, selected string, candidates []string, gr
 		if item.Failures[selected] >= p.failureThreshold && len(stable) > 0 {
 			// Primary quality failure is not necessarily an availability outage.
 			// Only leave it for a freshly qualified reserve.
-			desired, reason = rank(stable)[0], "active-degraded"
+			paired := make([]string, 0, len(stable))
+			for _, candidate := range stable {
+				if closeDegradedPair(now, item, selected, candidate) {
+					paired = append(paired, candidate)
+				}
+			}
+			if len(paired) > 0 {
+				desired, reason = rank(paired)[0], "active-degraded"
+			}
 		} else if priorityReturn != "" {
 			desired, reason = priorityReturn, "higher-priority-recovered"
 		} else if mode != "priority" {
+			// Cold evidence has already decided availability, degradation and
+			// priority above. Only ordinary best optimization sees the opt-in view.
+			if item.WarmPlanningMarker != "" {
+				item = warmPlanningView(item)
+				measured = warmPlanningMeasured(measured, item)
+				medians = sampleMedians(item.Samples, candidates)
+				warmStable := make([]string, 0, len(stable))
+				for _, candidate := range stable {
+					age, good := qualitySampleAge(now, item, candidate)
+					if good && age <= float64(minInt(p.backup, maxInt(p.active*2, 120))) && item.QualityOK[candidate] {
+						warmStable = append(warmStable, candidate)
+					}
+				}
+				stable = warmStable
+			}
+			// A pending proof is revalidated by its own next comparable pair.
+			// A fresh active sample from another reserve cannot invalidate the
+			// pending node's older, differently queued latency or steal nomination.
+			pending := item.OptimizationCandidate
+			if item.OptimizationChecks > 0 && item.OptimizationBaseline == selected &&
+				freshComparisonAt(now, item.OptimizationLastResult, p) && contains(stable, pending) {
+				comparison := regularOptimizationComparison(now, selected, pending, measured, item, quality[pending], available[pending], p)
+				if comparison == nil || comparison.Result != optimizationLoss {
+					return pending, "meaningfully-faster"
+				}
+			}
 			measuredStable := []string{}
 			for _, candidate := range stable {
-				activeSamples, reserveSamples := item.Samples[selected], item.Samples[candidate]
-				if len(activeSamples) > 0 && len(reserveSamples) > 0 {
-					active, reserve := activeSamples[len(activeSamples)-1], reserveSamples[len(reserveSamples)-1]
+				active, activeAt := latestQualityObservation(item, selected)
+				reserve, reserveAt := latestQualityObservation(item, candidate)
+				if activeAt > 0 && reserveAt > 0 {
 					if active.DelayMS == nil || reserve.DelayMS == nil || *active.DelayMS-*reserve.DelayMS <= p.improvement {
 						continue
 					}
 				}
 				evidence, measuredNow := measured[candidate]
-				pending := candidate == item.OptimizationCandidate && item.OptimizationChecks > 0
+				_, activeFresh := measured[selected]
+				pending := candidate == item.OptimizationCandidate && (item.OptimizationChecks > 0 || activeFresh && isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)))
+				if !pending && activeFresh && isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)) {
+					pending = completedWarmScanPair(now, selected, candidate, measured, item)
+				}
 				if pending || measuredNow && evidence.OK && evidence.DelayMS != nil && !evidence.QualityUnmeasured {
 					measuredStable = append(measuredStable, candidate)
-				}
-			}
-			// Finish an independent confirmation before nominating another fast
-			// reserve. Otherwise small rank changes can pin a much slower active.
-			pending := item.OptimizationCandidate
-			if item.OptimizationChecks > 0 && item.OptimizationBaseline == selected &&
-				freshComparisonAt(now, item.OptimizationLastResult, p) && contains(measuredStable, pending) {
-				if better := meaningfullyBetter(selected, []string{pending}, medians, p); better != "" {
-					return better, "meaningfully-faster"
 				}
 			}
 			if better := meaningfullyBetter(selected, measuredStable, medians, p); better != "" {
@@ -357,11 +420,7 @@ func meaningfullyBetter(selected string, candidates []string, delays map[string]
 }
 
 func qualitySampleAge(now time.Time, item *policyHealthState, candidate string) (float64, bool) {
-	samples := item.Samples[candidate]
-	if len(samples) == 0 {
-		return 0, false
-	}
-	sample := samples[len(samples)-1]
+	sample, _ := latestQualityObservation(item, candidate)
 	age := float64(now.Unix()) - sample.At
 	return age, sample.At > 0 && age >= 0 && sample.OK && sample.DelayMS != nil && *sample.DelayMS > 0
 }
@@ -417,6 +476,13 @@ func gatePlannedOptimization(now time.Time, selected, desired, reason string, co
 		(previous.At == comparison.At || comparison.ActiveSampleAt <= previous.ActiveSampleAt || comparison.CandidateSampleAt <= previous.CandidateSampleAt) {
 		return selected, ""
 	}
+	if !optimizationCandidateIntervalElapsed(item, comparison.CandidateSampleAt, p) {
+		return selected, ""
+	}
+	if item.OptimizationChecks > 0 && previous != nil {
+		gap := int(math.Round((comparison.CandidateSampleAt - previous.CandidateSampleAt) * 1000))
+		comparison.FirstConfirmationAt, comparison.ConfirmationGapMS = previous.At, &gap
+	}
 	item.OptimizationLastResult = comparison
 	item.OptimizationChecks++
 	if item.OptimizationChecks < optimizationConfirmations {
@@ -436,13 +502,27 @@ func freshComparisonAt(now time.Time, comparison *optimizationComparison, p effe
 }
 
 // Ordinary rotation may nominate a reserve, but only a close-time pair can
-// confirm it. Cached active evidence is restricted to a pending paired round.
+// confirm it. Cached halves are restricted to an explicitly pending pair.
 func regularOptimizationComparison(now time.Time, selected, candidate string, measured map[string]probeEvidence, item *policyHealthState, quality, available bool, p effectivePolicySettings) *optimizationComparison {
-	if _, fresh := measured[candidate]; !fresh {
-		return nil
+	nominated := item.OptimizationBaseline == selected && item.OptimizationCandidate == candidate
+	completedScan := isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)) && completedWarmScanPair(now, selected, candidate, measured, item)
+	candidateEvidence, candidateFresh := measured[candidate]
+	if !candidateFresh {
+		// Finish only an explicitly nominated warm pair. The saved half keeps
+		// its original observation clock and cannot become a second fresh win.
+		activeEvidence, activeFresh := measured[selected]
+		if !activeFresh || !isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)) ||
+			!nominated && !completedScan {
+			return nil
+		}
+		saved, valid := cachedWarmPairEvidence(now, candidate, item)
+		if !valid || !cachedWarmHalfCanJoin(now, saved, activeEvidence) {
+			return nil
+		}
+		candidateEvidence = saved
 	}
-	pair := map[string]probeEvidence{candidate: measured[candidate]}
-	candidateAt := qualityObservationAt(now, measured[candidate])
+	pair := map[string]probeEvidence{candidate: candidateEvidence}
+	candidateAt := qualityObservationAt(now, candidateEvidence)
 	activeAt := float64(0)
 	complete := false
 	if active, ok := measured[selected]; ok {
@@ -451,13 +531,33 @@ func regularOptimizationComparison(now time.Time, selected, candidate string, me
 	} else {
 		last, at := latestQualityObservation(item, selected)
 		activeAt = at
-		if item.OptimizationBaseline == selected && item.OptimizationCandidate == candidate && last.ObservedAt > 0 && last.ObservedAt <= candidateAt {
-			pair[selected] = probeEvidence{OK: last.OK, DelayMS: last.DelayMS}
-			complete = true
+		if (nominated || completedScan) && last.ObservedAt > 0 {
+			if isPairedPlanningMeasurement(qualityMeasurement(item.WarmPlanningMarker)) {
+				if saved, valid := cachedWarmPairEvidence(now, selected, item); valid && cachedWarmHalfCanJoin(now, saved, candidateEvidence) {
+					pair[selected], complete = saved, true
+				}
+			} else if last.ObservedAt <= candidateAt {
+				pair[selected] = probeEvidence{OK: last.OK, DelayMS: last.DelayMS}
+				complete = true
+			}
 		}
+	}
+	activeWave, candidateWave := pair[selected].QualityWave, pair[candidate].QualityWave
+	if (activeWave != 0 || candidateWave != 0) && (activeWave == 0 || activeWave != candidateWave || !qualityIntervalsOverlap(pair[selected], pair[candidate])) {
+		// Another or nonoverlapping wave supplies no new comparison. Preserve
+		// the independent pending proof until a comparable pair or expiry.
+		return nil
 	}
 	latest := compareOptimization(now, selected, candidate, pair, quality, available, p)
 	latest.ActiveSampleAt, latest.CandidateSampleAt = activeAt, candidateAt
+	latest.ActiveRawDelayMS, latest.CandidateRawDelayMS = pair[selected].DelayMS, pair[candidate].DelayMS
+	latest.QualityWave = activeWave
+	if started := pair[selected].QualityStartedAt; !started.IsZero() {
+		latest.ActiveStartedAt = float64(started.UnixNano()) / float64(time.Second)
+	}
+	if started := pair[candidate].QualityStartedAt; !started.IsZero() {
+		latest.CandidateStartedAt = float64(started.UnixNano()) / float64(time.Second)
+	}
 	if !complete || math.Abs(candidateAt-activeAt) > optimizationPairSkew.Seconds() {
 		latest.Result, latest.Reason = optimizationInconclusive, "pair-incomplete"
 		if complete {
@@ -469,6 +569,10 @@ func regularOptimizationComparison(now time.Time, selected, candidate string, me
 		return latest
 	}
 	medians := sampleMedians(item.Samples, []string{selected, candidate})
+	if medians[selected] == nil || medians[candidate] == nil {
+		latest.Result, latest.Reason = optimizationInconclusive, "history-incomplete"
+		return latest
+	}
 	for node, evidence := range pair {
 		if evidence.OK && evidence.DelayMS != nil && !evidence.QualityUnmeasured && medians[node] != nil {
 			evidence.DelayMS = medians[node]
@@ -476,8 +580,9 @@ func regularOptimizationComparison(now time.Time, selected, candidate string, me
 		}
 	}
 	comparison := compareOptimization(now, selected, candidate, pair, quality, available, p)
-	comparison.ActiveSampleAt, comparison.CandidateSampleAt = activeAt, candidateAt
-	return comparison
+	latest.Result, latest.Reason = comparison.Result, comparison.Reason
+	latest.ActiveDelayMS, latest.CandidateDelayMS = comparison.ActiveDelayMS, comparison.CandidateDelayMS
+	return latest
 }
 
 func freshOptimizationWin(selected, candidate string, measured map[string]probeEvidence, p effectivePolicySettings) bool {

@@ -28,6 +28,14 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 	if full := time.Unix(int64(item.LastProbeAt[selected]), 0); full.After(last) {
 		last = full
 	}
+	// History scheduling uses whole seconds; a completed successful quality
+	// probe is also a liveness proof with its original subsecond timestamp.
+	// Do not pay for another TLS session before the configured interval ends.
+	if sample, at := latestQualityObservation(item, selected); sample.OK && at > 0 {
+		if proof := time.Unix(0, int64(at*float64(time.Second))); proof.After(last) {
+			last = proof
+		}
+	}
 	forced := controller.forceLiveness[policyID]
 	if !forced && now.Sub(last) < interval {
 		return false, nil
@@ -79,6 +87,11 @@ func (controller *healthController) checkActiveAvailability(now time.Time, polic
 			controller.emitHealthEvent(healthEvent{At: now.UTC().Format(time.RFC3339Nano), Event: "probe-recovered", Policy: policyID, Node: selected, Targets: probeTargetResults(evidence)})
 		}
 		item.AvailabilityFailures[selected] = 0
+		if item.Failures[selected] > 0 && primaryOriginAvailable(evidence) {
+			item.Failures[selected] = 0
+			item.degradedPair = nil
+			savedChanged = true
+		}
 		delete(item.FailureClass, selected)
 		savedChanged = clearUnderlayFailure(item) || savedChanged
 		savedChanged = rememberWorkingSelection(contract, item) || savedChanged

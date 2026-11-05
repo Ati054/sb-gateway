@@ -96,10 +96,16 @@ func nonnegativeStageMS(started, finished time.Time) int64 {
 }
 
 func (trace *healthStageTrace) finish(ok bool) {
+	if trace != nil {
+		trace.finishAt(time.Now(), ok)
+	}
+}
+
+func (trace *healthStageTrace) finishAt(finished time.Time, ok bool) {
 	if trace == nil {
 		return
 	}
-	if body, err := json.Marshal(trace.result(time.Now(), ok)); err == nil {
+	if body, err := json.Marshal(trace.result(finished, ok)); err == nil {
 		log.Printf("agent: health-stage %s", body)
 	}
 }

@@ -9,6 +9,11 @@ import (
 )
 
 func TestParallelQualitySignalWakesCheckAndJoinsWorkers(t *testing.T) {
+	runParallelQualitySignalJoinsWorkers(t, qualityMeasurementCold)
+}
+
+func runParallelQualitySignalJoinsWorkers(t *testing.T, measurement qualityMeasurement) {
+	t.Helper()
 	accepted := false
 	runtime, _ := delayedAvailabilityRuntime(t, time.Second, func() error {
 		if accepted {
@@ -49,7 +54,7 @@ func TestParallelQualitySignalWakesCheckAndJoinsWorkers(t *testing.T) {
 			}
 		}
 	})
-	go func() { done <- runtime.ProbeQualityParallel([]string{"a", "b"}) }()
+	go func() { done <- runtime.ProbeQualityParallelWithMeasurement([]string{"a", "b"}, measurement) }()
 	for range 2 {
 		waitAgentWorkerSignal(t, started)
 	}

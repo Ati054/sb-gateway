@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestManagedDNSPinnedCoreTCPUDPSourceIsolation(t *testing.T) {
+func TestLegacyManagedDNSPinnedCoreTCPUDPSourceIsolation(t *testing.T) {
 	binary := os.Getenv("XRAY_TEST_BINARY")
 	if binary == "" {
 		t.Skip("set XRAY_TEST_BINARY to the pinned Xray binary")

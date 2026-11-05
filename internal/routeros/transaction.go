@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/applytiming"
 )
 
 type TransactionFailureState string
@@ -99,6 +101,8 @@ func (transaction *Transaction) ApplyDelta(ctx context.Context, applySource, rol
 		return transaction.ApplyCandidate(ctx, applySource, rollbackSource, options)
 	}
 	var result TransactionResult
+	prepareDone := applytiming.Start(ctx, applytiming.RouterOSPrepare)
+	defer prepareDone()
 	if options.HealthCheck == nil {
 		return result, errors.New("RouterOS post-apply health check is required")
 	}
@@ -120,6 +124,7 @@ func (transaction *Transaction) ApplyDelta(ctx context.Context, applySource, rol
 	if err != nil {
 		return result, classifyRollbackArmFailure(err)
 	}
+	prepareDone()
 	return transaction.applyPrepared(ctx, result, scheduler, options, nil)
 }
 
@@ -127,6 +132,8 @@ func (transaction *Transaction) ApplyDelta(ctx context.Context, applySource, rol
 // executes only small import wrappers through the same guarded transaction.
 func (transaction *Transaction) ApplyCandidate(ctx context.Context, applySource, rollbackSource string, options TransactionOptions) (TransactionResult, error) {
 	var result TransactionResult
+	prepareDone := applytiming.Start(ctx, applytiming.RouterOSPrepare)
+	defer prepareDone()
 	if options.HealthCheck == nil {
 		return result, errors.New("RouterOS post-apply health check is required")
 	}
@@ -172,6 +179,7 @@ func (transaction *Transaction) ApplyCandidate(ctx context.Context, applySource,
 		}
 		return result, errors.Join(failure, transaction.cleanupUnarmedImports(imports, options.SettleTimeout))
 	}
+	prepareDone()
 	return transaction.applyPrepared(ctx, result, scheduler, options, imports)
 }
 
@@ -194,7 +202,9 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 		return transaction.applyWithSchedulerGuard(ctx, result, scheduler, options, imports)
 	}
 
+	executeDone := applytiming.Start(ctx, applytiming.RouterOSExecute)
 	session, err := transaction.begin(ctx, result.ApplyScript)
+	executeDone()
 	if err != nil {
 		// Some RouterOS builds acknowledge Safe Mode and then terminate the SSH
 		// console. Once floating history has settled, the already-armed local
@@ -223,7 +233,7 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 	if err := transaction.rest.WaitSafeModeSettled(cleanupContext, options.SettleTimeout); err != nil {
 		return result, transactionFailure(TransactionRecoveryPending, err)
 	}
-	if err := transaction.rest.DisarmRollback(cleanupContext, scheduler); err != nil {
+	if err := applytiming.Run(ctx, applytiming.GuardDisarm, func() error { return transaction.rest.DisarmRollback(cleanupContext, scheduler) }); err != nil {
 		rollbackErr := transaction.restoreWhileGuardArmed(result.RollbackScript, options.SettleTimeout)
 		state := TransactionRolledBack
 		if rollbackErr != nil {
@@ -242,7 +252,7 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 		}
 	}
 	if len(imports) > 0 {
-		if err := transaction.cleanup(cleanupContext, imports...); err != nil {
+		if err := applytiming.Run(ctx, applytiming.RouterOSCleanup, func() error { return transaction.cleanup(cleanupContext, imports...) }); err != nil {
 			// Imported candidates are inert after their wrapper has completed.
 			// Do not misreport a committed healthy Apply as failed only because
 			// optional file cleanup could not finish.
@@ -253,7 +263,7 @@ func (transaction *Transaction) applyPrepared(ctx context.Context, result Transa
 }
 
 func (transaction *Transaction) applyWithSchedulerGuard(ctx context.Context, result TransactionResult, scheduler string, options TransactionOptions, imports []string) (TransactionResult, error) {
-	if err := transaction.run(ctx, result.ApplyScript); err != nil {
+	if err := applytiming.Run(ctx, applytiming.RouterOSExecute, func() error { return transaction.run(ctx, result.ApplyScript) }); err != nil {
 		rollbackErr := transaction.rollbackPrepared(result.RollbackScript, scheduler, imports, options.SettleTimeout)
 		return result, guardedFailure("RouterOS guarded candidate failed", err, rollbackErr)
 	}
@@ -263,7 +273,7 @@ func (transaction *Transaction) applyWithSchedulerGuard(ctx context.Context, res
 	}
 	cleanupContext, cancel := context.WithTimeout(context.Background(), options.SettleTimeout)
 	defer cancel()
-	if err := transaction.rest.DisarmRollback(cleanupContext, scheduler); err != nil {
+	if err := applytiming.Run(ctx, applytiming.GuardDisarm, func() error { return transaction.rest.DisarmRollback(cleanupContext, scheduler) }); err != nil {
 		rollbackErr := transaction.restoreWhileGuardArmed(result.RollbackScript, options.SettleTimeout)
 		state := TransactionRolledBack
 		if rollbackErr != nil {
@@ -282,7 +292,7 @@ func (transaction *Transaction) applyWithSchedulerGuard(ctx context.Context, res
 		}
 	}
 	if len(imports) > 0 {
-		if err := transaction.cleanup(cleanupContext, imports...); err != nil {
+		if err := applytiming.Run(ctx, applytiming.RouterOSCleanup, func() error { return transaction.cleanup(cleanupContext, imports...) }); err != nil {
 			result.CleanupPending = true
 		}
 	}

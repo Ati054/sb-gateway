@@ -80,10 +80,14 @@ func subscriptionGeometryBody(t *testing.T, lanes int, endpoint string) []byte {
 }
 
 func subscriptionGeometryFixture(t *testing.T, old, next []byte) (*nativeRuntime, runtimeconfig.RuntimeCandidate, *subscriptionGeometryController) {
+	return subscriptionGeometryFixtureWithPools(t, old, next, []byte(hotPolicyOldPool), []byte(hotPolicyNewPool))
+}
+
+func subscriptionGeometryFixtureWithPools(t *testing.T, old, next, oldPool, nextPool []byte) (*nativeRuntime, runtimeconfig.RuntimeCandidate, *subscriptionGeometryController) {
 	t.Helper()
 	root := t.TempDir()
 	core, pool := filepath.Join(root, "xray.json"), filepath.Join(root, "pool.json")
-	for path, body := range map[string][]byte{core: old, pool: []byte(hotPolicyOldPool), filepath.Join(root, "ready"): []byte("4321\n")} {
+	for path, body := range map[string][]byte{core: old, pool: oldPool, filepath.Join(root, "ready"): []byte("4321\n")} {
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -95,7 +99,7 @@ func subscriptionGeometryFixture(t *testing.T, old, next []byte) (*nativeRuntime
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts := map[string][]byte{"xray.json": next, "urltest-pool.json": []byte(hotPolicyNewPool)}
+	artifacts := map[string][]byte{"xray.json": next, "urltest-pool.json": nextPool}
 	candidate, err := store.Prepare(artifactRevision(artifacts), artifacts)
 	if err != nil {
 		t.Fatal(err)
@@ -162,8 +166,36 @@ func TestSubscriptionProbeGeometryColdGrowthAndShrink(t *testing.T) {
 	}
 }
 
-func TestSubscriptionProbeGeometryEndpointOnlyStaysHot(t *testing.T) {
-	native, candidate, controller := subscriptionGeometryFixture(t, subscriptionGeometryBody(t, 2, "old"), subscriptionGeometryBody(t, 2, "new"))
+func TestSubscriptionPrunedDynamicEndpointOnlyStaysHot(t *testing.T) {
+	// Real dynamic definitions live in the pool and are pruned from the startup
+	// graph. Changing an outbound which remains in xray.json is NOT hot-safe.
+	pruned := func(endpoint string) ([]byte, []byte) {
+		var graph map[string]any
+		if err := json.Unmarshal(subscriptionGeometryBody(t, 2, endpoint), &graph); err != nil {
+			t.Fatal(err)
+		}
+		pool, err := json.Marshal(map[string]any{
+			"version": 4, "health_policies": map[string]any{"route": map[string]any{"mode": "priority", "candidates": []string{"provider"}}},
+			"local_policy_ids": []string{"route"}, "outbounds": map[string]any{"provider": objects(graph["outbounds"])[0]},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runtimeconfig.PruneDynamicXrayOutbounds(graph, pool); err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(graph)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body, pool
+	}
+	old, oldPool := pruned("old")
+	next, nextPool := pruned("new")
+	if !bytes.Equal(old, next) || bytes.Equal(oldPool, nextPool) {
+		t.Fatal("dynamic endpoint fixture did not isolate the pruned pool change")
+	}
+	native, candidate, controller := subscriptionGeometryFixtureWithPools(t, old, next, oldPool, nextPool)
 	stamp := testPoolStamp(t, native.options.XrayHealthPool)
 	done := make(chan error, 1)
 	var receipt runtimeconfig.ActivationReceipt
@@ -172,14 +204,14 @@ func TestSubscriptionProbeGeometryEndpointOnlyStaysHot(t *testing.T) {
 		receipt, err = native.activateSubscriptionWithXrayRestartHook(context.Background(), candidate, func(context.Context) error { return errors.New("hot update called restart hook") })
 		done <- err
 	}()
-	waitTestPool(t, native.options.XrayHealthPool, hotPolicyNewPool, stamp, done)
+	waitTestPool(t, native.options.XrayHealthPool, string(nextPool), stamp, done)
 	acknowledgeTestPool(t, native)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	stamp = testPoolStamp(t, native.options.XrayHealthPool)
 	go func() { done <- native.rollbackSubscription(context.Background(), receipt) }()
-	waitTestPool(t, native.options.XrayHealthPool, hotPolicyOldPool, stamp, done)
+	waitTestPool(t, native.options.XrayHealthPool, string(oldPool), stamp, done)
 	acknowledgeTestPool(t, native)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -268,12 +300,12 @@ func TestSubscriptionProbeGeometryUsesRenderedGraph(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		changed, err := subscriptionProbeGeometryChanged(server.opts.Runtime.XrayConfig, candidate.Files["xray.json"])
+		changed, err := subscriptionStartupGraphChanged(server.opts.Runtime.XrayConfig, candidate.Files["xray.json"])
 		if err != nil || changed != (count == 1) {
 			t.Fatalf("rendered inventory%d changed=%t err=%v", count, changed, err)
 		}
 	}
-	if _, err := subscriptionProbeGeometryChanged(server.opts.Runtime.XrayConfig, filepath.Join(t.TempDir(), strings.Repeat("x", 20))); err != nil {
+	if _, err := subscriptionStartupGraphChanged(server.opts.Runtime.XrayConfig, filepath.Join(t.TempDir(), strings.Repeat("x", 20))); err != nil {
 		t.Fatal(err)
 	}
 }

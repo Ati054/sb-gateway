@@ -15,7 +15,47 @@ func publishHealthState(path string, state healthState) error {
 	if err := publishSelectorReadiness(path, state); err != nil {
 		return err
 	}
-	return writeJSONAtomic(path, state)
+	if err := writeJSONAtomic(path, healthCheckpointProjection(state)); err != nil {
+		return err
+	}
+	// Optional UI-cache failure must not become a readiness/routing failure.
+	// Readers verify the history generation and fall back to the full file.
+	_ = publishCompactHealthStatus(path, state)
+	return nil
+}
+
+type warmPolicyCheckpoint struct {
+	*policyHealthState
+	WarmLatencyComparisons     map[string]latencyComparison `json:"warm_latency_comparisons,omitempty"`
+	WarmLastLatencyComparisons map[string]latencyComparison `json:"warm_last_latency_comparisons,omitempty"`
+	WarmOptimizationLastResult *optimizationComparison      `json:"warm_optimization_last_result,omitempty"`
+}
+
+// Cold-only publication returns the original graph without allocating or
+// serializing individual policies. Experimental wire views copy only a policy
+// header; cold history is encoded once by the ordinary outer JSON encoder.
+func healthCheckpointProjection(state healthState) any {
+	var projected map[string]any
+	for id, item := range state {
+		if item == nil || item.WarmPlanningMarker == "" {
+			continue
+		}
+		if projected == nil {
+			projected = make(map[string]any, len(state))
+			for key, original := range state {
+				projected[key] = original
+			}
+		}
+		legacy := *item
+		legacy.OptimizationBaseline, legacy.OptimizationCandidate, legacy.OptimizationChecks = "", "", 0
+		legacy.OptimizationLastResult = nil
+		legacy.LatencyComparisons, legacy.LastLatencyComparisons = nil, nil
+		projected[id] = warmPolicyCheckpoint{&legacy, item.LatencyComparisons, item.LastLatencyComparisons, item.OptimizationLastResult}
+	}
+	if projected == nil {
+		return state
+	}
+	return projected
 }
 
 // The panel retains the last qualified pair while the same route is active.

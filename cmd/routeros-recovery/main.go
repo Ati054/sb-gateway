@@ -48,13 +48,15 @@ func run(args []string, output io.Writer) error {
 	if actual != checksum {
 		return errors.New("recovery archive SHA256 mismatch")
 	}
-	if _, err := imagebundle.Validate(archive, "sb-gateway:"+version+"-arm64", version); err != nil {
+	details, err := imagebundle.Validate(archive, "sb-gateway:"+version+"-arm64", version)
+	if err != nil {
 		return fmt.Errorf("validate recovery archive: %w", err)
 	}
 	root = strings.Trim(root, "/")
 	reference := root + "/data/lifecycle-uploads/sb-gateway-upload-" + checksum[:16] + ".tar"
 	script, err := routeros.RenderOfflineImageRecovery(routeros.ImageUpdateSpec{
-		Version: version, StorageRoot: root, CandidateRoot: root + "/root-" + version,
+		CatalogSchema: details.SubscriptionCatalogSchema,
+		Version:       version, StorageRoot: root, CandidateRoot: root + "/root-" + version,
 		CandidateSource: "local-file", CandidateReference: reference, ContainerAddress: address,
 	}, info.Size(), identity)
 	if err != nil {

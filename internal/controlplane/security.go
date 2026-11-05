@@ -26,7 +26,8 @@ const (
 )
 
 type secretStore struct {
-	root string
+	root           string
+	catalogReaders subscriptionCatalogReaders
 }
 
 func newSecretStore(root string) (*secretStore, error) {

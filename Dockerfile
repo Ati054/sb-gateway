@@ -9,8 +9,8 @@ FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build
 ARG TARGETARCH
 # The server can use the current validated core. Xray's simplified Reverse
 # regression is bridge-side; exported reverse clients are pinned separately.
-ARG XRAY_VERSION=26.10.29
-ARG XRAY_COMMIT=0afec66085a85191e9dd2a4a6646c7c9a94688d1
+ARG XRAY_VERSION=26.10.31
+ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
 RUN test "${TARGETARCH}" = "arm64"
 RUN apk add --no-cache git patch
@@ -74,8 +74,8 @@ RUN set -eux; \
     go mod edit -replace github.com/xtls/reality=/src/reality
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG XRAY_COMMIT=0afec66085a85191e9dd2a4a6646c7c9a94688d1
-ARG SB_GATEWAY_VERSION=1.6.93
+ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
+ARG SB_GATEWAY_VERSION=1.6.94
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -92,12 +92,12 @@ RUN set -eux; \
     case "${SB_GATEWAY_GO_TAGS}" in xray_multicall|xray_multicall,sb_cpu_lab) ;; *) exit 1 ;; esac; \
     sh scripts/prepare-xray-multicall.sh /opt/xray-source /opt/xray-source/reality /src/multicall.mod; \
     test "$(go list -modfile=/src/multicall.mod -m -f '{{.Version}}' golang.org/x/crypto/x509roots/fallback)" = v0.0.0-20261020153306-9f2b28d4331a; \
-    for package in ./cmd/sb-gateway ./internal/agent ./internal/domainset ./internal/policydns ./internal/runtimeconfig; do \
+    for package in ./cmd/sb-gateway ./internal/agent ./internal/domainset ./internal/netpolicy ./internal/policydns ./internal/runtimeconfig; do \
       test "$(go list -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" -f '{{if or .TestGoFiles .XTestGoFiles}}yes{{end}}' "$package")" = yes; \
     done; \
     go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./cmd/sb-gateway; \
     go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/agent; \
-    go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/domainset ./internal/policydns ./internal/runtimeconfig; \
+    go test -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" ./internal/domainset ./internal/netpolicy ./internal/policydns ./internal/runtimeconfig; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/app/router -run '^TestSB'; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/common/errors -run '^TestSB'; \
     go test -modfile=/src/multicall.mod github.com/xtls/xray-core/common/mux \
@@ -126,8 +126,8 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
-ARG XRAY_VERSION=26.10.29
-ARG SB_GATEWAY_VERSION=1.6.93
+ARG XRAY_VERSION=26.10.31
+ARG SB_GATEWAY_VERSION=1.6.94
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -165,12 +165,14 @@ RUN set -eux; \
     if ! grep -q '^www-data:' /etc/group; then addgroup -S www-data; fi; \
     if ! grep -q '^www-data:' /etc/passwd; then adduser -S -D -H -s /sbin/nologin -G www-data www-data; fi; \
     rm -f /etc/nginx/http.d/default.conf
-ARG XRAY_VERSION=26.10.29
-ARG XRAY_COMMIT=0afec66085a85191e9dd2a4a6646c7c9a94688d1
+ARG XRAY_VERSION=26.10.31
+ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.93
+ARG SB_GATEWAY_VERSION=1.6.94
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
+ARG SB_URLTEST_WARM_COMPARE=0
+ARG SB_URLTEST_PLANNING_MODE=fresh-paired
 LABEL org.opencontainers.image.title="sb-gateway" \
       org.opencontainers.image.description="ARM64 Xray proxy gateway and local Web UI for MikroTik RouterOS 7" \
       org.opencontainers.image.source="${SB_GATEWAY_SOURCE}" \
@@ -179,6 +181,7 @@ LABEL org.opencontainers.image.title="sb-gateway" \
       io.sb-gateway.lifecycle.version="1" \
       io.sb-gateway.config.schema="1" \
       io.sb-gateway.config.minimum-schema="1" \
+      io.sb-gateway.data.subscription-catalog.schema="1" \
       io.sb-gateway.dependency.xray.version="${XRAY_VERSION}" \
       io.sb-gateway.dependency.xray.revision="${XRAY_COMMIT}" \
       io.sb-gateway.dependency.xray.vision-padding-overflow-compat="true" \
@@ -187,12 +190,16 @@ LABEL org.opencontainers.image.title="sb-gateway" \
       io.sb-gateway.dependency.xray.health-probe-lifetime="true" \
       io.sb-gateway.dependency.xray.reverse-backpressure-selection="true" \
       io.sb-gateway.dependency.xray.shared-executable="true" \
+      io.sb-gateway.experiment.urltest-warm-compare="${SB_URLTEST_WARM_COMPARE}" \
+      io.sb-gateway.experiment.urltest-planning-mode="${SB_URLTEST_PLANNING_MODE}" \
       io.sb-gateway.dependency.reality.revision="${XRAY_REALITY_COMMIT}" \
       io.sb-gateway.dependency.reality.x25519-compat="true"
 ENV SB_GATEWAY_VERSION=${SB_GATEWAY_VERSION} \
     SB_GATEWAY_REVISION=${SB_GATEWAY_REVISION} \
+    SB_URLTEST_WARM_COMPARE=${SB_URLTEST_WARM_COMPARE} \
+    SB_URLTEST_PLANNING_MODE=${SB_URLTEST_PLANNING_MODE} \
     SB_XRAY_VERSION=${XRAY_VERSION} \
-    GODEBUG=disablethp=1 \
+    GODEBUG=disablethp=1,multipathtcp=0 \
     GOGC=150 \
     SB_MEMORY_BUDGET=1 \
     SB_MEMORY_BUDGET_ACME_LOAN=1 \

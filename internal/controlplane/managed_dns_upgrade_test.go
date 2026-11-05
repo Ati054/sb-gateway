@@ -32,6 +32,10 @@ func TestManagedDNSUpgradeOffersApplyWithoutConfigurationEdits(t *testing.T) {
 	if legacyAdmission == source {
 		t.Fatal("fixture must retain DNS admission before recovery cleanup")
 	}
+	legacyLocalDNS := strings.ReplaceAll(source, "/ip/firewall/nat/unset $dnsNat dst-address-type\n", "")
+	if legacyLocalDNS == source {
+		t.Fatal("fixture must retain public DNS ingress migration")
+	}
 	for _, test := range []struct {
 		name, source string
 		update       bool
@@ -40,6 +44,7 @@ func TestManagedDNSUpgradeOffersApplyWithoutConfigurationEdits(t *testing.T) {
 		{"older recovery filter", legacyRecovery, true},
 		{"older endpoint format", legacyPorts, true},
 		{"older recovery admission order", legacyAdmission, true},
+		{"older local-only DNS ingress", legacyLocalDNS, true},
 		{"older CRLF recovery admission order", strings.ReplaceAll(legacyAdmission, "\n", "\r\n"), true},
 		{"updated renderer", source, false},
 		{"no committed traffic script", "", false},

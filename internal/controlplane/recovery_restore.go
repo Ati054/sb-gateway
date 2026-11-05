@@ -143,7 +143,7 @@ func (server *Server) stageRecoveryArchive(path, archiveName, password string) (
 	if _, err := file.Seek(prefix.payloadOffset, io.SeekStart); err != nil {
 		return "", 0, err
 	}
-	decryptor, err := newRecoveryChunkDecryptor(file, master, noncePrefix, prefix.header)
+	decryptor, err := newRecoveryChunkDecryptor(newRecoveryFileReader(file), master, noncePrefix, prefix.header)
 	if err != nil {
 		return "", 0, err
 	}
@@ -152,7 +152,15 @@ func (server *Server) stageRecoveryArchive(path, archiveName, password string) (
 	if err != nil {
 		return "", 0, err
 	}
+	if manifest.FormatVersion == recoveryCatalogFormatVersion {
+		if err := server.requireRecoveryCatalogSecretsNamespace(); err != nil {
+			return "", 0, err
+		}
+	}
 	if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
+		return "", 0, err
+	}
+	if err := server.checkRecoveryRestoreSpace(stagingRoot, manifest); err != nil {
 		return "", 0, err
 	}
 	temporary, err := os.MkdirTemp(stagingRoot, ".restore-*")
@@ -161,6 +169,9 @@ func (server *Server) stageRecoveryArchive(path, archiveName, password string) (
 	}
 	defer os.RemoveAll(temporary)
 	if err := extractRecoveryTar(archive, temporary, manifest); err != nil {
+		return "", 0, err
+	}
+	if err := validateRecoveryCatalogPayload(temporary, manifest); err != nil {
 		return "", 0, err
 	}
 	trailing, err := io.Copy(io.Discard, decryptor)
@@ -222,18 +233,25 @@ func readRecoveryManifest(archive *tar.Reader) (recoveryManifestDocument, error)
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return recoveryManifestDocument{}, errors.New("recovery manifest is invalid")
 	}
-	if manifest.FormatVersion != recoveryFormatVersion || len(manifest.Files) < 1 || len(manifest.Files) > recoveryMaxFiles {
+	if (manifest.FormatVersion != recoveryFormatVersion && manifest.FormatVersion != recoveryCatalogFormatVersion) || len(manifest.Files) < 1 || len(manifest.Files) > recoveryMaxFiles {
 		return recoveryManifestDocument{}, errors.New("recovery manifest format is not supported")
 	}
 	seen := make(map[string]bool, len(manifest.Files))
-	var total int64
+	var ordinary, catalog int64
 	for _, entry := range manifest.Files {
 		if !validRecoveryManifestEntry(entry) || seen[entry.Path] {
 			return recoveryManifestDocument{}, errors.New("recovery manifest contains an invalid file")
 		}
 		seen[entry.Path] = true
-		total += entry.Size
-		if total > recoveryMaxPlainBytes {
+		if recoveryCatalogPath.MatchString(entry.Path) {
+			if manifest.FormatVersion != recoveryCatalogFormatVersion {
+				return recoveryManifestDocument{}, errors.New("catalog recovery format is not supported")
+			}
+			catalog += entry.Size
+		} else {
+			ordinary += entry.Size
+		}
+		if ordinary > recoveryMaxLegacyPlainBytes || catalog > recoveryMaxCatalogPlainBytes {
 			return recoveryManifestDocument{}, errors.New("recovery manifest exceeds the safety limit")
 		}
 	}
@@ -241,7 +259,10 @@ func readRecoveryManifest(archive *tar.Reader) (recoveryManifestDocument, error)
 }
 
 func validRecoveryManifestEntry(entry recoveryManifestFile) bool {
-	if entry.Size < 0 || entry.Size > recoveryMaxFileBytes || !recoveryPayloadPathPattern.MatchString(entry.Path) || hasRecoveryParentTraversal(entry.Path) {
+	if entry.Path == "config/secrets/subscription-catalogs" || strings.HasPrefix(entry.Path, "config/secrets/subscription-catalogs/") && !recoveryCatalogPath.MatchString(entry.Path) {
+		return false
+	}
+	if entry.Size < 0 || entry.Size > recoveryFileByteLimit(entry.Path) || !recoveryPayloadPathPattern.MatchString(entry.Path) || hasRecoveryParentTraversal(entry.Path) {
 		return false
 	}
 	digest, err := hex.DecodeString(entry.SHA256)
@@ -288,7 +309,7 @@ func extractRecoveryTar(archive *tar.Reader, root string, manifest recoveryManif
 			return err
 		}
 		digest := sha256.New()
-		written, copyErr := io.CopyBuffer(io.MultiWriter(output, digest), archive, buffer)
+		written, copyErr := io.CopyBuffer(newRecoveryFileWriter(output, filepath.Dir(destination), digest), archive, buffer)
 		syncErr := output.Sync()
 		closeErr := output.Close()
 		if copyErr != nil {

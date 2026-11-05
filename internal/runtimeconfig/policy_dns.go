@@ -115,9 +115,27 @@ type PolicyDNSRuntime struct {
 	DomainSets         map[string]domainset.Set   `json:"domain_sets,omitempty"`
 	LaneLayoutVersion  int                        `json:"lane_layout_version,omitempty"`
 	Lanes              []PolicyDNSLane            `json:"lanes"`
+	ManagedIngress     *PolicyDNSManagedIngress   `json:"managed_ingress,omitempty"`
 	Servers            map[string]PolicyDNSServer `json:"servers"`
 	TimeoutSeconds     int                        `json:"timeout_seconds,omitempty"`
 	Version            int                        `json:"version"`
+}
+
+// Managed ingress selects an existing resolver lane by ordered client identity.
+// An unmatched source never falls through to a default resolver.
+type PolicyDNSManagedIngress struct {
+	Listeners []PolicyDNSManagedListener `json:"listeners"`
+	Rules     []PolicyDNSManagedRule     `json:"rules"`
+}
+
+type PolicyDNSManagedListener struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+type PolicyDNSManagedRule struct {
+	SourceCIDRs []string `json:"source_cidrs"`
+	LaneID      string   `json:"lane_id"`
 }
 
 type PolicyDNSServer struct {
@@ -253,7 +271,7 @@ func (compiler *policyDNSCompiler) compile(source PolicyDNSSource) (PolicyDNSArt
 		Runtime: PolicyDNSRuntime{
 			Lanes:             make([]PolicyDNSLane, 0),
 			Servers:           make(map[string]PolicyDNSServer, len(source.Servers)),
-			LaneLayoutVersion: 1,
+			LaneLayoutVersion: 2,
 			Version:           2,
 		},
 		XrayInbounds:  make([]map[string]any, 0),

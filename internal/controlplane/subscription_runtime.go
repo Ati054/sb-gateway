@@ -27,9 +27,10 @@ func mustSubscriptionSourceRevision(subscription map[string]any) string {
 	return revision
 }
 
-// Called only under subscriptionMu -> configMu, the same order as refresh.
+// Publication holds mutationMu -> subscriptionMu -> configMu. A download that
+// owns subscriptionMu must remain able to acquire mutationMu for its commit.
 // This never applies a draft. RouterOS changes cover owned loop-bypass hosts
-// and the existing planned-restart gate when probe listener geometry changes.
+// and the existing planned-restart gate when the startup Xray graph changes.
 func (server *Server) activatePendingSubscription(ctx context.Context) (bool, error) {
 	if server.runtime == nil {
 		return false, nil
@@ -41,7 +42,11 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 	} else if conflict != "" {
 		return false, nil
 	}
-	server.subscriptionMu.Lock()
+	if !server.subscriptionMu.TryLock() {
+		// Do not monopolize mutation admission while a download finishes. The
+		// normal scheduler wake retries after the inventory has been committed.
+		return false, nil
+	}
 	defer server.subscriptionMu.Unlock()
 	server.configMu.Lock()
 	defer server.configMu.Unlock()
@@ -103,7 +108,7 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 		}
 		var endpoints []string
 		if journal["endpoints_changed"] == true {
-			endpoints, err = runtimeconfig.RouterOSEndpointBypass(active, previousNodes)
+			endpoints, err = server.subscriptionEndpointBypass(active, previousNodes)
 			if err != nil {
 				return true, err
 			}
@@ -120,6 +125,9 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 			}
 		}
 		if err := server.runtime.commit(candidate); err != nil {
+			return true, err
+		}
+		if err := server.updateRecoveredRuntimeRevision(candidate.Revision); err != nil {
 			return true, err
 		}
 		if err := server.repository.saveAuxiliary("subscription-runtime-operation", map[string]any{}); err != nil {
@@ -148,7 +156,11 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 		if fingerprint == "" || entry["source_revision"] != mustSubscriptionSourceRevision(subscription) {
 			continue
 		}
-		nodesRevision, err := revisionFor(entry["nodes"])
+		inventory := entry["nodes"]
+		if reference, exists := entry["catalog_ref"]; exists {
+			inventory = reference
+		}
+		nodesRevision, err := revisionFor(inventory)
 		if err != nil {
 			return false, err
 		}
@@ -156,6 +168,18 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 		if status["active_revision"] == revision && status["nodes_revision"] == nodesRevision {
 			if status["state"] == "active" {
 				continue
+			}
+			if status["state"] == "blocked" && status["reason"] == "catalog_planning_budget" && status["node_snapshot_revision"] == snapshotRevision {
+				storedBudget, valid := jsonInteger(status["planning_budget_bytes"])
+				if valid && storedBudget > 0 && runtimeconfig.CatalogPlanningBudgetBytes() <= int64(storedBudget) {
+					// Recheck only the cheap budget/identity predicate after this
+					// idle-cache TTL; unchanged oversized plans are not prepared.
+					next := now.Add(30 * time.Second)
+					if retryAt.IsZero() || next.Before(retryAt) {
+						retryAt = next
+					}
+					continue
+				}
 			}
 			next, _ := time.Parse(time.RFC3339Nano, subscriptionText(status["next_attempt"]))
 			if server.now().Before(next) {
@@ -167,27 +191,31 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 		}
 		// Other subscriptions may contain unapplied drafts; retain their applied
 		// snapshots and replace only this approved provider's inventory.
-		desired := make([]map[string]any, 0, len(previousNodes))
-		for _, node := range previousNodes {
-			if subscriptionText(node["subscription_id"]) != id {
-				desired = append(desired, node)
-			}
-		}
 		providerNodes := runtimeSubscriptionNodes(active, map[string]any{id: entry})
+		desired := make([]map[string]any, 0, len(previousNodes)+len(providerNodes))
 		previousProvider := make([]map[string]any, 0, len(providerNodes))
+		inserted := false
 		for _, node := range previousNodes {
 			if subscriptionText(node["subscription_id"]) == id {
 				previousProvider = append(previousProvider, node)
+				if !inserted {
+					// Group expansion follows catalog order. Replacing a provider
+					// must not move its block behind unrelated priority candidates.
+					desired = append(desired, providerNodes...)
+					inserted = true
+				}
+				continue
 			}
+			desired = append(desired, node)
+		}
+		if !inserted {
+			desired = append(desired, providerNodes...)
 		}
 		// Apply already committed these nodes under the new configuration. Only
 		// acknowledge that generation; do not republish/reorder the same handlers.
 		if equalJSONObject(map[string]any{"nodes": previousProvider}, map[string]any{"nodes": providerNodes}) {
 			statuses[id] = map[string]any{"active_revision": revision, "fingerprint": fingerprint, "nodes_revision": nodesRevision, "last_attempt": now.UTC().Format(time.RFC3339Nano), "state": "active"}
 			return true, server.repository.saveAuxiliary("subscription-runtime-status", statuses)
-		}
-		for _, node := range providerNodes {
-			desired = append(desired, node)
 		}
 		operation, cancel := context.WithTimeout(ctx, subscriptionRuntimeActivationTimeout)
 		activationErr := server.installSubscriptionRuntime(operation, active, metadata, previousNodes, desired)
@@ -197,9 +225,17 @@ func (server *Server) activatePendingSubscription(ctx context.Context) (bool, er
 			"last_attempt": server.now().UTC().Format(time.RFC3339Nano), "state": "active",
 		}
 		if activationErr != nil {
-			status["state"] = "retrying"
-			status["message"] = "Runtime не обновлён; повтор через 30 секунд."
-			status["next_attempt"] = server.now().Add(30 * time.Second).UTC().Format(time.RFC3339Nano)
+			if errors.Is(activationErr, runtimeconfig.ErrCatalogPlanningBudget) {
+				status["state"] = "blocked"
+				status["reason"] = "catalog_planning_budget"
+				status["planning_budget_bytes"] = runtimeconfig.CatalogPlanningBudgetBytes()
+				status["node_snapshot_revision"] = snapshotRevision
+				status["message"] = "Выбранный набор превышает бюджет памяти. Сузьте выбор узлов или увеличьте память контейнера. Каталог сохранён; действующая конфигурация не изменена."
+			} else {
+				status["state"] = "retrying"
+				status["message"] = "Runtime не обновлён; повтор через 30 секунд."
+				status["next_attempt"] = server.now().Add(30 * time.Second).UTC().Format(time.RFC3339Nano)
+			}
 			var failure subscriptionRuntimeError
 			if errors.As(activationErr, &failure) {
 				status["failure_stage"] = failure.stage
@@ -223,11 +259,11 @@ func (server *Server) installSubscriptionRuntime(ctx context.Context, active, me
 			result = subscriptionRuntimeError{stage: stage, cause: result}
 		}
 	}()
-	previousEndpoints, err := runtimeconfig.RouterOSEndpointBypass(active, previousNodes)
+	previousEndpoints, err := server.subscriptionEndpointBypass(active, previousNodes)
 	if err != nil {
 		return err
 	}
-	desiredEndpoints, err := runtimeconfig.RouterOSEndpointBypass(active, nodes)
+	desiredEndpoints, err := server.subscriptionEndpointBypass(active, nodes)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package policydns
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -46,6 +47,10 @@ func decodeRuntimeConfig(input io.Reader) (rawConfig, error) {
 					raw.DomainSets[id] = set
 				}
 			}
+		case "managed_ingress":
+			err = decoder.Decode(&raw.ManagedIngress)
+		case "lane_layout_version":
+			err = decoder.Decode(&raw.LaneLayoutVersion)
 		case "servers":
 			err = decoder.Decode(&raw.Servers)
 		case "version":
@@ -71,6 +76,66 @@ func decodeRuntimeConfig(input io.Reader) (rawConfig, error) {
 		return raw, errors.New("policy DNS config exceeds size limit")
 	}
 	return raw, nil
+}
+
+// Managed source identity has no ignored predicate or last-key-wins ambiguity.
+func (raw *managedIngressConfig) UnmarshalJSON(data []byte) error {
+	if err := uniqueManagedFields(json.NewDecoder(bytes.NewReader(data)), 0); err != nil {
+		return err
+	}
+	type document managedIngressConfig
+	var value document
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	*raw = managedIngressConfig(value)
+	return nil
+}
+
+func uniqueManagedFields(decoder *json.Decoder, depth int) error {
+	if depth > 8 {
+		return errors.New("managed DNS ingress nesting is too deep")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch token {
+	case json.Delim('{'):
+		seen := make(map[string]bool)
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := key.(string)
+			if !ok || seen[name] {
+				return errors.New("duplicate managed DNS ingress field")
+			}
+			switch name {
+			case "listeners", "rules", "host", "port", "source_cidrs", "lane_id":
+			default:
+				return errors.New("unsupported managed DNS ingress field")
+			}
+			seen[name] = true
+			if err := uniqueManagedFields(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	case json.Delim('['):
+		for decoder.More() {
+			if err := uniqueManagedFields(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	}
+	return nil
 }
 
 func decodeRuntimeLanes(decoder *json.Decoder, raw *rawConfig) error {

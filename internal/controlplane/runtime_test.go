@@ -322,7 +322,10 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 		"xray.json":         filepath.Join(liveRoot, "xray.json"),
 		"urltest-pool.json": filepath.Join(liveRoot, "urltest-pool.json"),
 	}
-	for name, body := range map[string]string{"xray.json": `{"outbounds":[{"tag":"old-provider"}]}`, "urltest-pool.json": hotPolicyOldPool} {
+	// Dynamic subscription handlers are pruned from the startup graph. This
+	// test covers the pool-generation acknowledgement, not a static core edit.
+	const startupGraph = `{"outbounds":[{"tag":"direct-wan","protocol":"freedom"}]}`
+	for name, body := range map[string]string{"xray.json": startupGraph, "urltest-pool.json": hotPolicyOldPool} {
 		if err := os.WriteFile(destinations[name], []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -333,7 +336,7 @@ func TestSubscriptionActivationWaitsForHotSelectorGenerationWithoutRestartingXra
 	}
 	poolBody := []byte(hotPolicyNewPool)
 	candidate, err := store.Prepare(strings.Repeat("d", 64), map[string][]byte{
-		"xray.json": []byte(`{"outbounds":[{"tag":"new-provider"}]}`), "urltest-pool.json": poolBody,
+		"xray.json": []byte(startupGraph), "urltest-pool.json": poolBody,
 	})
 	if err != nil {
 		t.Fatal(err)

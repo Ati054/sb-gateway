@@ -5,7 +5,7 @@
 ## Current Build Baseline
 
 The current source pins Go 1.27.3 for both executable roles and release CI,
-and Xray v26.10.29. Upstream updates its fallback roots to remove three
+and targets Xray v26.10.31. Upstream updates its fallback roots to remove three
 emSign roots; Go 1.27.3 also rejects the affected intermediate certificates.
 The multicall build asserts the selected fallback-root module version and
 the executable toolchain. These are source/build requirements, not evidence
@@ -21,6 +21,31 @@ References: [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3),
 [Xray trust-store update](https://github.com/XTLS/Xray-core/pull/7212),
 [HTTP/2 advisory](https://pkg.go.dev/vuln/GO-2026-6617),
 [compress advisory](https://pkg.go.dev/vuln/GO-2026-5841).
+
+## TCP Listener Policy
+
+Xray is pinned to [v26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31),
+commit `a4a3dff5b20c2faae567b742c172c7b95e75c083`. Its
+[default-listener fix](https://github.com/XTLS/Xray-core/commit/6ea0ab5d3ae0e9c7d252347fa9250273d54fb2e9)
+disables MPTCP unless explicitly requested. This does not change the standard Go
+listener default or cover every library listener. Gateway-owned controller,
+website-proxy, Policy DNS and fresh-resolver TCP sockets additionally use an
+explicit `ListenConfig.SetMultipathTCP(false)` policy. UDP and Unix sockets keep
+their existing behavior.
+
+The main module also sets the compiled default `godebug multipathtcp=0`. The
+generated multicall module copies that directive. It covers default Go listeners
+in imported components when an older saved container environment only sets
+`GODEBUG=disablethp=1`. New images and the isolated ACME worker set
+`GODEBUG=disablethp=1,multipathtcp=0`. Gateway-owned TCP listeners remain disabled
+even if an ambient environment explicitly enables MPTCP. An intentional Xray
+socket option can still enable it; process defaults do not override that option.
+
+Configuration tests check these boundaries without requiring MPTCP kernel
+support. Source policy and a core version do not establish whether a RouterOS
+host kernel is affected, patched or capable of MPTCP. Image promotion requires
+the existing full acceptance checks; the independently pinned remote Reverse
+bridge is not updated by this server change.
 
 ## Модель угроз
 

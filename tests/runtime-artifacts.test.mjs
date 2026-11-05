@@ -52,10 +52,13 @@ test("mandatory Claude and Antigravity candidate packs stay narrow and complete"
 
 test("ARM64 image builds pinned Xray and static UI", async () => {
   const dockerfile = await text("Dockerfile");
-  assert.match(dockerfile, /ARG XRAY_VERSION=26\.10\.29/);
+  assert.match(await text("go.mod"), /^godebug multipathtcp=0$/m);
+  assert.match(dockerfile, /GODEBUG=disablethp=1,multipathtcp=0/);
+  assert.match(dockerfile, /go test -modfile=\/src\/multicall\.mod[^;]*\.\/internal\/netpolicy/);
+  assert.match(dockerfile, /ARG XRAY_VERSION=26\.10\.31/);
   assert.match(await text("patches/xray-library-main.patch"), /diff --git a\/main\/run_test\.go b\/main\/run_test\.go/);
   assert.match(dockerfile, /go test \.\/main/);
-  assert.match(dockerfile, /0afec66085a85191e9dd2a4a6646c7c9a94688d1/);
+  assert.match(dockerfile, /a4a3dff5b20c2faae567b742c172c7b95e75c083/);
   assert.match(dockerfile, /XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83/);
   assert.match(dockerfile, /git apply --check \/tmp\/xray-grpc-context-regression\.patch/);
   const grpcRegression = await text("patches/xray-grpc-context-regression.patch");

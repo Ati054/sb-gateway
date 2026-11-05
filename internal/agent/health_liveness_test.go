@@ -74,6 +74,38 @@ func TestHealthyFastLaneDoesNotRescoreScanOrWriteHistory(t *testing.T) {
 	}
 }
 
+func TestCompletedQualityProofKeepsFullLivenessInterval(t *testing.T) {
+	for _, mode := range []string{"best", "priority"} {
+		t.Run(mode, func(t *testing.T) {
+			controller, runtime, item := livenessFixture(t, mode)
+			observed := time.Unix(1060, 900_000_000)
+			evidence := successfulEvidence(100)
+			evidence.ObservedAt = observed
+			runtime.probes["de"] = evidence
+			if err := controller.Tick(observed); err != nil {
+				t.Fatal(err)
+			}
+			if item.Selected != "de" {
+				t.Fatal("fixture changed active node")
+			}
+			runtime.availabilityCalls = nil
+			contract := runtime.pool.HealthPolicies["europe"]
+			if _, err := controller.tickActiveAvailability(observed.Add(2500*time.Millisecond), "europe", contract, item); err != nil {
+				t.Fatal(err)
+			}
+			if len(runtime.availabilityCalls) != 0 {
+				t.Fatal("quality timestamp was rounded down and caused an early duplicate probe")
+			}
+			if _, err := controller.tickActiveAvailability(observed.Add(3*time.Second), "europe", contract, item); err != nil {
+				t.Fatal(err)
+			}
+			if len(runtime.availabilityCalls) != 1 {
+				t.Fatal("liveness did not resume at its configured interval")
+			}
+		})
+	}
+}
+
 func TestInitialFailureDetectedBeforeMinuteWithConfirmedReserve(t *testing.T) {
 	for _, mode := range []string{"best", "priority"} {
 		t.Run(mode, func(t *testing.T) {

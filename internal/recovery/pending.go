@@ -26,9 +26,10 @@ var (
 )
 
 type Options struct {
-	ConfigDir string
-	StateDir  string
-	DataDir   string
+	ConfigDir  string
+	SecretsDir string
+	StateDir   string
+	DataDir    string
 }
 
 type Result struct {
@@ -46,7 +47,8 @@ type pendingRestore struct {
 }
 
 type pendingManifest struct {
-	Files []pendingFile `json:"files"`
+	FormatVersion int           `json:"format_version"`
+	Files         []pendingFile `json:"files"`
 }
 
 type pendingFile struct {
@@ -57,9 +59,10 @@ type pendingFile struct {
 
 func OptionsFromEnvironment() Options {
 	return Options{
-		ConfigDir: envOr("SB_GATEWAY_CONFIG_DIR", "/config"),
-		StateDir:  envOr("SB_GATEWAY_STATE_DIR", "/state/control-plane"),
-		DataDir:   envOr("SB_GATEWAY_DATA_DIR", "/data"),
+		ConfigDir:  envOr("SB_GATEWAY_CONFIG_DIR", "/config"),
+		SecretsDir: strings.TrimSpace(os.Getenv("SB_GATEWAY_SECRETS_DIR")),
+		StateDir:   envOr("SB_GATEWAY_STATE_DIR", "/state/control-plane"),
+		DataDir:    envOr("SB_GATEWAY_DATA_DIR", "/data"),
 	}
 }
 
@@ -87,9 +90,22 @@ func ApplyPending(options Options) (Result, error) {
 	if !operationPattern.MatchString(pending.OperationID) {
 		return Result{}, errors.New("pending recovery operation identifier is invalid")
 	}
+	if pending.Manifest.FormatVersion == 3 {
+		secret := options.SecretsDir
+		if secret == "" {
+			secret = filepath.Join(configRoot, "secrets")
+		}
+		secret, err = cleanRoot(secret)
+		if err != nil || secret != filepath.Join(configRoot, "secrets") {
+			return Result{}, errors.New("catalog recovery requires the default secrets namespace; custom secrets namespaces are not supported")
+		}
+	}
 	expectedStaging := filepath.Join(dataRoot, "recovery-staging", pending.OperationID)
 	if filepath.Clean(pending.StagingPath) != filepath.Clean(expectedStaging) {
 		return Result{}, errors.New("pending recovery staging directory path does not match the requested operation")
+	}
+	if _, err := secureDescendant(dataRoot, filepath.Join("recovery-staging", pending.OperationID), true); err != nil {
+		return Result{}, err
 	}
 	pendingInfo, err := os.Lstat(pending.StagingPath)
 	if err != nil || !pendingInfo.IsDir() || pendingInfo.Mode()&os.ModeSymlink != 0 {
@@ -102,31 +118,29 @@ func ApplyPending(options Options) (Result, error) {
 			return Result{}, errors.New("pending recovery staging directory cannot be resolved")
 		}
 	}
-	if len(pending.Manifest.Files) == 0 {
-		return Result{}, errors.New("pending recovery manifest has no files")
+	prepared, err := preflightRestore(stagingRoot, configRoot, stateRoot, dataRoot, pending.Manifest)
+	if err != nil {
+		return Result{}, err
 	}
-	if len(pending.Manifest.Files) > 4096 {
-		return Result{}, errors.New("pending recovery manifest contains too many files")
+	defer prepared.close()
+	if err := prepared.admitStorage(configRoot, stateRoot, dataRoot); err != nil {
+		return Result{}, err
 	}
-
 	restored := 0
-	for _, entry := range pending.Manifest.Files {
-		if !pathPattern.MatchString(entry.Path) || hasParentTraversal(entry.Path) ||
-			!digestPattern.MatchString(entry.SHA256) || entry.Size < 0 || entry.Size > maxFileBytes {
-			return Result{}, errors.New("pending recovery manifest entry is invalid")
+	for _, file := range prepared.files {
+		// Recheck parent paths after preflight; per-file copies also recheck the
+		// source bytes before their atomic rename. Pending/staging survive errors.
+		destination, err := restoreDestination(file.entry.Path, configRoot, stateRoot, dataRoot)
+		if err != nil || destination != file.destination {
+			return Result{}, errors.New("recovery destination changed after preflight")
 		}
-		source, err := secureDescendant(stagingRoot, filepath.FromSlash(entry.Path), true)
-		if err != nil {
-			return Result{}, err
-		}
-		destination, err := restoreDestination(entry.Path, configRoot, stateRoot, dataRoot)
-		if err != nil {
-			return Result{}, err
-		}
-		if err := copyVerifiedAtomic(source, destination, entry.Size, entry.SHA256); err != nil {
+		if err := copyVerifiedAtomic(file.source, destination, file.entry.Size, file.entry.SHA256, recoveryFileLimit(file.entry.Path)); err != nil {
 			return Result{}, err
 		}
 		restored++
+	}
+	if err := prepared.close(); err != nil {
+		return Result{}, err
 	}
 	if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Result{}, err
@@ -139,6 +153,13 @@ func ApplyPending(options Options) (Result, error) {
 }
 
 func readPending(path string) (pendingRestore, error) {
+	expected, err := os.Lstat(path)
+	if err != nil {
+		return pendingRestore{}, err
+	}
+	if !expected.Mode().IsRegular() || expected.Size() > maxPendingBytes {
+		return pendingRestore{}, errors.New("pending recovery operation is invalid")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return pendingRestore{}, err
@@ -148,7 +169,7 @@ func readPending(path string) (pendingRestore, error) {
 	if err != nil {
 		return pendingRestore{}, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxPendingBytes {
+	if !info.Mode().IsRegular() || info.Size() > maxPendingBytes || !os.SameFile(expected, info) {
 		return pendingRestore{}, errors.New("pending recovery operation is invalid")
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, maxPendingBytes+1))
@@ -208,14 +229,28 @@ func secureDescendant(root, relative string, mustExist bool) (string, error) {
 	return candidate, nil
 }
 
-func copyVerifiedAtomic(source, destination string, expectedSize int64, expectedDigest string) error {
+func copyVerifiedAtomic(source, destination string, expectedSize int64, expectedDigest string, bounds ...int64) error {
+	limit := int64(maxFileBytes)
+	if len(bounds) > 1 || len(bounds) == 1 && (bounds[0] < 0 || bounds[0] > maxCatalogFileBytes) {
+		return errors.New("invalid recovery copy bound")
+	}
+	if len(bounds) == 1 {
+		limit = bounds[0]
+	}
+	if expectedSize < 0 || expectedSize > limit || !digestPattern.MatchString(expectedDigest) {
+		return errors.New("staged recovery file exceeds its copy bound")
+	}
+	expected, err := os.Lstat(source)
+	if err != nil || !expected.Mode().IsRegular() {
+		return errors.New("staged recovery source is not a regular file")
+	}
 	input, err := os.Open(source)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
 	info, err := input.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() != expectedSize {
+	if err != nil || !info.Mode().IsRegular() || info.Size() != expectedSize || !os.SameFile(expected, info) {
 		return errors.New("staged recovery file size does not match its manifest")
 	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
@@ -232,7 +267,8 @@ func copyVerifiedAtomic(source, destination string, expectedSize int64, expected
 		return err
 	}
 	digest := sha256.New()
-	written, err := io.Copy(io.MultiWriter(temporary, digest), io.LimitReader(input, maxFileBytes+1))
+	writer := newRestoreFileWriter(temporary, filepath.Dir(destination), digest)
+	written, err := io.CopyBuffer(writer, io.LimitReader(newRestoreFileReader(input), expectedSize+1), make([]byte, restoreCopyBuffer))
 	if err != nil {
 		temporary.Close()
 		return err

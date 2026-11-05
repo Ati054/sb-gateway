@@ -99,7 +99,7 @@ func healthProbeLaneCount(pool healthPool) int {
 	if pool.ProbeLanes > 0 {
 		return minInt(requested, minInt(64, pool.ProbeLanes))
 	}
-	inventory := len(pool.Outbounds)
+	inventory := len(pool.Outbounds) + len(pool.CatalogDefinitions)
 	if inventory == 0 {
 		// Legacy fixtures may omit the concrete outbound inventory.
 		eligible := make(map[string]bool)
@@ -295,6 +295,22 @@ func (runtime *responsiveSelectorRuntime) Probe(candidate string) probeEvidence 
 	return result.evidence
 }
 
+func (runtime *responsiveSelectorRuntime) ProbeWithQualityRequest(candidate string, request qualityProbeRequest) probeEvidence {
+	if !isPairedPlanningMeasurement(request.Measurement) {
+		return runtime.Probe(candidate)
+	}
+	if !runtime.enabled {
+		if source, ok := runtime.selectorRuntime.(requestedQualityRuntime); ok {
+			return source.ProbeWithQualityRequest(candidate, request)
+		}
+		return runtime.selectorRuntime.Probe(candidate)
+	}
+	result := runtime.run(func() probeJobResult {
+		return probeJobResult{evidence: runtime.background.ProbeWithQualityRequest(candidate, request)}
+	})
+	return result.evidence
+}
+
 func (runtime *responsiveSelectorRuntime) ProbeAvailability(candidate string) probeEvidence {
 	return runtime.probeActiveAvailability(candidate, false)
 }
@@ -367,7 +383,15 @@ func (runtime *responsiveSelectorRuntime) ProbeQualityParallel(candidates []stri
 	return runtime.probeParallel(candidates, nil, true, true, nil)
 }
 
+func (runtime *responsiveSelectorRuntime) ProbeQualityParallelWithMeasurement(candidates []string, measurement qualityMeasurement) map[string]probeEvidence {
+	return runtime.probeParallelWithMeasurement(candidates, nil, true, true, nil, measurement)
+}
+
 func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies, quality bool, preferred []string) map[string]probeEvidence {
+	return runtime.probeParallelWithMeasurement(candidates, onResult, checkOtherPolicies, quality, preferred, qualityMeasurementCold)
+}
+
+func (runtime *responsiveSelectorRuntime) probeParallelWithMeasurement(candidates []string, onResult func(string, probeEvidence) bool, checkOtherPolicies, quality bool, preferred []string, measurement qualityMeasurement) map[string]probeEvidence {
 	measured := make(map[string]probeEvidence, len(candidates))
 	lanes := runtime.backgrounds
 	if len(lanes) == 0 && runtime.background != nil {
@@ -389,7 +413,7 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 			}
 			var evidence probeEvidence
 			if quality {
-				evidence = runtime.Probe(candidate)
+				evidence = runtime.ProbeWithQualityRequest(candidate, qualityProbeRequest{Measurement: measurement})
 			} else if urgent, ok := runtime.selectorRuntime.(emergencyCandidateRuntime); !checkOtherPolicies && ok {
 				evidence = urgent.ProbeEmergencyAvailability(candidate)
 			} else {
@@ -421,39 +445,44 @@ func (runtime *responsiveSelectorRuntime) probeParallel(candidates []string, onR
 	}
 	ctx, cancel := context.WithCancel(runtime.ctx)
 	defer cancel()
-	jobs := make(chan string, len(candidates))
 	results := make(chan result, len(candidates))
-	for _, candidate := range candidates {
-		jobs <- candidate
-	}
-	close(jobs)
 	workerCount := minInt(len(lanes), len(candidates))
+	if quality && isPairedPlanningMeasurement(measurement) {
+		workerCount = min(workerCount, 2)
+	}
+	jobsByLane := probeLaneJobsWithMeasurement(candidates, workerCount, quality, cancel, measurement)
 	var workers sync.WaitGroup
 	workers.Add(workerCount)
-	for _, lane := range lanes[:workerCount] {
+	for index, lane := range lanes[:workerCount] {
 		lane := lane
+		jobs := jobsByLane[index]
 		go func() {
 			defer workers.Done()
 			lane.probeContext = ctx
 			if _, _, err := lane.Reload(); err != nil {
-				for candidate := range jobs {
-					results <- result{candidate: candidate, evidence: probeEvidence{Failure: probeFailureTransient, LocalFailure: true}}
+				for job := range jobs {
+					job.start.arrive()
+					job.warmStart.arrive()
+					results <- result{candidate: job.node, evidence: probeEvidence{Failure: probeFailureTransient, LocalFailure: true}}
 				}
 				return
 			}
-			for candidate := range jobs {
+			for job := range jobs {
+				candidate := job.node
 				if ctx.Err() != nil {
 					return
 				}
 				var evidence probeEvidence
 				if quality {
-					evidence = lane.Probe(candidate)
+					evidence = lane.ProbeWithQualityRequest(candidate, qualityProbeRequest{Measurement: measurement, Start: job.start, WarmStart: job.warmStart})
 				} else if !checkOtherPolicies {
 					evidence = lane.ProbeEmergencyAvailability(candidate)
 				} else {
 					evidence = lane.ProbeAvailability(candidate)
 				}
-				evidence.ObservedAt = time.Now()
+				if evidence.ObservedAt.IsZero() {
+					evidence.ObservedAt = time.Now()
+				}
 				select {
 				case results <- result{candidate: candidate, evidence: evidence}:
 				case <-ctx.Done():
@@ -658,7 +687,7 @@ func (controller *healthController) checkDuringProbe(now time.Time, pool healthP
 		}
 	}
 	if dirty {
-		if err := publishHealthState(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
+		if err := controller.publishRoutineHealthState(statePath(controller.opts.StateRoot, "selector-health"), controller.state); err != nil {
 			return errHealthYield
 		}
 	}

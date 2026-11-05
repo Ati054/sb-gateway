@@ -42,6 +42,8 @@ func TestOptimizationUsesObservationTimesInsideOneBatch(t *testing.T) {
 		now := time.Unix(1000, 0)
 		active, reserve := successfulEvidence(1100), successfulEvidence(400)
 		active.ObservedAt, reserve.ObservedAt = now, now.Add(skew)
+		item.Samples["active"] = []healthSample{{At: 1000, ObservedAt: 1000, OK: true, DelayMS: active.DelayMS}}
+		item.Samples["reserve"] = []healthSample{{At: 1000, ObservedAt: 1000, OK: true, DelayMS: reserve.DelayMS}}
 		comparison := regularOptimizationComparison(now, "active", "reserve", map[string]probeEvidence{"active": active, "reserve": reserve}, item, true, true, policySettings(healthPolicy{SwitchImprovementMS: 200}, "best"))
 		if (comparison.Result == optimizationWin) != (skew <= optimizationPairSkew) {
 			t.Fatalf("wrong observation-time qualification for %s: %+v", skew, comparison)

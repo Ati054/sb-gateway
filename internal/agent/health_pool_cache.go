@@ -18,6 +18,7 @@ type healthPoolCache struct {
 	info        os.FileInfo
 	changeStamp string
 	snapshot    healthPoolSnapshot
+	definitions *catalogDefinitionCache
 }
 
 type healthPoolSnapshot struct {

@@ -83,6 +83,24 @@ test("late history cannot restore display comparisons withdrawn by a newer statu
   assert.equal(mergeRuntimeStatus(current, older).selector_health.route.last_latency_comparisons, null);
 });
 
+test("warm planning status cannot cross newer cold rollback or stale history", () => {
+  const current = { selector_health: { route: { runtime_selected: "active",
+    runtime_observed_at: "2026-01-01T00:01:00Z", warm_planning_marker: "gstatic-warm-head-v1",
+    warm_latency_comparisons: null, warm_last_latency_comparisons: null } } };
+  const older = { selector_health: { route: { runtime_observed_at: "2026-01-01T00:00:00Z",
+    warm_planning_marker: "old-metric", warm_latency_comparisons: { reserve: { active: "old" } } } } };
+  const merged = mergeRuntimeStatus(current, older).selector_health.route;
+  assert.equal(merged.warm_planning_marker, "gstatic-warm-head-v1");
+  assert.equal(merged.warm_latency_comparisons, null);
+  const cold = { selector_health: { route: { runtime_selected: "active",
+    runtime_observed_at: "2026-01-01T00:02:00Z", latency_comparisons: null } } };
+  const rolledBack = mergeRuntimeStatus(current, cold).selector_health.route;
+  for (const key of ["warm_planning_marker", "warm_latency_comparisons", "warm_last_latency_comparisons"]) {
+    assert.equal(key in rolledBack, false);
+  }
+  assert.equal("warm_planning_marker" in mergeRuntimeStatus(cold, older).selector_health.route, false);
+});
+
 test("unused Reverse indicator is independent of route probes and other profiles", () => {
   const now = Date.parse("2026-09-07T00:00:00Z");
   const runtime = {
@@ -148,4 +166,45 @@ test("detailed runtime refresh replaces current selector history fields", () => 
   const merged = mergeRuntimeStatus(previous, detailed);
   assert.equal(merged.selector_health.europe.selected, "reverse-xhttp");
   assert.deepEqual(merged.selector_health.europe.period_stats, detailed.selector_health.europe.period_stats);
+});
+
+test("partial metric changes withdraw incompatible pairs without rolling back the route", () => {
+  const original = { selector_health: { route: {
+    runtime_selected: "active", runtime_confirmed: true,
+    runtime_observed_at: "2026-01-01T00:01:00Z",
+    warm_planning_marker: "gstatic-warm-head-v1",
+    warm_latency_comparisons: { reserve: { measurement: "gstatic-warm-head-v1" } },
+    warm_last_latency_comparisons: { reserve: { measurement: "gstatic-warm-head-v1" } },
+    latency_comparisons: { reserve: { measurement: "gstatic-head-v1" } },
+    last_latency_comparisons: { reserve: { measurement: "gstatic-head-v1" } },
+  } } };
+  const changed = mergeRuntimeStatus(original, { selector_health: { route: {
+    warm_planning_marker: "gstatic-fresh-paired-head-v1",
+  } } });
+  const health = changed.selector_health.route;
+  assert.equal(health.runtime_selected, "active");
+  assert.equal(health.runtime_confirmed, true);
+  assert.equal(health.warm_planning_marker, "gstatic-fresh-paired-head-v1");
+  for (const field of ["latency_comparisons", "last_latency_comparisons",
+    "warm_latency_comparisons", "warm_last_latency_comparisons"]) assert.equal(field in health, false);
+  const stale = mergeRuntimeStatus(changed, original).selector_health.route;
+  // The previous mode must not return through history with the same clock.
+  assert.equal(stale.warm_planning_marker, "gstatic-fresh-paired-head-v1");
+  assert.equal("warm_last_latency_comparisons" in stale, false);
+  const older = structuredClone(original);
+  older.selector_health.route.runtime_observed_at = "2026-01-01T00:00:59Z";
+  assert.equal(mergeRuntimeStatus(changed, older).selector_health.route.warm_planning_marker,
+    "gstatic-fresh-paired-head-v1");
+  assert.equal(stale.runtime_selected, "active");
+});
+
+test("same-metric partial history preserves the last usable percentage", () => {
+  const pair = { reserve: { measurement: "gstatic-fresh-paired-head-v1", active: "active" } };
+  const previous = { selector_health: { route: { runtime_selected: "active", runtime_confirmed: true,
+    runtime_observed_at: "2026-01-01T00:01:00Z", warm_planning_marker: "gstatic-fresh-paired-head-v1",
+    warm_last_latency_comparisons: pair } } };
+  const merged = mergeRuntimeStatus(previous, { selector_health: { route: {
+    warm_planning_marker: "gstatic-fresh-paired-head-v1", period_stats: { "24h": {} },
+  } } }).selector_health.route;
+  assert.deepEqual(merged.warm_last_latency_comparisons, pair);
 });

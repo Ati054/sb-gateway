@@ -39,8 +39,8 @@ func TestRouterOSApplyWaitsForTrafficAfterTransactionCommits(t *testing.T) {
 				if err := finalize(ctx, routeros.BackupRef{}); err != nil {
 					return routerOSApplyOutput{}, err
 				}
-				if server.plannedRuntimeApply.Load() {
-					t.Fatal("admission enabled before RouterOS transaction returned")
+				if !server.plannedRuntimeApply.Load() {
+					t.Fatal("readiness allowance missing after durable RouterOS commit")
 				}
 				transactionDone = true
 				return routerOSApplyOutput{Kind: "delta"}, nil

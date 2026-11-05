@@ -138,11 +138,11 @@ func TestRecoveryArchiveSkipsOnlyRecognizedAtomicTemporaryFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, body := range map[string]string{
-		"active.json":             `{"revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`,
-		".active.json.abcdef.tmp": "transient atomic state",
-		".first-write.abcdef.tmp": "transient atomic state without final sibling",
-		".unrelated.tmp":          "must remain in the archive",
-		"normal.json":             "persistent state",
+		"active.json":                      `{"revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`,
+		".active.json.abcdef.tmp":          "transient atomic state",
+		".apply-operation.json.abcdef.tmp": "transient atomic state without final sibling",
+		".unrelated.tmp":                   "must remain in the archive",
+		"normal.json":                      "persistent state",
 	} {
 		if err := os.WriteFile(filepath.Join(stateRoot, path), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -156,7 +156,7 @@ func TestRecoveryArchiveSkipsOnlyRecognizedAtomicTemporaryFiles(t *testing.T) {
 	for _, file := range files {
 		paths[file.archivePath] = true
 	}
-	if paths["state/.active.json.abcdef.tmp"] || paths["state/.first-write.abcdef.tmp"] {
+	if paths["state/.active.json.abcdef.tmp"] || paths["state/.apply-operation.json.abcdef.tmp"] {
 		t.Fatalf("recognized atomic temporary artifact was collected: %#v", paths)
 	}
 	if !paths["state/.unrelated.tmp"] || !paths["state/normal.json"] {
@@ -214,6 +214,7 @@ func TestRecoveryArchiveSkipsReconstructedRuntimeState(t *testing.T) {
 		"runtime-status.json",
 		"selector-health.json",
 		"selector-runtime.json",
+		"selector-status.json",
 		"subscription-refresh-status.json",
 		"subscription-runtime-operation.json",
 		"subscription-runtime-status.json",

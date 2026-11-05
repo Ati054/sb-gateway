@@ -257,7 +257,8 @@ func TestImageUpdateTransfersPersistentMountOwnershipExclusively(t *testing.T) {
 	for _, fragment := range []string{
 		`/container/set $candidate mountlists=""`,
 		`/container/set $current mountlists=$recoveryMountlists`,
-		`:if ([:len $previous] = 1) do={ /container/set $previous mountlists="" }`,
+		`:local preserveCompat false`,
+		`/container/set $previous mountlists=""`,
 		`persistent mount ownership transfer failed`,
 	} {
 		if !strings.Contains(worker, fragment) {

@@ -30,6 +30,11 @@ func invalidateChangedOutboundHealth(item *policyHealthState, candidates []strin
 		delete(item.AvailabilityFailures, id)
 		delete(item.Recoveries, id)
 		delete(item.Samples, id)
+		delete(item.LatestQuality, id)
+		delete(item.qualityCountedAt, id)
+		if pair := item.degradedPair; pair != nil && (pair.Active == id || pair.Candidate == id) {
+			item.degradedPair = nil
+		}
 		delete(item.DailySamples, id)
 		delete(item.HistoryDays, id)
 		delete(item.LastProbeAt, id)
@@ -67,6 +72,11 @@ func pruneRemovedCandidateHealth(item *policyHealthState, candidates []string) {
 	pruneNodeMap(item.AvailabilityFailures, active)
 	pruneNodeMap(item.Recoveries, active)
 	pruneNodeMap(item.Samples, active)
+	pruneNodeMap(item.LatestQuality, active)
+	pruneNodeMap(item.qualityCountedAt, active)
+	if pair := item.degradedPair; pair != nil && (!active[pair.Active] || !active[pair.Candidate]) {
+		item.degradedPair = nil
+	}
 	pruneNodeMap(item.DailySamples, active)
 	pruneNodeMap(item.HistoryDays, active)
 	pruneNodeMap(item.LastProbeAt, active)

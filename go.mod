@@ -4,6 +4,8 @@ go 1.26.0
 
 toolchain go1.27.3
 
+godebug multipathtcp=0
+
 require (
 	github.com/go-acme/lego/v5 v5.4.1
 	github.com/google/nftables v0.3.0

@@ -2,6 +2,14 @@
 
 ## Survey baseline coverage
 
+Cadence regressions (`health_sample_cadence_test.go` and
+`health_cadence_progress_test.go`) separate the processed raw observation from
+the first eligible median sample. They cover precise interval boundaries,
+checkpoint migration, replayed/failed paired results, immutable sample values,
+raw-clock Delta publication and shared one-slot progress over 7/10/24-node pools
+with one/six policies. These virtual-time tests are source scheduling checks,
+not physical WAN or CPU acceptance.
+
 Run `go test ./internal/agent -run 'TestSurvey' -count=1 -v` for the virtual-time
 24-node survey and unchanged-active restart regression. It exercises the real
 controller and wake schedule with parallel primary responses of one and 4.5
@@ -178,6 +186,11 @@ blocking in this job. The full default scan has existing findings in those
 categories; it is not reported as passing. No correctness finding is suppressed.
 UDP DNS pools store pointers to fixed-size buffers, avoiding slice-header
 boxing on pool returns without changing request lifetime or worker limits.
+Release consistency checks cover both the bootstrap archive filename and its
+versioned RouterOS root directory, alongside installation guides and image metadata.
+The managed DNS UDP regression uses one real loopback client socket for a gated
+same-question pair and a cached burst, checking every transaction ID and reply
+source without assuming response order; this does not verify RouterOS NAT mapping.
 Fresh DNS TLS fixtures construct trusted upstreams before starting handler
 goroutines; they do not mutate live TLS settings. Untrusted-certificate cases
 still use the public production constructor and require certificate rejection.
@@ -346,8 +359,8 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 
 ## Pinned Core Upgrade
 
-The server source pins upstream Xray v26.10.29 at
-`0afec66085a85191e9dd2a4a6646c7c9a94688d1`, with REALITY
+The server source pins upstream Xray v26.10.31 at
+`a4a3dff5b20c2faae567b742c172c7b95e75c083`, with REALITY
 `83f621788ca88b83179810b12baa7ae518aacb83` and Go 1.27.3.
 Promotion still requires renderer, Reverse and external data-plane acceptance;
 a source pin change does not certify an image. The build asserts both the
@@ -356,6 +369,28 @@ upstream and multicall-selected `x509roots/fallback` version
 See [upstream's trust-store update](https://github.com/XTLS/Xray-core/pull/7212)
 and [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3).
 Exported Reverse bridge versions remain independently pinned.
+
+The v26.10.31 update adds an explicit MPTCP-off default to Xray's system listener,
+HTTP 100 Continue handling, XHTTP OPTIONS support and optional HTTP/2 parameters,
+streaming gzip GeoData downloads, QUIC sniffing validation and a balancer CLI fix.
+Generated protobuf changes require repeating the dynamic control RPC and
+multicall checks. Apply all maintained patches with their existing zero-fuzz
+checks, especially the HTTP probe-lifetime and XHTTP transport tests; a clean
+textual application alone is not runtime acceptance.
+
+The optional `TestXrayPinnedRendererCompatibility` check uses
+`XRAY_TEST_BINARY` and reads its expected version from the maintained
+Dockerfile's `XRAY_VERSION` defaults. All stages must agree. Run it against the
+current pinned executable after a core update; an older hard-coded test version
+is not a compatibility result. This check validates generated configuration
+syntax, not external provider handshakes or transport throughput.
+
+The main module's `godebug multipathtcp=0` is copied into the temporary multicall
+module. Check effective default listener policy with an unset or legacy
+`GODEBUG=disablethp=1` environment, and the explicit gateway TCP policy with
+`GODEBUG=multipathtcp=1`. These tests do not need an MPTCP-capable kernel. Preserve
+an explicit Xray socket opt-in, UDP/Unix behavior and normal HTTP/DNS shutdown.
+See [the listener security policy](SECURITY.md#tcp-listener-policy).
 
 The v26.10.29 upgrade also changes asset/Lua path helpers, GeoData update
 validation and inbound module initialization order. Verify the generated
@@ -412,6 +447,11 @@ both with and without a returned latency, at batch sizes one and three. An
 unknown primary latency must not gain a ranking from another origin's response.
 
 ## Public Export Boundary
+
+Run `go vet ./cmd/... ./internal/... ./tests/tools` as part of release checks.
+Subscription catalog import owns one local deadline across refresh-channel
+fallbacks; register cancellation when that context is first created. Download
+and local-import deadline regressions cover their independent lifetimes.
 
 Public source export retains the reviewed user-facing changelog history and only
 the current release-notes document. User conversations, attachments, incident logs, owner test reports,

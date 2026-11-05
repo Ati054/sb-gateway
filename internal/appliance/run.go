@@ -53,6 +53,7 @@ func OptionsFromEnvironment() Options {
 }
 
 func Run(ctx context.Context, options Options) error {
+	wireDNSRouteEpochs(&options)
 	if err := resetXrayStartupProof(options); err != nil {
 		return fmt.Errorf("reset startup readiness: %w", err)
 	}
@@ -70,12 +71,15 @@ func Run(ctx context.Context, options Options) error {
 		log.Printf("appliance: RouterOS watchdog migrated to route-aware traffic readiness")
 	}
 	if migrated, err := controlplane.MigrateLegacyDynamicRuntime(ctx, options.ControlPlane); err != nil {
-		if errors.Is(err, controlplane.ErrProbeContractMigration) {
+		if errors.Is(err, controlplane.ErrProbeContractMigration) || errors.Is(err, controlplane.ErrManagedDNSStartupContract) {
 			return err
 		}
 		log.Printf("appliance: legacy runtime migration skipped safely: %v", err)
 	} else if migrated {
 		log.Printf("appliance: committed startup runtime contract reconciled")
+	}
+	if err := controlplane.ValidateStartupManagedDNSRuntime(options.ControlPlane); err != nil {
+		return err
 	}
 	var supervisor *Supervisor
 	if _, err := os.Stat(options.XrayConfig); err == nil {

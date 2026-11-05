@@ -714,7 +714,7 @@ export function Routing({
                     <th>{quality.policy?.mode === "priority" ? tr("Приоритет") : tr("Рейтинг")}</th>
                     <th>{tr("Маршрут и узел")}</th>
                     <th>{tr("Доступность / ошибки HTTPS")}</th>
-                    <th>{tr("Медиана")}</th>
+                    <th title={tr("Медиана полного HTTPS-запроса за выбранный период.")}>{tr("Медиана")}</th>
                     <th title={tr("Последнее парное сравнение с активным: минус — быстрее, плюс — медленнее.")}>{tr("Delta, %")}</th>
                     <th>{tr("Замеры")}</th>
                   </tr>
@@ -744,7 +744,11 @@ export function Routing({
                       </td>
                       <td className="quality-measurement"><strong>{node.median == null ? "—" : tr("{value1} мс", { value1: node.median })}</strong></td>
                       <td className={node.comparison ? `quality-comparison ${node.comparison.percent < 0 ? "is-faster" : node.comparison.percent > 0 ? "is-slower" : ""}` : "quality-comparison"}
-                        title={node.comparison ? tr("Последнее парное сравнение. Активный: {value1}; кандидат: {value2}", {
+                        title={node.comparison ? tr(node.comparison.measurement === "gstatic-warm-head-v1"
+                          ? "Последнее парное сравнение по готовому соединению. Активный: {value1}; кандидат: {value2}"
+                          : node.comparison.measurement === "gstatic-fresh-paired-head-v1"
+                          ? "Последнее парное сравнение новых HTTPS-соединений. Активный: {value1}; кандидат: {value2}"
+                          : "Последнее парное сравнение. Активный: {value1}; кандидат: {value2}", {
                           value1: formatTimestamp(new Date(node.comparison.activeAt * 1000).toISOString(), locale),
                           value2: formatTimestamp(new Date(node.comparison.candidateAt * 1000).toISOString(), locale),
                         }) : tr("Нет свежего подтверждённого сравнения")}>

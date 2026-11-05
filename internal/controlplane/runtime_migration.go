@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sb-gateway/sb-gateway/internal/geoipasset"
@@ -25,6 +26,7 @@ var ErrProbeContractMigration = errors.New("startup probe contract reconciliatio
 // Xray starts.
 func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bool, result error) {
 	probeMigration := false
+	catalogRuntimeVerified := false
 	defer func() {
 		if probeMigration && result != nil {
 			result = fmt.Errorf("%w: %w", ErrProbeContractMigration, result)
@@ -37,13 +39,21 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 	if err := repository.reconcileCommitPointers(); err != nil {
 		return false, err
 	}
-	// Interrupted transactions own their generated artifacts until their
-	// existing recovery worker has reconciled the committed generation.
+	// Coherent interrupted transactions retain their artifacts for ordinary
+	// recovery. A mixed DNS listener pair alone needs local reconstruction
+	// before the independent DNS/Xray workers may start.
+	operations := make(map[string]map[string]any, 2)
+	pending := false
 	for _, name := range []string{"apply-operation", "subscription-runtime-operation"} {
 		operation, err := repository.auxiliary(name)
-		if err != nil || operation["pending"] == true {
+		if err != nil {
 			return false, err
 		}
+		operations[name] = operation
+		pending = pending || operation["pending"] == true
+	}
+	if pending {
+		return reconcileStartupManagedDNSPending(ctx, opts, repository, operations)
 	}
 	metadata, err := repository.metadata()
 	if err != nil {
@@ -52,6 +62,8 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 	revision := subscriptionText(metadata["revision"])
 	var config map[string]any
 	var nodes []map[string]any
+	var probeNodes []map[string]any
+	var probeCatalog runtimeconfig.RuntimeNodeCatalog
 	nodesLoaded := false
 	if safeRevision(revision) {
 		config, err = repository.loadGeneration(revision)
@@ -71,13 +83,52 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 					return false, err
 				}
 				nodesLoaded = true
-				probeMigration, err = legacyProbeRuntime(opts.Runtime.XrayConfig, opts.Runtime.XrayHealthPool, config, nodes)
+				version, versionErr := startupProbePoolVersion(opts.Runtime.XrayHealthPool)
+				if versionErr != nil {
+					probeMigration = true
+					return false, versionErr
+				}
+				if version > 5 {
+					probeMigration = true
+					return false, errCatalogCompatibility
+				}
+				if version == 5 || hasSubscriptionCatalogNodes(nodes) {
+					// Prove the physical image before opening any committed
+					// catalogue metadata. Pool version alone is not authority.
+					if err := ValidateSubscriptionCatalogRuntimeCompatibility(ctx, opts, config); err != nil {
+						probeMigration = true
+						return false, err
+					}
+					catalogRuntimeVerified = true
+				}
+				probeNodes = nodes
+				if hasSubscriptionCatalogNodes(nodes) {
+					var closeCatalog func()
+					probeNodes, probeCatalog, closeCatalog, err = startupProbeCatalog(opts, nodes)
+					if err != nil {
+						probeMigration = true
+						return false, err
+					}
+					defer closeCatalog()
+				}
+				probeMigration, err = legacyProbeRuntimeWithCatalog(opts.Runtime.XrayConfig, opts.Runtime.XrayHealthPool, config, probeNodes, probeCatalog)
 				if err != nil {
 					probeMigration = true
 					return false, err
 				}
 			}
 		}
+	}
+	if version, versionErr := catalogCompatibilityPoolVersion(opts.Runtime.XrayHealthPool); versionErr == nil && version == 5 && !catalogRuntimeVerified {
+		if !safeRevision(revision) {
+			probeMigration = true
+			return false, errCatalogCompatibility
+		}
+		if err := ValidateSubscriptionCatalogRuntimeCompatibility(ctx, opts, config); err != nil {
+			probeMigration = true
+			return false, err
+		}
+		catalogRuntimeVerified = true
 	}
 	legacy, err := legacyDynamicRuntime(opts.Runtime.XrayConfig, opts.Runtime.XrayHealthPool)
 	if err != nil {
@@ -109,6 +160,12 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 			return false, err
 		}
 	}
+	if hasSubscriptionCatalogNodes(nodes) && !catalogRuntimeVerified {
+		if err := ValidateSubscriptionCatalogRuntimeCompatibility(ctx, opts, config); err != nil {
+			probeMigration = true
+			return false, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, xrayRuntimeReadinessTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -127,7 +184,7 @@ func MigrateLegacyDynamicRuntime(ctx context.Context, opts Options) (migrated bo
 		return false, err
 	}
 	if probeMigration {
-		invalid, err := legacyProbeRuntime(candidate.Files["xray.json"], candidate.Files["urltest-pool.json"], config, nodes)
+		invalid, err := legacyProbeRuntimeWithCatalog(candidate.Files["xray.json"], candidate.Files["urltest-pool.json"], config, probeNodes, probeCatalog)
 		if err != nil {
 			return false, err
 		}
@@ -194,7 +251,7 @@ func legacyDomainRuntime(path string) (bool, error) {
 	if err := decoder.Decode(&header); err != nil {
 		return false, err
 	}
-	return header.Version == 2 || (header.Version == 1 && (header.DomainIndexVersion != 1 || header.LaneLayoutVersion != 1)), nil
+	return header.Version == 2 || (header.Version == 1 && (header.DomainIndexVersion != 1 || header.LaneLayoutVersion != 2)), nil
 }
 
 func committedRuntimeMigrationNodes(repository *stateRepository, metadata map[string]any, revision string) ([]map[string]any, error) {
@@ -205,6 +262,15 @@ func committedRuntimeMigrationNodes(repository *stateRepository, metadata map[st
 	}
 	if snapshot["revision"] != snapshotRevision {
 		return nil, errors.New("legacy runtime migration has no committed node snapshot")
+	}
+	values, ok := snapshot["nodes"].([]any)
+	if !ok {
+		return nil, errors.New("legacy runtime migration node snapshot is malformed")
+	}
+	for _, value := range values {
+		if _, ok := value.(map[string]any); !ok {
+			return nil, errors.New("legacy runtime migration node snapshot contains an invalid entry")
+		}
 	}
 	nodes := objectNodes(snapshot["nodes"])
 	if snapshotRevision != revision {
@@ -299,9 +365,52 @@ func hasStartupProbePolicies(config map[string]any) bool {
 	return false
 }
 
-// The fast path renders only the in-memory health contract, without secret
-// reads or validators. Full runtime preparation runs only for an old contract.
+func startupProbePoolVersion(path string) (int, error) {
+	body, err := readRuntimeMigrationArtifact(path)
+	if err != nil {
+		return 0, err
+	}
+	var header struct {
+		Version int `json:"version"`
+	}
+	if json.Unmarshal(body, &header) != nil {
+		return 0, errors.New("decode startup probe contract")
+	}
+	// Older probe contracts may predate the catalogue-version range. They
+	// still use the existing legacy listener reconciliation, not a v5 proof.
+	return header.Version, nil
+}
+
+// Startup owns this private reader cache. Do not leave its generation leases
+// open after the metadata checks, including a failed reconciliation.
+func startupProbeCatalog(opts Options, nodes []map[string]any) ([]map[string]any, runtimeconfig.RuntimeNodeCatalog, func(), error) {
+	root, err := filepath.Abs(opts.SecretsDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	store := &secretStore{root: root}
+	legacy, catalog, err := splitSubscriptionCatalogNodes(store, nodes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	closeCatalog := func() {
+		store.catalogReaders.mu.Lock()
+		defer store.catalogReaders.mu.Unlock()
+		for generation, entry := range store.catalogReaders.entries {
+			_ = entry.reader.Close()
+			delete(store.catalogReaders.entries, generation)
+		}
+	}
+	return legacy, catalog, closeCatalog, nil
+}
+
+// The fast path checks the matching inventory without provider-definition
+// lookups or external validators. Full preparation is only for an old contract.
 func legacyProbeRuntime(xrayPath, healthPoolPath string, config map[string]any, nodes []map[string]any) (bool, error) {
+	return legacyProbeRuntimeWithCatalog(xrayPath, healthPoolPath, config, nodes, nil)
+}
+
+func legacyProbeRuntimeWithCatalog(xrayPath, healthPoolPath string, config map[string]any, nodes []map[string]any, catalog runtimeconfig.RuntimeNodeCatalog) (bool, error) {
 	if !hasStartupProbePolicies(config) {
 		return false, nil
 	}
@@ -314,6 +423,7 @@ func legacyProbeRuntime(xrayPath, healthPoolPath string, config map[string]any, 
 		return false, err
 	}
 	var pool struct {
+		Version     int `json:"version"`
 		ProbeBudget int `json:"probe_budget"`
 		ProbeLanes  int `json:"probe_lanes"`
 		Policies    map[string]struct {
@@ -331,19 +441,15 @@ func legacyProbeRuntime(xrayPath, healthPoolPath string, config map[string]any, 
 	if json.Unmarshal(poolBody, &pool) != nil || json.Unmarshal(xrayBody, &xray) != nil {
 		return false, errors.New("decode startup probe contract")
 	}
-	if len(pool.Policies) == 0 {
+	if len(pool.Policies) == 0 && catalog == nil {
 		return false, nil
 	}
-	expectedBody, err := runtimeconfig.BuildXrayHealthPool(config, nodes, map[string]any{})
+	expected, err := runtimeconfig.BuildXrayProbeContract(config, nodes, catalog)
 	if err != nil {
 		return false, err
 	}
-	var expected struct {
-		ProbeBudget int `json:"probe_budget"`
-		ProbeLanes  int `json:"probe_lanes"`
-	}
-	if err := json.Unmarshal(expectedBody, &expected); err != nil {
-		return false, err
+	if catalog != nil && pool.Version != 5 {
+		return true, nil
 	}
 	if pool.ProbeBudget != expected.ProbeBudget || pool.ProbeLanes != expected.ProbeLanes {
 		return true, nil

@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/storagebudget"
 )
 
 func (server *Server) recoveryBackups(response http.ResponseWriter, request *http.Request) {
@@ -102,6 +104,16 @@ func (server *Server) uploadRecoveryBackup(response http.ResponseWriter, request
 		server.internalStateError(response, request, err)
 		return
 	}
+	if request.ContentLength > recoveryMaxArchiveBytes {
+		server.writeErrorResponse(response, request, http.StatusRequestEntityTooLarge, "recovery_upload_too_large", "Recovery archive exceeds the safety limit.")
+		return
+	}
+	if request.ContentLength > 0 {
+		if err := storagebudget.Check(root, uint64(request.ContentLength)+recoveryStorageHeadroom+recoveryTarOverheadBytes); err != nil {
+			server.writeErrorResponse(response, request, http.StatusInsufficientStorage, "persistent_storage_full", "Storage headroom is insufficient or could not be verified. No archive was stored.")
+			return
+		}
+	}
 	target, _ := recoveryArchivePath(root, name)
 	if _, err := os.Lstat(target); err == nil {
 		server.writeErrorResponse(response, request, http.StatusConflict, "recovery_archive_exists", "This recovery archive is already stored.")
@@ -121,12 +133,14 @@ func (server *Server) uploadRecoveryBackup(response http.ResponseWriter, request
 	}
 	digest := sha256.New()
 	limited := http.MaxBytesReader(response, request.Body, recoveryMaxArchiveBytes)
-	written, copyErr := io.CopyBuffer(io.MultiWriter(temporary, digest), limited, make([]byte, recoveryChunkBytes))
+	written, copyErr := io.CopyBuffer(newRecoveryFileWriter(temporary, root, digest), limited, make([]byte, recoveryChunkBytes))
 	if copyErr != nil {
 		temporary.Close()
 		var maxBytesError *http.MaxBytesError
 		if errors.As(copyErr, &maxBytesError) {
 			server.writeErrorResponse(response, request, http.StatusRequestEntityTooLarge, "recovery_upload_too_large", "Recovery archive exceeds the safety limit.")
+		} else if errors.Is(copyErr, storagebudget.ErrNoSpace) || errors.Is(copyErr, storagebudget.ErrUnavailable) {
+			server.writeErrorResponse(response, request, http.StatusInsufficientStorage, "persistent_storage_full", "Storage headroom is insufficient or could not be verified. No archive was stored.")
 		} else {
 			server.writeErrorResponse(response, request, http.StatusBadRequest, "recovery_upload_failed", "Recovery archive upload was interrupted.")
 		}

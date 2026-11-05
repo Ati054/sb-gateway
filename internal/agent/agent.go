@@ -8,56 +8,70 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/dnsroute"
 )
 
 type Options struct {
-	control             *xrayControlClient
-	StateRoot           string
-	InterestFile        string
-	XrayBinary          string
-	XrayAPIServer       string
-	XrayReadyFile       string
-	PolicyDNSFile       string
-	ApplyGuardFile      string
-	XrayFailureSocket   string
-	NFTBinary           string
-	InitialDelay        time.Duration
-	ActiveInterval      time.Duration
-	IdleInterval        time.Duration
-	ActiveWindow        time.Duration
-	HealthInterval      time.Duration
-	HealthPoolFile      string
-	HotRuntimeReadyFile string
-	ProbeURL            string
-	StartupReverseWait  time.Duration
+	// DNSRoutes is an appliance-owned in-process observer; standalone mode has no shared DNS service.
+	DNSRoutes               *dnsroute.Registry
+	control                 *xrayControlClient
+	StateRoot               string
+	InterestFile            string
+	XrayBinary              string
+	XrayAPIServer           string
+	XrayReadyFile           string
+	PolicyDNSFile           string
+	ApplyGuardFile          string
+	XrayFailureSocket       string
+	NFTBinary               string
+	InitialDelay            time.Duration
+	ActiveInterval          time.Duration
+	IdleInterval            time.Duration
+	ActiveWindow            time.Duration
+	HealthInterval          time.Duration
+	HealthPoolFile          string
+	SubscriptionCatalogRoot string
+	HotRuntimeReadyFile     string
+	ProbeURL                string
+	StartupReverseWait      time.Duration
+	URLTestWarmCompare      bool
+	URLTestPlanningMode     URLTestPlanningMode
 }
 
 func OptionsFromEnvironment() Options {
 	active := boundedDuration("SB_CLIENT_TELEMETRY_INTERVAL_SECONDS", 30, 15, 3600)
 	idle := boundedDuration("SB_CLIENT_TELEMETRY_IDLE_INTERVAL_SECONDS", 300, int(active/time.Second), 86400)
 	window := boundedDuration("SB_CLIENT_TELEMETRY_ACTIVE_WINDOW_SECONDS", 45, int(active/time.Second), 3600)
+	warmCompare, _ := strconv.ParseBool(os.Getenv("SB_URLTEST_WARM_COMPARE"))
 	return Options{
-		StateRoot:           envOr("SB_GATEWAY_STATE_DIR", "/state/control-plane"),
-		InterestFile:        envOr("SB_CLIENT_TELEMETRY_INTEREST_FILE", "/run/sb-gateway/client-telemetry-interest"),
-		XrayBinary:          envOr("SB_XRAY_BIN", "xray"),
-		XrayAPIServer:       envOr("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
-		XrayReadyFile:       envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
-		PolicyDNSFile:       envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
-		ApplyGuardFile:      envOr("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
-		XrayFailureSocket:   envOr("SB_XRAY_FAILURE_SOCKET", "/run/sb-gateway/xray-failures.sock"),
-		NFTBinary:           envOr("SB_NFT_BIN", "nft"),
-		InitialDelay:        boundedDuration("SB_CLIENT_TELEMETRY_INITIAL_DELAY_SECONDS", 3, 0, 300),
-		ActiveInterval:      active,
-		IdleInterval:        idle,
-		ActiveWindow:        window,
-		HealthInterval:      boundedDuration("SB_OUTBOUND_HEALTH_INTERVAL", 60, 10, 3600),
-		HealthPoolFile:      envOr("SB_XRAY_URLTEST_POOL", "/config/generated/urltest-pool.json"),
-		HotRuntimeReadyFile: envOr("SB_XRAY_HOT_RUNTIME_READY_FILE", "/run/sb-gateway/xray-hot-runtime-ready.json"),
-		ProbeURL:            envOr("SB_XRAY_HEALTH_PROBE_URL", "http://127.0.0.1:19082"),
+		StateRoot:               envOr("SB_GATEWAY_STATE_DIR", "/state/control-plane"),
+		InterestFile:            envOr("SB_CLIENT_TELEMETRY_INTEREST_FILE", "/run/sb-gateway/client-telemetry-interest"),
+		XrayBinary:              envOr("SB_XRAY_BIN", "xray"),
+		XrayAPIServer:           envOr("SB_XRAY_API_SERVER", "127.0.0.1:10085"),
+		XrayReadyFile:           envOr("SB_XRAY_READY_FILE", "/run/sb-gateway/xray-selectors-ready"),
+		PolicyDNSFile:           envOr("SB_POLICY_DNS_CONFIG", "/config/generated/policy-dns.json"),
+		ApplyGuardFile:          envOr("SB_APPLY_GUARD", "/run/sb-gateway/apply-in-progress"),
+		XrayFailureSocket:       envOr("SB_XRAY_FAILURE_SOCKET", "/run/sb-gateway/xray-failures.sock"),
+		NFTBinary:               envOr("SB_NFT_BIN", "nft"),
+		InitialDelay:            boundedDuration("SB_CLIENT_TELEMETRY_INITIAL_DELAY_SECONDS", 3, 0, 300),
+		ActiveInterval:          active,
+		IdleInterval:            idle,
+		ActiveWindow:            window,
+		HealthInterval:          boundedDuration("SB_OUTBOUND_HEALTH_INTERVAL", 60, 10, 3600),
+		HealthPoolFile:          envOr("SB_XRAY_URLTEST_POOL", "/config/generated/urltest-pool.json"),
+		SubscriptionCatalogRoot: filepath.Join(envOr("SB_GATEWAY_SECRETS_DIR", "/config/secrets"), "subscription-catalogs"),
+		HotRuntimeReadyFile:     envOr("SB_XRAY_HOT_RUNTIME_READY_FILE", "/run/sb-gateway/xray-hot-runtime-ready.json"),
+		ProbeURL:                envOr("SB_XRAY_HEALTH_PROBE_URL", "http://127.0.0.1:19082"),
+		URLTestWarmCompare:      warmCompare,
+		URLTestPlanningMode:     URLTestPlanningMode(os.Getenv("SB_URLTEST_PLANNING_MODE")),
 	}
 }
 
 func Run(ctx context.Context, opts Options) error {
+	if err := opts.validatePlanningMode(); err != nil {
+		return err
+	}
 	control, err := newXrayControlClient(opts.XrayAPIServer)
 	if err != nil {
 		return fmt.Errorf("initialize Xray control API: %w", err)

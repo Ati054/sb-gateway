@@ -7,22 +7,27 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/sb-gateway/sb-gateway/internal/healthsnapshot"
 )
 
 // Unknown fields, especially probe histories, must never enter the polling
 // cache. Raw messages preserve the existing API types and optional fields.
 type compactSelectorRecord struct {
-	Selected        json.RawMessage `json:"runtime_selected"`
-	Confirmed       json.RawMessage `json:"runtime_confirmed"`
-	Observed        json.RawMessage `json:"runtime_observed_at"`
-	Error           json.RawMessage `json:"runtime_error"`
-	Labels          json.RawMessage `json:"candidate_labels"`
-	Nodes           json.RawMessage `json:"candidate_nodes"`
-	Count           json.RawMessage `json:"candidate_count"`
-	Available       json.RawMessage `json:"availability_ok"`
-	Shortlist       json.RawMessage `json:"shortlist"`
-	Comparisons     json.RawMessage `json:"latency_comparisons"`
-	LastComparisons json.RawMessage `json:"last_latency_comparisons"`
+	Selected            json.RawMessage `json:"runtime_selected"`
+	Confirmed           json.RawMessage `json:"runtime_confirmed"`
+	Observed            json.RawMessage `json:"runtime_observed_at"`
+	Error               json.RawMessage `json:"runtime_error"`
+	Labels              json.RawMessage `json:"candidate_labels"`
+	Nodes               json.RawMessage `json:"candidate_nodes"`
+	Count               json.RawMessage `json:"candidate_count"`
+	Available           json.RawMessage `json:"availability_ok"`
+	Shortlist           json.RawMessage `json:"shortlist"`
+	Comparisons         json.RawMessage `json:"latency_comparisons"`
+	LastComparisons     json.RawMessage `json:"last_latency_comparisons"`
+	WarmMarker          json.RawMessage `json:"warm_planning_marker"`
+	WarmComparisons     json.RawMessage `json:"warm_latency_comparisons"`
+	WarmLastComparisons json.RawMessage `json:"warm_last_latency_comparisons"`
 }
 
 type cachedSelectorStatus struct {
@@ -54,14 +59,16 @@ func (repository *stateRepository) selectorStatus() (map[string]any, error) {
 		return result, nil
 	}
 	repository.mu.RUnlock()
-	decoder := json.NewDecoder(io.LimitReader(file, 64<<20))
-	var records map[string]compactSelectorRecord
-	if err := decoder.Decode(&records); err != nil {
-		return nil, err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("selector status contains trailing JSON")
+	records := repository.compactHealthStatus(info)
+	if records == nil {
+		decoder := json.NewDecoder(io.LimitReader(file, 64<<20))
+		if err := decoder.Decode(&records); err != nil {
+			return nil, err
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			return nil, errors.New("selector status contains trailing JSON")
+		}
 	}
 	result := make(map[string]any, len(records))
 	for id, record := range records {
@@ -72,6 +79,11 @@ func (repository *stateRepository) selectorStatus() (map[string]any, error) {
 			"candidate_count": record.Count, "availability_ok": record.Available,
 			"shortlist": record.Shortlist, "latency_comparisons": record.Comparisons,
 			"last_latency_comparisons": record.LastComparisons,
+		}
+		if len(record.WarmMarker) > 0 {
+			fields["warm_planning_marker"] = record.WarmMarker
+			fields["warm_latency_comparisons"] = record.WarmComparisons
+			fields["warm_last_latency_comparisons"] = record.WarmLastComparisons
 		}
 		item := make(map[string]any, len(fields))
 		for key, body := range fields {
@@ -96,10 +108,47 @@ func (repository *stateRepository) selectorStatus() (map[string]any, error) {
 		if _, exists := item["last_latency_comparisons"]; !exists {
 			item["last_latency_comparisons"] = nil
 		}
+		if _, warm := item["warm_planning_marker"]; warm {
+			for _, key := range []string{"warm_latency_comparisons", "warm_last_latency_comparisons"} {
+				if _, exists := item[key]; !exists {
+					item[key] = nil
+				}
+			}
+		}
 		result[id] = item
 	}
 	repository.mu.Lock()
 	repository.selectors = cachedSelectorStatus{info: info, value: result}
 	repository.mu.Unlock()
 	return cloneJSONObject(result), nil
+}
+
+func (repository *stateRepository) compactHealthStatus(history os.FileInfo) map[string]compactSelectorRecord {
+	file, err := os.Open(filepath.Join(repository.root, healthsnapshot.Filename))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > healthsnapshot.MaxBytes {
+		return nil
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, healthsnapshot.MaxBytes))
+	var envelope healthsnapshot.Envelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil
+	}
+	var extra any
+	if !errors.Is(decoder.Decode(&extra), io.EOF) || envelope.Version != 1 || envelope.HistoryStamp == "" || envelope.HistoryStamp != healthsnapshot.Stamp(history) {
+		return nil
+	}
+	body := bytes.TrimSpace(envelope.Status)
+	if len(body) == 0 || body[0] != '{' {
+		return nil
+	}
+	var records map[string]compactSelectorRecord
+	if err := json.Unmarshal(body, &records); err != nil {
+		return nil
+	}
+	return records
 }

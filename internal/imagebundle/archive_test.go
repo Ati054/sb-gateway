@@ -36,7 +36,8 @@ func TestNormalizeBuildKitArchiveForRouterOS(t *testing.T) {
 			"org.opencontainers.image.version": "1.5.10", "org.opencontainers.image.revision": "abc123",
 			"org.opencontainers.image.source": "local", "org.opencontainers.image.title": "sb-gateway",
 			"io.sb-gateway.lifecycle.version": "1", "io.sb-gateway.config.schema": "1", "io.sb-gateway.config.minimum-schema": "1",
-			"io.sb-gateway.dependency.xray.version": "26.7.28",
+			"io.sb-gateway.dependency.xray.version":          "26.7.28",
+			"io.sb-gateway.data.subscription-catalog.schema": "1",
 		}},
 	}
 	configBody, _ := json.Marshal(config)
@@ -51,7 +52,7 @@ func TestNormalizeBuildKitArchiveForRouterOS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if details.Platform != "linux/arm64" || details.Revision != "abc123" || !classicConfigPattern.MatchString(details.DockerConfig) {
+	if details.Platform != "linux/arm64" || details.Revision != "abc123" || details.SubscriptionCatalogSchema != 1 || !classicConfigPattern.MatchString(details.DockerConfig) {
 		t.Fatalf("details = %#v", details)
 	}
 	manifest, err := readTarEntry(path, "manifest.json", maxMetadataBytes)

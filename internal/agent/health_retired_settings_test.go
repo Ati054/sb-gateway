@@ -36,9 +36,9 @@ func TestSelectionUsesBoundedRecentQualityNotDailyMedian(t *testing.T) {
 			controller, runtime, item := livenessFixture(t, mode)
 			oldDelay := 1900
 			item.Samples["de"] = []healthSample{
-				{At: 997, OK: true, DelayMS: &oldDelay},
-				{At: 998, OK: true, DelayMS: &oldDelay},
-				{At: 999, OK: true, DelayMS: &oldDelay},
+				{At: 880, OK: true, DelayMS: &oldDelay},
+				{At: 940, OK: true, DelayMS: &oldDelay},
+				{At: 1000, OK: true, DelayMS: &oldDelay},
 			}
 			item.DailySamples["de"] = append([]healthSample(nil), item.Samples["de"]...)
 			runtime.probes["de"] = successfulEvidence(400)

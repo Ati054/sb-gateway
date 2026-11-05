@@ -90,6 +90,7 @@ try {
         'docs/LARGE-POOL-VERIFICATION.md', 'docs/URLTEST-CLEANUP-VERIFICATION.md',
         'docs/URLTEST-LATENCY-VERIFICATION.md', 'docs/URLTEST-SIMPLIFICATION-VERIFICATION.md',
         'docs/URLTEST-LOAD-RESEARCH.md', 'docs/URLTEST-TRAFFIC-ACCOUNTING.md',
+        'docs/URLTEST-PANEL-COMPARISON.md',
         'docs/GEOIP-BINARY-EXPERIMENT.md', 'docs/XRAY-PAYLOAD-SNAPSHOT.md',
         'tools/geoipbench/run-chr.sh', 'internal/appliance/image_artifact_test.go',
         'internal/routeros/image_transfer_chr_test.go', 'internal/routeros/logging_native_test.go'

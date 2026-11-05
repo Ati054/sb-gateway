@@ -25,6 +25,9 @@ var (
 )
 
 type ImageUpdateSpec struct {
+	// CatalogSchema is a verified target-image capability, never inferred from
+	// its version. Zero is legacy/unknown and cannot consume catalog state.
+	CatalogSchema      int
 	Version            string
 	StorageRoot        string
 	CandidateRoot      string
@@ -100,6 +103,9 @@ func (client *Client) ScheduleImageUpdate(ctx context.Context, spec ImageUpdateS
 }
 
 func validateImageUpdateSpec(spec ImageUpdateSpec) (ImageUpdateSpec, error) {
+	if spec.CatalogSchema < 0 || spec.CatalogSchema > 1 {
+		return ImageUpdateSpec{}, errors.New("image catalog data capability is invalid")
+	}
 	spec.Version = strings.TrimSpace(spec.Version)
 	root, err := validateLifecycleStorageRoot(spec.StorageRoot)
 	if err != nil {
@@ -176,6 +182,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 	}, "\n")
 	lines := []string{
 		"# SB-GATEWAY autonomous one-image switch",
+		catalogImageWorkerCompatibilitySource(),
 		`:local jobs [/system/script/job/find where script="` + imageUpdateWorker + `"]`,
 		`:if ([:len [/system/script/job/find where script="SB-GATEWAY-container-startup"]] > 0) do={ :return true }`,
 		`:if ([:len $jobs] > 1) do={ :return true }`,
@@ -222,11 +229,13 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :local oldRoot ($receipt->"previous-root")`,
 		`  :if (([:typeof $oldRoot] != "str") || ($oldRoot = $candidateRoot) || (([:pick $oldRoot 0 ` + fmt.Sprint(len("/"+spec.StorageRoot+"/root-")) + `] != "/` + spec.StorageRoot + `/root-") && ($oldRoot != "/` + spec.StorageRoot + `/root"))) do={ :error "SB-GATEWAY image transfer previous root is invalid" }`,
 		`  :if ([:typeof [:find $oldRoot "/" ` + fmt.Sprint(len("/"+spec.StorageRoot+"/root-")) + `]] = "num") do={ :error "SB-GATEWAY image transfer previous root is nested" }`,
+		`  :if (([:typeof ($receipt->"catalog-schema")] != "nil") || (` + fmt.Sprint(spec.CatalogSchema) + ` != 0)) do={ :if (($receipt->"catalog-schema") != ` + fmt.Sprint(spec.CatalogSchema) + `) do={ :error "SB-GATEWAY image transfer catalog capability changed" } }`,
 		`  :local savedMountlists ($receipt->"mountlists")`,
+		`  :set savedMountlists [$catalogTargetMountlists $oldRoot $savedMountlists $catalogContract]`,
 		`  :local savedIf ($receipt->"live-if")`,
 		`  :if ([:typeof $savedIf] = "array") do={ :if ([:len $savedIf] != 1) do={ :error "SB-GATEWAY image transfer live interface is ambiguous" }; :foreach value in=$savedIf do={ :set savedIf $value } }`,
 		`  :if (([:typeof $savedMountlists] != "array") || ([:len $savedMountlists] = 0) || ([:typeof $savedIf] != "str") || ([:typeof ($receipt->"previous-start-on-boot")] != "bool")) do={ :error "SB-GATEWAY image transfer persistent settings are invalid" }`,
-		`  :foreach list in=$savedMountlists do={ :if (([:typeof $list] != "str") || ([:len $list] = 0) || ([:len [/container/mounts/find where list=$list]] = 0)) do={ :error "SB-GATEWAY image transfer mountlist is missing" } }`,
+		`  :foreach sbTransferMountlist in=$savedMountlists do={ :if (([:typeof $sbTransferMountlist] != "str") || ([:len $sbTransferMountlist] = 0) || ([:len [/container/mounts/find where list=$sbTransferMountlist]] = 0)) do={ :error "SB-GATEWAY image transfer mountlist is missing" } }`,
 		`  :local savedVeth [/interface/veth/find where name=$savedIf]`,
 		`  :if ([:len $savedVeth] != 1) do={ :error "SB-GATEWAY image transfer live interface is missing" }`,
 		`  :if ([:pick [:tostr [/interface/veth/get $savedVeth address]] 0 ` + fmt.Sprint(len(spec.ContainerAddress)+1) + `] != "` + spec.ContainerAddress + `/") do={ :error "SB-GATEWAY image transfer live address does not match" }`,
@@ -333,6 +342,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :if (($healthy = true) && ($trafficReady = true) && ($trafficAdmitted = true) && ($restartCount = 0)) do={ :set sbGatewayImageProbation ($sbGatewayImageProbation + 1); :set sbGatewayImageMisses 0 } else={ :set sbGatewayImageProbation 0; :set sbGatewayImageMisses ($sbGatewayImageMisses + 1) }`,
 		`  :if ($sbGatewayImageProbation >= 3) do={`,
 		`    :if ([:len $transfer] = 1) do={ :set ($receipt->"phase") "commit"; /system/script/set $transfer source=[:serialize to=json value=$receipt] }`,
+		catalogImageArrivalSource(spec.CatalogSchema),
 		`    :if ([/container/get $current start-on-boot] != false) do={ :error "SB-GATEWAY candidate boot policy changed during probation" }`,
 		previousGuard,
 		`    :if ([:len $previous] = 1) do={ /container/remove $previous }`,
@@ -365,6 +375,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`  :local failedMountlists [/container/get $failed mountlists]`,
 		`  :if ([:len $failedMountlists] = 0) do={ :set failedMountlists [/container/get $rollback mountlists] }`,
 		`  :if ([:len $failedMountlists] = 0) do={ :error "SB-GATEWAY rollback mountlists are missing" }`,
+		`  :set failedMountlists [$catalogTargetMountlists [/container/get $rollback root-dir] $failedMountlists $catalogContract]`,
 		`  :do { /container/stop $failed } on-error={}`,
 		`  :local failedStopped false`,
 		`  :local failedStopTry 0`,
@@ -395,7 +406,8 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 
 		`:if (([:len $current] != 1) || ([:len $candidate] != 0) || ([:len $rollback] != 0)) do={ :error "SB-GATEWAY image update state is not recoverable" }`,
 		previousGuard,
-		`:if ([:len $previous] = 1) do={ /container/set $previous mountlists="" }`,
+		`:if ([:len $previous] = 1) do={ :local preserveCompat false; :if ([:typeof $catalogContract] = "array") do={ :local previousRoot [:tostr [/container/get $previous root-dir]]; :if ([:pick $previousRoot 0 1] = "/") do={ :set previousRoot [:pick $previousRoot 1 [:len $previousRoot]] }; :if (($previousRoot = ($catalogContract->"previous_root")) && (($catalogContract->"previous_catalog_schema") = 0)) do={ :local expectedCompat [$catalogTargetMountlists $previousRoot [/container/get $previous mountlists] $catalogContract]; :if ([:serialize to=json value=[/container/get $previous mountlists]] != [:serialize to=json value=$expectedCompat]) do={ :error "SB-GATEWAY previous compatibility mount binding changed" }; :set preserveCompat true } }; :if ($preserveCompat = false) do={ /container/set $previous mountlists="" } }`,
+		`:if (([:typeof $catalogContract] = "array") && (` + fmt.Sprint(spec.CatalogSchema) + ` < 1)) do={ :error "SB-GATEWAY target image catalog capability is unconfirmed; use matching private compatibility handoff" }`,
 		`:if ([:len $hold] = 0) do={ /interface/veth/add name="veth-sb-update" address=192.0.2.1/30 gateway=192.0.2.2 comment="SB-GATEWAY image update hold"; :set hold [/interface/veth/find where comment="SB-GATEWAY image update hold"] }`,
 		`:local liveIf [:tostr [/container/get $current interface]]`,
 		`:local mountlists [/container/get $current mountlists]`,
@@ -416,7 +428,7 @@ func renderImageUpdateWorker(spec ImageUpdateSpec) string {
 		`}`,
 		`:if ($extracted = false) do={ :error "SB-GATEWAY candidate extraction timed out" }`,
 		`:if (([:typeof $mountlists] != "array") || ([:len $mountlists] = 0)) do={ :error "SB-GATEWAY persistent mountlists are missing" }`,
-		`:set receipt {"candidate-root"=$candidateRoot;"previous-root"=[/container/get $current root-dir];"reference"="` + spec.CandidateReference + `";"mountlists"=$mountlists;"live-if"=$liveIf;"previous-start-on-boot"=[/container/get $current start-on-boot];"phase"="transfer"}`,
+		`:set receipt {"candidate-root"=$candidateRoot;"previous-root"=[/container/get $current root-dir];"previous-id"=[:tostr $current];"candidate-id"=[:tostr $candidate];"reference"="` + spec.CandidateReference + `";"catalog-schema"=` + fmt.Sprint(spec.CatalogSchema) + `;"mountlists"=$mountlists;"live-if"=$liveIf;"previous-start-on-boot"=[/container/get $current start-on-boot];"phase"="transfer"}`,
 		`/system/script/add name="` + imageUpdateTransfer + `" policy=read comment="SB-GATEWAY image transfer metadata" source=[:serialize to=json value=$receipt]`,
 		`:set transfer [/system/script/find where name="` + imageUpdateTransfer + `"]`,
 		`:if ([:len $transfer] != 1) do={ :error "SB-GATEWAY image transfer metadata was not created" }`,

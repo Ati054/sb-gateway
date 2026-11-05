@@ -111,7 +111,7 @@ func TestSubscriptionRuntimeAutomaticActivationKeepsDraftAndOtherProviders(t *te
 	for _, n := range r.nodes {
 		ids = append(ids, subscriptionText(n["id"]))
 	}
-	if !reflect.DeepEqual(ids, []string{"two-stay", "one-new"}) {
+	if !reflect.DeepEqual(ids, []string{"one-new", "two-stay"}) {
 		t.Fatalf("nodes=%v", ids)
 	}
 	if len(s.routerOSNodesForRevision(revision, nil)) != 2 {
@@ -167,8 +167,8 @@ func TestSubscriptionRuntimeReactivatesChangedParsedNodesWithSameSourceFingerpri
 	if r.activateCalls != 2 {
 		t.Fatalf("runtime activations=%d", r.activateCalls)
 	}
-	latest := r.nodes[len(r.nodes)-1]
-	if objectCopy(latest["tls"])["pinned_peer_cert_sha256"] != strings.Repeat("a", 64) {
+	latest := r.nodes[0]
+	if latest["id"] != "one-new" || objectCopy(latest["tls"])["pinned_peer_cert_sha256"] != strings.Repeat("a", 64) {
 		t.Fatal("updated per-node TLS metadata did not reach runtime")
 	}
 }

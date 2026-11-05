@@ -49,6 +49,12 @@ func (server *Server) runSubscriptionScheduler(ctx context.Context) {
 }
 
 func (server *Server) refreshOneDueSubscription(ctx context.Context) (time.Duration, error) {
+	// Read freshness after admission: a manual refresh may have completed while
+	// this worker waited for the shared update selector and inventory gate.
+	if err := server.subscriptionMu.LockContext(ctx); err != nil {
+		return subscriptionSchedulerBatch, err
+	}
+	defer server.subscriptionMu.Unlock()
 	now := server.now().UTC()
 	activeRevision, err := server.repository.activeRevision()
 	if err != nil || activeRevision == "" {
@@ -58,7 +64,7 @@ func (server *Server) refreshOneDueSubscription(ctx context.Context) (time.Durat
 	if err != nil {
 		return subscriptionSchedulerIdle, err
 	}
-	nodesState, err := server.repository.auxiliary("subscription-nodes")
+	nodesState, err := server.repository.subscriptionMetadata()
 	if err != nil {
 		return subscriptionSchedulerIdle, err
 	}
@@ -98,9 +104,7 @@ func (server *Server) refreshOneDueSubscription(ctx context.Context) (time.Durat
 	}
 	id := subscriptionText(due["id"])
 	attemptedAt := now.Format(time.RFC3339Nano)
-	server.subscriptionMu.Lock()
 	result, refreshErr := server.refreshSubscriptionNow(ctx, due)
-	server.subscriptionMu.Unlock()
 	status := map[string]any{"state": "failed", "last_attempt_at": attemptedAt}
 	if refreshErr == nil {
 		status["state"] = "ok"

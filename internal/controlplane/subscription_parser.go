@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 var subscriptionSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
@@ -26,62 +26,16 @@ func parseProxySubscription(body []byte, maxNodes int) ([]map[string]any, error)
 	if maxNodes < 1 {
 		return nil, &subscriptionParseError{code: "invalid_limit", message: "Subscription node limit is invalid."}
 	}
-	text := strings.TrimSpace(string(body))
-	if text == "" || !utf8.ValidString(text) {
-		return nil, &subscriptionParseError{code: "invalid_content", message: "Subscription content is empty or not UTF-8."}
-	}
-	if !containsProxyScheme(text) {
-		compact := strings.Map(func(value rune) rune {
-			if value == ' ' || value == '\t' || value == '\r' || value == '\n' {
-				return -1
-			}
-			return value
-		}, text)
-		decoded, err := decodeSubscriptionBase64(compact)
-		if err != nil || !utf8.Valid(decoded) {
-			return nil, &subscriptionParseError{code: "invalid_content", message: "Subscription is neither supported proxy links nor valid base64 text."}
-		}
-		text = string(decoded)
-	}
-	links := make([]string, 0, min(maxNodes, 64))
-	for _, line := range strings.FieldsFunc(strings.ReplaceAll(text, "\r", "\n"), func(value rune) bool { return value == '\n' }) {
-		link := strings.TrimSpace(line)
-		lower := strings.ToLower(link)
-		if strings.HasPrefix(lower, "vless://") || strings.HasPrefix(lower, "hysteria2://") || strings.HasPrefix(lower, "hy2://") {
-			links = append(links, link)
-			if len(links) > maxNodes {
-				return nil, &subscriptionParseError{code: "too_many_nodes", message: "Subscription contains too many nodes."}
-			}
-		}
-	}
-	if len(links) == 0 {
-		return nil, &subscriptionParseError{code: "unsupported_nodes", message: "Subscription contains no supported VLESS or Hysteria 2 nodes."}
-	}
-	result := make([]map[string]any, 0, len(links))
-	var firstError error
-	for index, link := range links {
-		var node map[string]any
-		var err error
-		if strings.HasPrefix(strings.ToLower(link), "vless://") {
-			node, err = parseSubscriptionVLESSLink(link, index+1)
-		} else {
-			node, err = parseSubscriptionHysteria2Link(link, index+1)
-		}
-		if err != nil {
-			if firstError == nil {
-				firstError = err
-			}
-			continue
-		}
+	result := make([]map[string]any, 0, min(maxNodes, 64))
+	_, err := walkProxySubscription(context.Background(), body, subscriptionWalkOptions{
+		MaxNodes: maxNodes, MaxBytes: defaultSubscriptionBytes, MaxLineBytes: defaultSubscriptionBytes,
+	}, func(node map[string]any) error {
 		result = append(result, node)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if len(result) == 0 {
-		if firstError != nil {
-			return nil, firstError
-		}
-		return nil, &subscriptionParseError{code: "unsupported_nodes", message: "Subscription contains no valid proxy nodes."}
-	}
-	deduplicateSubscriptionNodeIDs(result)
 	return result, nil
 }
 

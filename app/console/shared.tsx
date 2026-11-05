@@ -278,11 +278,6 @@ export function cdnProviderName(value: unknown): string {
 }
 
 const DIRECT_SERVICE_PACKS = [
-  { id: "ewelink", name: "eWeLink / Sonoff", category: "Умный дом", description: "API, региональные диспетчеры и облачные соединения eWeLink.", updateMode: "official", broad: false },
-  { id: "xiaomi-home", name: "Xiaomi Home / Mi Home", category: "Умный дом", description: "MIoT API, MQTT и вход в аккаунт Xiaomi.", updateMode: "official", broad: false },
-  { id: "tuya", name: "Tuya / Smart Life", category: "Умный дом", description: "Региональные API и MQTT облака Tuya.", updateMode: "official", broad: false },
-  { id: "aqara", name: "Aqara Home", category: "Умный дом", description: "Региональные API приложения и облачные сервисы устройств Aqara.", updateMode: "official", broad: false },
-  { id: "shelly", name: "Shelly Smart Control", category: "Умный дом", description: "Облачный API и WebSocket-соединения устройств Shelly.", updateMode: "official", broad: false },
   { id: "ru-government", name: "Госуслуги и государственные сайты", category: "Россия · важное", description: "Федеральные и региональные порталы, налоги, Госключ.", updateMode: "daily", broad: false },
   { id: "ru-banks", name: "Банки и платежи РФ", category: "Россия · важное", description: "Банки, СБП/НСПК и основные платежные кабинеты.", updateMode: "daily", broad: false },
   { id: "ru-marketplaces", name: "Маркетплейсы, объявления, доставка и ритейл РФ", category: "Россия · покупки", description: "Маркетплейсы, объявления, магазины, службы доставки и их CDN.", updateMode: "daily", broad: false },
@@ -309,6 +304,11 @@ const DIRECT_SERVICE_PACKS = [
   { id: "ir-payment", name: "Платежи Ирана", category: "Иран · платежи", description: "Платежные сервисы из category-payment-ir.", updateMode: "daily", broad: false },
   { id: "ir-social", name: "Соцсети Ирана", category: "Иран · общение", description: "Местные соцсети из category-social-media-ir.", updateMode: "daily", broad: false },
   { id: "ir-tech", name: "ИТ-сервисы Ирана", category: "Иран · сервисы", description: "Каталоги приложений и облака из category-tech-ir.", updateMode: "daily", broad: false },
+  { id: "ewelink", name: "eWeLink / Sonoff", category: "Умный дом", description: "API, региональные диспетчеры и облачные соединения eWeLink.", updateMode: "official", broad: false },
+  { id: "xiaomi-home", name: "Xiaomi Home / Mi Home", category: "Умный дом", description: "MIoT API, MQTT и вход в аккаунт Xiaomi.", updateMode: "official", broad: false },
+  { id: "tuya", name: "Tuya / Smart Life", category: "Умный дом", description: "Региональные API и MQTT облака Tuya.", updateMode: "official", broad: false },
+  { id: "aqara", name: "Aqara Home", category: "Умный дом", description: "Региональные API приложения и облачные сервисы устройств Aqara.", updateMode: "official", broad: false },
+  { id: "shelly", name: "Shelly Smart Control", category: "Умный дом", description: "Облачный API и WebSocket-соединения устройств Shelly.", updateMode: "official", broad: false },
   { id: "youtube", name: "YouTube", category: "Видео", description: "YouTube и медиадомены Google.", updateMode: "daily", broad: false },
   { id: "telegram", name: "Telegram", category: "Общение", description: "Web, API, официальные сети и звонки Telegram.", updateMode: "daily", broad: false },
   { id: "whatsapp", name: "WhatsApp", category: "Общение", description: "WhatsApp Web, приложение и связанные звонки.", updateMode: "daily", broad: false },
@@ -385,6 +385,16 @@ export function errorMessage(error: unknown, locale: Locale = currentUiLocale())
         ? "Применение ещё не подтверждено. Ожидается восстановление. Проверьте статус перед повтором."
       : error.code === "apply_state_unconfirmed"
         ? "Итог применения не подтверждён. Перед повтором проверьте состояние RouterOS и контейнера."
+      : error.code === "state_mutation_in_progress"
+        ? "Другая операция ещё выполняется. Дождитесь её завершения и повторите."
+      : error.code === "subscription_source_changed"
+        ? "Настройки подписки изменились во время ожидания. Повторите обновление для текущего источника."
+      : error.code === "subscription_publication_unconfirmed"
+        ? "Каталог доступен, но завершение обновления не подтверждено. Проверьте состояние перед повтором."
+      : error.code === "subscription_storage_full"
+        ? "Недостаточно места для обновления подписки. Прежний каталог сохранён."
+      : error.code === "persistent_storage_full"
+        ? "Недостаточно свободного места или его объём не удалось проверить. Архив не сохранён."
       : error.code === "storage_root_required"
         ? "Сначала укажите в Настройки → Контейнер и хранилище → Каталог проекта на внешнем SSD. Архив не загружался."
       : error.code === "invalid_image_filename"

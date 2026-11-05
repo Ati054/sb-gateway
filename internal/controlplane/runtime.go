@@ -155,15 +155,20 @@ func newNativeRuntimeStore(options RuntimeOptions, secrets *secretStore) (*nativ
 }
 
 func (runtime *nativeRuntime) prepare(config map[string]any, nodes []map[string]any) (runtimeconfig.RuntimeCandidate, error) {
+	legacy, catalog, err := splitSubscriptionCatalogNodes(runtime.secrets, nodes)
+	if err != nil {
+		return runtimeconfig.RuntimeCandidate{}, err
+	}
 	template, err := os.ReadFile(runtime.options.NginxTemplate)
 	if err != nil {
 		return runtimeconfig.RuntimeCandidate{}, fmt.Errorf("read nginx template: %w", err)
 	}
 	artifacts, err := runtimeconfig.BuildNativeRuntimeArtifacts(
-		config, nodes,
+		config, legacy,
 		func(reference string) (string, error) { return runtime.secrets.read(reference, true) },
 		func(reference string) (string, error) { return runtime.secrets.path(reference) },
 		runtimeconfig.NativeArtifactOptions{
+			Catalog:     catalog,
 			RuleSetRoot: runtime.options.RuleSetDir,
 			Nginx:       runtime.nginxRenderOptions(string(template)),
 		},
@@ -293,8 +298,9 @@ func (runtime *nativeRuntime) activateWithHooks(ctx context.Context, candidate r
 	return receipt, nil
 }
 
-// Endpoint-only updates remain hot. Changed probe listeners require a guarded
-// core restart before the new health pool can use them.
+// Pruned dynamic-only updates remain hot. Any changed startup graph, including
+// static outbounds or probe listeners, requires a guarded core restart before
+// the new health pool can acknowledge the applied subscription generation.
 func (runtime *nativeRuntime) activateSubscription(ctx context.Context, candidate runtimeconfig.RuntimeCandidate) (runtimeconfig.ActivationReceipt, error) {
 	return runtime.activateSubscriptionWithXrayRestartHook(ctx, candidate, nil)
 }
@@ -325,7 +331,7 @@ func (runtime *nativeRuntime) activateSubscriptionWithXrayRestartHook(ctx contex
 		}
 		if !restartCore && containsRuntimeArtifact(changed, "xray.json") {
 			var err error
-			restartCore, err = subscriptionProbeGeometryChanged(runtime.options.XrayConfig, candidate.Files["xray.json"])
+			restartCore, err = subscriptionStartupGraphChanged(runtime.options.XrayConfig, candidate.Files["xray.json"])
 			if err != nil {
 				return err
 			}
@@ -423,9 +429,12 @@ func (runtime *nativeRuntime) rollbackSubscriptionWithXrayRestartHook(ctx contex
 	var err error
 	if len(receipt.Changed()) > 0 {
 		err = runtime.store.RollbackAfter(receipt, func(restoring map[string]string) error {
+			if err := runtime.validateManagedDNSRestoring(restoring); err != nil {
+				return err
+			}
 			if path, changed := restoring["xray.json"]; changed && !restartCore {
 				var err error
-				restartCore, err = subscriptionProbeGeometryChanged(runtime.options.XrayConfig, path)
+				restartCore, err = subscriptionStartupGraphChanged(runtime.options.XrayConfig, path)
 				if err != nil {
 					return err
 				}
@@ -496,48 +505,42 @@ func (runtime *nativeRuntime) restartSubscriptionCore(ctx context.Context, chang
 	return nil
 }
 
-func subscriptionProbeGeometryChanged(previous, target string) (bool, error) {
+// A subscription can keep a stable node ID while rotating credentials or TLS /
+// transport settings. Static leaves are part of the startup graph, not the
+// versioned HandlerService pool; acknowledging that pool cannot reload them.
+// Compare the whole startup graph before publication, in both directions.
+// Pruned dynamic leaves remain hot because their definitions only change the
+// pool.
+func subscriptionStartupGraphChanged(previous, target string) (bool, error) {
 	read := func(path string) (map[string]any, error) {
 		body, err := readRuntimeMigrationArtifact(path)
 		if err != nil || len(body) == 0 {
 			return nil, err
 		}
 		var config map[string]any
-		if err := json.Unmarshal(body, &config); err != nil {
-			return nil, fmt.Errorf("decode subscription probe geometry: %w", err)
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		if err := decoder.Decode(&config); err != nil {
+			return nil, fmt.Errorf("decode subscription startup graph: %w", err)
 		}
-		managed := func(tag string) bool {
-			return tag == "outbound-health-probe" || strings.HasPrefix(tag, "outbound-health-background")
+		var trailing any
+		if config == nil {
+			return nil, errors.New("subscription startup graph is not an object")
 		}
-		inbounds, balancers := map[string]any{}, map[string]any{}
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			return nil, errors.New("subscription startup graph has trailing data")
+		}
+		seen := make(map[string]bool)
 		for _, inbound := range objects(config["inbounds"]) {
-			if tag := text(inbound["tag"]); managed(tag) {
-				if _, duplicate := inbounds[tag]; duplicate {
+			tag := text(inbound["tag"])
+			if tag == "routeros-client-dns" || tag == "outbound-health-probe" || strings.HasPrefix(tag, "outbound-health-background") {
+				if seen[tag] {
 					return nil, errors.New("duplicate subscription probe inbound")
 				}
-				inbounds[tag] = inbound
+				seen[tag] = true
 			}
 		}
-		routing := objectAt(config, "routing")
-		for _, balancer := range objects(routing["balancers"]) {
-			if tag := text(balancer["tag"]); managed(tag) {
-				balancers[tag] = balancer
-			}
-		}
-		rules := []any{}
-		for _, rule := range objects(routing["rules"]) {
-			tags := []any{}
-			for _, raw := range collectionArray(rule["inboundTag"]) {
-				if tag := text(raw); managed(tag) {
-					tags = append(tags, tag)
-				}
-			}
-			if len(tags) > 0 {
-				rule["inboundTag"] = tags
-				rules = append(rules, rule)
-			}
-		}
-		return map[string]any{"inbounds": inbounds, "balancers": balancers, "rules": rules}, nil
+		return config, nil
 	}
 	before, err := read(previous)
 	if err != nil {
@@ -550,6 +553,9 @@ func subscriptionProbeGeometryChanged(previous, target string) (bool, error) {
 func (runtime *nativeRuntime) restoreHotPolicyScope(receipt runtimeconfig.ActivationReceipt) (hotRuntimeScope, error) {
 	var policyScope hotRuntimeScope
 	err := runtime.store.RollbackAfter(receipt, func(restoring map[string]string) error {
+		if err := runtime.validateManagedDNSRestoring(restoring); err != nil {
+			return err
+		}
 		if path := restoring["urltest-pool.json"]; path != "" {
 			var err error
 			policyScope, err = hotPolicyScope(runtime.options.XrayHealthPool, path)
@@ -631,7 +637,7 @@ func (runtime *nativeRuntime) rollback(ctx context.Context, receipt runtimeconfi
 	if containsRuntimeArtifact(receipt.Changed(), "urltest-pool.json") {
 		policyScope, err = runtime.restoreHotPolicyScope(receipt)
 	} else {
-		err = runtime.store.Rollback(receipt)
+		err = runtime.store.RollbackAfter(receipt, runtime.validateManagedDNSRestoring)
 	}
 	if err != nil {
 		return err
@@ -745,6 +751,26 @@ func (runtime *nativeRuntime) commit(candidate runtimeconfig.RuntimeCandidate) e
 
 func (runtime *nativeRuntime) restartOrder(changed []string) []string {
 	programs := affectedPrograms(changed)
+	// Ownership moves in opposite directions on activation and rollback. The
+	// former owner must release 1053 before the target owner starts. Read only
+	// the published target bundle; rollback backups stay immutable. The target
+	// cannot prove which owner is still running, so use this safe order even for
+	// Go-to-Go edits. This reorders the same restart set, never adds a program.
+	if containsRuntimeArtifact(programs, "dns") && containsRuntimeArtifact(programs, "xray") {
+		if owner, _, err := managedDNSOwnerFromFiles(runtime.options); err == nil && owner != runtimeconfig.ManagedDNSOwnerNone {
+			first, second := "xray", "dns"
+			if owner == runtimeconfig.ManagedDNSOwnerXray {
+				first, second = "dns", "xray"
+			}
+			ordered := []string{first, second}
+			for _, program := range programs {
+				if program != first && program != second {
+					ordered = append(ordered, program)
+				}
+			}
+			return ordered
+		}
+	}
 	nginx, err := os.ReadFile(runtime.options.NginxConfig)
 	if err != nil || !bytes.Contains(nginx, []byte("ssl_preread on;")) {
 		return programs
@@ -760,6 +786,15 @@ func (runtime *nativeRuntime) restartOrder(changed []string) []string {
 }
 
 func (runtime *nativeRuntime) validateCandidate(ctx context.Context, candidate runtimeconfig.RuntimeCandidate, changed []string) error {
+	paths := make(map[string]string, 2)
+	for _, name := range changed {
+		if name == "xray.json" || name == "policy-dns.json" {
+			paths[name] = candidate.Files[name]
+		}
+	}
+	if err := runtime.validateManagedDNSRestoring(paths); err != nil {
+		return err
+	}
 	for _, name := range changed {
 		var err error
 		switch name {

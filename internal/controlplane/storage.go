@@ -17,14 +17,17 @@ import (
 )
 
 type stateRepository struct {
-	root                string
-	generations         string
-	mu                  sync.RWMutex
-	cache               map[string]cachedDocument
-	readiness           cachedSelectorReadiness
-	selectors           cachedSelectorStatus
-	selectorPublicMu    sync.Mutex
-	selectorPublicCache cachedPublicSelectorJSON
+	root                      string
+	generations               string
+	mu                        sync.RWMutex
+	cache                     map[string]cachedDocument
+	cacheClock                uint64
+	readiness                 cachedSelectorReadiness
+	selectors                 cachedSelectorStatus
+	selectorPublicMu          sync.Mutex
+	selectorPublicCache       cachedPublicSelectorJSON
+	subscriptionMetadataMu    sync.Mutex
+	subscriptionMetadataCache cachedSubscriptionMetadata
 }
 
 type cachedDocument struct {
@@ -32,17 +35,18 @@ type cachedDocument struct {
 	modified int64
 	size     int64
 	value    map[string]any
+	lastUse  uint64
 }
 
-// Four entries cover the hot draft, active generation, runtime status and one
-// auxiliary document. Older generation variants are read on demand instead of
-// occupying router memory "just in case".
-const stateDocumentCacheLimit = 4
+// Small polling and scheduler documents share the previous encoded byte budget.
+// Four slots alone make these hot documents repeatedly evict one another.
+const stateDocumentCacheLimit = 16
 
 // Large histories are caller-owned: caching them would retain a second object
 // graph and clone it again for each request. This bounds encoded cache input,
 // not the size of the decoded Go heap.
 const stateDocumentCacheMaxBytes = 256 << 10
+const stateDocumentCacheByteLimit = 4 * stateDocumentCacheMaxBytes
 
 func newStateRepository(root string) (*stateRepository, error) {
 	abs, err := filepath.Abs(root)
@@ -90,14 +94,17 @@ func (repository *stateRepository) readJSON(path string) (map[string]any, error)
 		repository.mu.Unlock()
 		return readJSONObject(path)
 	}
-	repository.mu.RLock()
+	repository.mu.Lock()
 	cached, ok := repository.cache[path]
 	if ok && cached.source != nil && os.SameFile(cached.source, info) && cached.modified == info.ModTime().UnixNano() && cached.size == info.Size() {
-		value := cloneJSONObject(cached.value)
-		repository.mu.RUnlock()
-		return value, nil
+		repository.cacheClock++
+		cached.lastUse = repository.cacheClock
+		repository.cache[path] = cached
+		repository.mu.Unlock()
+		// Cached graphs are immutable. Detach outside the repository lock.
+		return cloneJSONObject(cached.value), nil
 	}
-	repository.mu.RUnlock()
+	repository.mu.Unlock()
 
 	value, err := readJSONObject(path)
 	if err != nil {
@@ -633,11 +640,29 @@ func cloneJSONValue(value any) any {
 }
 
 func (repository *stateRepository) cacheDocument(path string, document cachedDocument) {
-	if _, exists := repository.cache[path]; !exists && len(repository.cache) >= stateDocumentCacheLimit {
-		for cachedPath := range repository.cache {
-			delete(repository.cache, cachedPath)
+	delete(repository.cache, path)
+	if document.size > stateDocumentCacheMaxBytes {
+		return
+	}
+	for {
+		used := document.size
+		oldest := ""
+		var oldestUse uint64
+		for cachedPath, cached := range repository.cache {
+			used += cached.size
+			if oldest == "" || cached.lastUse < oldestUse {
+				oldest, oldestUse = cachedPath, cached.lastUse
+			}
+		}
+		if len(repository.cache) < stateDocumentCacheLimit && used <= stateDocumentCacheByteLimit {
 			break
 		}
+		if oldest == "" {
+			return
+		}
+		delete(repository.cache, oldest)
 	}
+	repository.cacheClock++
+	document.lastUse = repository.cacheClock
 	repository.cache[path] = document
 }

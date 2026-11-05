@@ -3,6 +3,8 @@ package agent
 import (
 	"reflect"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
 
 // Scheduling/tolerance edits do not change a forwarding contract. Keep this
@@ -20,6 +22,15 @@ func healthSettingsOnly(previous, target healthPool) bool {
 			policies[id] = contract
 		}
 		pool.HealthPolicies = policies
+		if pool.Version >= 5 {
+			pool.Catalogs = nil // Storage location is not endpoint identity.
+			definitions := make(map[string]runtimeconfig.CatalogDefinition, len(pool.CatalogDefinitions))
+			for id, definition := range pool.CatalogDefinitions {
+				definition.Generation = ""
+				definitions[id] = definition
+			}
+			pool.CatalogDefinitions = definitions
+		}
 		return pool
 	}
 	return reflect.DeepEqual(normalize(previous), normalize(target))

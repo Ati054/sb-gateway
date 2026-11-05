@@ -1,6 +1,7 @@
 package runtimeconfig
 
 import (
+	"encoding/json"
 	"reflect"
 	"strconv"
 	"strings"
@@ -46,8 +47,12 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 	}
 	inbounds := objectSlice(artifacts.Config["inbounds"])
 	managed := findXraySourceRule(inbounds, func(inbound map[string]any) bool { return inbound["tag"] == managedDNSInbound })
-	if managed == nil || managed["listen"] != "172.31.255.2" || managed["port"] != ManagedDNSPort {
-		t.Fatal("managed router DNS must listen only on the actual container IPv4")
+	if managed != nil {
+		t.Fatal("managed router DNS must bypass the Xray ingress")
+	}
+	ingress := artifacts.PolicyDNS.ManagedIngress
+	if ingress == nil || len(ingress.Listeners) != 1 || ingress.Listeners[0].Host != "172.31.255.2" || ingress.Listeners[0].Port != ManagedDNSPort {
+		t.Fatal("managed Go DNS must listen only on the actual container IPv4")
 	}
 	if inbounds[len(inbounds)-1]["tag"] != "xray-api" {
 		t.Fatalf("API inbound is not last: %#v", inbounds)
@@ -73,8 +78,13 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 		t.Fatalf("health URLTest prefix missing: %#v", balancers[1])
 	}
 	rules := objectSlice(routing["rules"])
-	if rules[1]["outboundTag"] != "block" || !reflect.DeepEqual(stringSlice(rules[1]["inboundTag"]), []string{managedDNSInbound}) {
-		t.Fatal("an empty managed allowlist must block before general DNS rules")
+	if len(ingress.Rules) != 0 {
+		t.Fatal("empty managed allowlist must have no resolver fallback")
+	}
+	for _, rule := range rules {
+		if containsText(stringSlice(rule["inboundTag"]), managedDNSInbound) {
+			t.Fatal("old managed Xray DNS rules must not be emitted")
+		}
 	}
 	if !reflect.DeepEqual(rules[0], map[string]any{
 		"type": "field", "inboundTag": []string{"xray-api"}, "outboundTag": "xray-api",
@@ -111,6 +121,39 @@ func TestRenderXrayCandidateComposesNativeArtifacts(t *testing.T) {
 	body, err := MarshalXrayCandidate(artifacts.Config)
 	if err != nil || !strings.HasSuffix(string(body), "\n") || !strings.Contains(string(body), `"domainMatcher": "hybrid"`) {
 		t.Fatalf("canonical Xray JSON changed: %v\n%s", err, body)
+	}
+	config["local_clients"] = []any{map[string]any{"id": "assigned", "policy_id": "europe", "source_cidrs": []any{"192.0.2.9/32"}}}
+	for _, enabled := range []bool{true, false, true} {
+		objectValue(config["dns"])["hijack_managed_clients"] = enabled
+		candidate, err := RenderXrayCandidate(config, source, XrayCandidateOptions{RuleSetRoot: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire struct {
+			Version int                      `json:"version"`
+			Layout  int                      `json:"lane_layout_version"`
+			Managed *PolicyDNSManagedIngress `json:"managed_ingress"`
+		}
+		if err := json.Unmarshal(candidate.PolicyDNSBody, &wire); err != nil || wire.Version != 1 || wire.Layout != 2 {
+			t.Fatalf("managed DNS serialized an incompatible wire schema: %+v %v", wire, err)
+		}
+		coreBody, err := MarshalXrayCandidate(candidate.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := ValidateManagedDNSOwnership(coreBody, candidate.PolicyDNSBody)
+		wantOwner := ManagedDNSOwnerNone
+		if enabled {
+			wantOwner = ManagedDNSOwnerGo
+			if wire.Managed == nil || len(wire.Managed.Rules) != 1 || !reflect.DeepEqual(wire.Managed.Rules[0].SourceCIDRs, []string{"192.0.2.9/32"}) {
+				t.Fatalf("serialized Go ingress lost device assignment: %#v", wire.Managed)
+			}
+		} else if wire.Managed != nil {
+			t.Fatal("disabling managed interception retained a Go listener")
+		}
+		if err != nil || owner != wantOwner {
+			t.Fatalf("hijack=%t owner=%s want=%s: %v", enabled, owner, wantOwner, err)
+		}
 	}
 }
 

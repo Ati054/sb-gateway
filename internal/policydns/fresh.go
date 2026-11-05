@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/sb-gateway/sb-gateway/internal/netpolicy"
 )
 
 // FreshResolverConfig describes one encrypted recursive upstream. It is kept
@@ -103,7 +104,7 @@ func startFreshResolver(ctx context.Context, config FreshResolverConfig, options
 	if err != nil {
 		return nil, err
 	}
-	packet, listener, err := listenFreshResolverSockets(net.Listen, net.ListenPacket)
+	packet, listener, err := listenFreshResolverSockets(netpolicy.ListenTCP, net.ListenPacket)
 	if err != nil {
 		resolver.close()
 		return nil, err

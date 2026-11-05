@@ -148,7 +148,8 @@ func (server *Server) uploadLifecycleImage(response http.ResponseWriter, request
 	maximum := maxLifecycleImageUploadBytes()
 	limited := http.MaxBytesReader(response, request.Body, maximum)
 	upload := newImageUploadWriter(temporary)
-	version, size, digest, inspectErr := inspectDockerImageStream(limited, upload)
+	capability := dockerImageCapability{}
+	version, size, digest, inspectErr := inspectDockerImageStream(limited, upload, &capability)
 	if inspectErr != nil {
 		temporary.Close()
 		var maxBytesError *http.MaxBytesError
@@ -181,7 +182,7 @@ func (server *Server) uploadLifecycleImage(response http.ResponseWriter, request
 	}
 	routerOSPath := storageRoot + "/data/lifecycle-uploads/" + finalName
 	verification := map[string]any{"images": map[string]any{routerOSPath: map[string]any{
-		"sha256": digest, "size_bytes": size, "version": version, "verified_at": server.now().UTC().Format(time.RFC3339Nano),
+		"sha256": digest, "size_bytes": size, "version": version, "catalog_schema": capability.CatalogSchema, "verified_at": server.now().UTC().Format(time.RFC3339Nano),
 	}}}
 	if err := server.repository.saveAuxiliary("lifecycle-image-verifications", verification); err != nil {
 		server.internalStateError(response, request, err)
@@ -198,7 +199,9 @@ func (server *Server) uploadLifecycleImage(response http.ResponseWriter, request
 	})
 }
 
-func inspectDockerImageStream(source io.Reader, destination io.Writer) (string, int64, string, error) {
+type dockerImageCapability struct{ CatalogSchema int }
+
+func inspectDockerImageStream(source io.Reader, destination io.Writer, observations ...*dockerImageCapability) (string, int64, string, error) {
 	digest := sha256.New()
 	counter := &countingWriter{destination: io.MultiWriter(destination, digest)}
 	stream := io.TeeReader(source, counter)
@@ -263,9 +266,15 @@ func inspectDockerImageStream(source io.Reader, destination io.Writer) (string, 
 	version := config.Config.Labels["org.opencontainers.image.version"]
 	labels := config.Config.Labels
 	_, _, compatible := releasecontract.Compatible(labels, currentSchemaVersion)
+	catalogSchema, catalogCompatible := releasecontract.CatalogSchema(labels)
 	correctPlatform := config.OS == "linux" && (config.Architecture == "arm64" || config.Architecture == "aarch64")
-	if !correctPlatform || !compatible || !lifecycleVersionPattern.MatchString(version) {
+	if !correctPlatform || !compatible || !catalogCompatible || !lifecycleVersionPattern.MatchString(version) {
 		return "", counter.written, "", errors.New("container image identity is invalid")
+	}
+	for _, observation := range observations {
+		if observation != nil {
+			observation.CatalogSchema = catalogSchema
+		}
 	}
 	return version, counter.written, hex.EncodeToString(digest.Sum(nil)), nil
 }

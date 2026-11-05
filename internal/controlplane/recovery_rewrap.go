@@ -23,7 +23,7 @@ const (
 	recoveryWrapperRecordHead = 48
 	recoveryWrapperMarker     = "WRP2"
 	recoveryMaxHeaderBytes    = 16 << 10
-	recoveryMaxArchiveBytes   = 66 << 20
+	recoveryMaxArchiveBytes   = recoveryMaxPlainBytes + (8 << 20)
 )
 
 var recoveryArchiveName = regexp.MustCompile(`^SB-GATEWAY-state-\d{8}T\d{6}Z-[0-9a-f]{12}\.sbgw$`)

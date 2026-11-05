@@ -78,7 +78,7 @@ func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandida
 			existingPorts = append(existingPorts, port)
 		}
 	}
-	dnsArtifacts, dnsBody, err := RenderPolicyDNS(config, PolicyDNSCompileOptions{
+	dnsArtifacts, _, err := RenderPolicyDNS(config, PolicyDNSCompileOptions{
 		ExistingInboundPorts: existingPorts,
 		Selectable:           outboundSet.Selectable,
 		RuleSets:             ruleSets,
@@ -91,9 +91,14 @@ func RenderXrayCandidate(config, sourceModel map[string]any, options XrayCandida
 	outbounds := append(outboundSet.Outbounds, dnsArtifacts.XrayOutbounds...)
 	rules = append(dnsArtifacts.XrayRules, rules...)
 	if boolDefault(objectValue(config["dns"])["hijack_managed_clients"], true) {
-		dnsInbound, ingressRules := managedDNSIngress(containerPrefix.Addr().String(), dnsArtifacts.XrayRules)
-		inbounds = append(inbounds, dnsInbound)
-		rules = append(ingressRules, rules...)
+		dnsArtifacts.Runtime.ManagedIngress, err = managedDNSGoIngress(containerPrefix.Addr().String(), dnsArtifacts.XrayRules, dnsArtifacts.Runtime.Lanes)
+		if err != nil {
+			return XrayCandidateArtifacts{}, err
+		}
+	}
+	dnsBody, err := MarshalPolicyDNS(dnsArtifacts.Runtime)
+	if err != nil {
+		return XrayCandidateArtifacts{}, err
 	}
 
 	internalServer := textValue(objectValue(config["dns"])["internal_server"])

@@ -115,3 +115,47 @@ func TestSelectorStatusCacheExcludesHistoryAndObservesAtomicReplacement(t *testi
 		t.Fatal("deleted status reused a stale cache")
 	}
 }
+
+func TestCompactSelectorStatusKeepsExperimentalComparisonsSeparateAndBounded(t *testing.T) {
+	server := newTestServer(t)
+	cookie, _ := bootstrapSession(t, server)
+	pairs := map[string]any{"reserve": map[string]any{"active": "active", "measurement": "gstatic-warm-head-v1", "active_delay_ms": 100, "candidate_delay_ms": 80}}
+	if err := server.repository.saveAuxiliary("selector-health", map[string]any{"route": map[string]any{
+		"runtime_selected": "active", "runtime_confirmed": true,
+		"warm_planning_marker": "gstatic-warm-head-v1", "warm_latency_comparisons": pairs,
+		"warm_last_latency_comparisons": pairs, "warm_planning_samples": map[string]any{"large": []int{1, 2, 3}},
+		"history_days": map[string]any{"large": []int{1, 2, 3}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	response := performRequest(t, server, http.MethodGet, apiPrefix+"/status?view=selectors", nil, nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	item := decodeResponse(t, response)["selector_health"].(map[string]any)["route"].(map[string]any)
+	if item["warm_planning_marker"] != "gstatic-warm-head-v1" || item["latency_comparisons"] != nil {
+		t.Fatalf("warm and cold identities mixed: %v", item)
+	}
+	for _, key := range []string{"warm_latency_comparisons", "warm_last_latency_comparisons"} {
+		if item[key].(map[string]any)["reserve"].(map[string]any)["measurement"] != "gstatic-warm-head-v1" {
+			t.Fatalf("missing comparison identity: %v", item)
+		}
+	}
+	for _, key := range []string{"history_days", "warm_planning_samples"} {
+		if _, exists := item[key]; exists {
+			t.Fatalf("unbounded planning/history data entered polling: %s", key)
+		}
+	}
+	if err := server.repository.saveAuxiliary("selector-health", map[string]any{"route": map[string]any{
+		"runtime_selected": "active", "warm_planning_marker": "gstatic-warm-head-v1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	response = performRequest(t, server, http.MethodGet, apiPrefix+"/status?view=selectors", nil, nil, cookie)
+	item = decodeResponse(t, response)["selector_health"].(map[string]any)["route"].(map[string]any)
+	for _, key := range []string{"warm_latency_comparisons", "warm_last_latency_comparisons"} {
+		if value, exists := item[key]; !exists || value != nil {
+			t.Fatalf("missing warm comparison must withdraw stale panel data: %s=%v", key, value)
+		}
+	}
+}

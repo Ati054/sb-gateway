@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/sb-gateway/sb-gateway/internal/runtimeconfig"
 )
 
 // Retain only identical per-policy forwarding inputs under the same core. The
@@ -70,6 +72,19 @@ func sameHotPolicyContract(previous, target healthPool, id string) bool {
 			}
 		}
 		pool.Outbounds, pool.DialTargets = outbounds, targets
+		if pool.Version >= 5 {
+			definitions := make(map[string]runtimeconfig.CatalogDefinition)
+			nodes := make(map[string]healthNode)
+			for _, nodeID := range contract.Candidates {
+				if definition, ok := pool.CatalogDefinitions[nodeID]; ok {
+					definitions[nodeID] = definition
+				}
+				nodes[nodeID] = pool.Nodes[nodeID]
+			}
+			pool.CatalogDefinitions, pool.Nodes = definitions, nodes
+			contract.Nodes = nodes
+			pool.HealthPolicies[id] = contract
+		}
 		return pool
 	}
 	return healthSettingsOnly(scope(previous), scope(target))

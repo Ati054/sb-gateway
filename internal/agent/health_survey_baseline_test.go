@@ -65,7 +65,11 @@ func TestSurveySettingsUsesActualLaneCount(t *testing.T) {
 	for _, lanes := range []int{1, 2, 10} {
 		controller := &healthController{processedPool: healthPool{ProbeBudget: 10, ProbeLanes: lanes}}
 		p := controller.surveySettings(policySettings(healthPolicy{ProbeBatchSize: 10}, "best"))
-		if p.batch != min(10, 2*lanes) {
+		want := min(10, lanes)
+		if lanes == 1 {
+			want = 2 // Preserve the bounded sequential single-line path.
+		}
+		if p.batch != want {
 			t.Fatalf("lanes=%d batch=%d", lanes, p.batch)
 		}
 	}
@@ -139,6 +143,7 @@ func TestSurveyComparisonCoversWholeInventoryAfterRestart(t *testing.T) {
 				now := time.Unix(1060, 0)
 				runtime := &surveyBaselineRuntime{fakeSelectorRuntime: base, clock: &now, duration: duration}
 				controller.runtime = runtime
+				controller.checkpointNow = func() time.Time { return now }
 				end := now.Add(20 * time.Minute)
 				cycles, restartAt := 0, now.Add(10*time.Minute)
 				restarted := false

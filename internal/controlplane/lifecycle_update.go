@@ -100,12 +100,18 @@ func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter,
 	source := text(body["candidate_source"])
 	reference := strings.TrimSpace(text(body["candidate_reference"]))
 	version := strings.TrimSpace(text(body["candidate_version"]))
+	catalogSchema := 0
 	switch source {
 	case "local-file":
 		version, err = server.validateVerifiedLocalImage(configuredRoot, reference)
+		if err == nil {
+			catalogSchema, err = server.verifiedLocalImageCatalogSchema(reference)
+		}
 	case "registry":
 		if !lifecycleVersionPattern.MatchString(version) {
 			err = errors.New("a valid candidate version is required for a registry image")
+		} else {
+			catalogSchema, err = inspectRegistryImageCatalogSchema(request.Context(), reference, version)
 		}
 	default:
 		err = errors.New("image update source must be local-file or registry")
@@ -117,6 +123,10 @@ func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter,
 	candidateRoot := configuredRoot + "/root-" + version
 	if strings.Trim(liveContainerRoot, "/") == candidateRoot {
 		server.writeErrorResponse(response, request, http.StatusConflict, "image_version_already_active", "The selected image version is already active.")
+		return
+	}
+	if err := server.prepareLifecycleCatalogCompatibility(request.Context(), config, catalogSchema); err != nil {
+		server.writeErrorResponse(response, request, http.StatusConflict, "image_update_live_state_invalid", err.Error())
 		return
 	}
 	recovery, err := server.createRecoveryArchive()
@@ -131,7 +141,8 @@ func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter,
 	operation = map[string]any{
 		"kind": "image-update", "state": "preparing", "version": version,
 		"candidate_source": source, "candidate_reference": reference,
-		"storage_root": configuredRoot, "previous_root": strings.Trim(liveContainerRoot, "/"), "candidate_root": candidateRoot,
+		"catalog_schema": catalogSchema,
+		"storage_root":   configuredRoot, "previous_root": strings.Trim(liveContainerRoot, "/"), "candidate_root": candidateRoot,
 		"recovery_archive": recovery.Name, "preparing_at": now,
 		"retain_previous_image": keepPreviousImage(config),
 	}
@@ -144,7 +155,8 @@ func (server *Server) scheduleLifecycleImageUpdate(response http.ResponseWriter,
 	scheduleContext, scheduleCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer scheduleCancel()
 	result, err := stack.REST.ScheduleImageUpdate(scheduleContext, routeros.ImageUpdateSpec{
-		Version: version, StorageRoot: configuredRoot, CandidateRoot: candidateRoot,
+		CatalogSchema: catalogSchema,
+		Version:       version, StorageRoot: configuredRoot, CandidateRoot: candidateRoot,
 		CandidateSource: source, CandidateReference: reference, ContainerAddress: containerAddress,
 		KeepPrevious: keepPreviousImage(config),
 	})

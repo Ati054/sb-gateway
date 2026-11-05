@@ -62,6 +62,7 @@ func TestValidationSlotWaitIsCancellable(t *testing.T) {
 
 func TestACMEMemoryEnvironmentDoesNotInheritAmbientProxy(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://do-not-inherit.invalid")
+	t.Setenv("GODEBUG", "multipathtcp=1")
 	var command *exec.Cmd
 	original := acmeWorkerCommand
 	acmeWorkerCommand = func(ctx context.Context, _ string) *exec.Cmd {
@@ -70,8 +71,8 @@ func TestACMEMemoryEnvironmentDoesNotInheritAmbientProxy(t *testing.T) {
 	}
 	defer func() { acmeWorkerCommand = original }()
 	_, _ = runACMEWorker(context.Background(), acmejob.Request{})
-	if command == nil || !slices.Contains(command.Env, fmt.Sprintf("GOMEMLIMIT=%d", memorybudget.Current().Worker)) || !slices.Contains(command.Env, "GODEBUG=disablethp=1") {
-		t.Fatal("worker did not get its bounded memory/THP settings")
+	if command == nil || !slices.Contains(command.Env, fmt.Sprintf("GOMEMLIMIT=%d", memorybudget.Current().Worker)) || !slices.Contains(command.Env, "GODEBUG=disablethp=1,multipathtcp=0") {
+		t.Fatal("worker did not get its bounded memory, THP and MPTCP settings")
 	}
 	for _, value := range command.Env {
 		if strings.HasPrefix(value, "HTTP_PROXY=") {

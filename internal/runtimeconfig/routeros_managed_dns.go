@@ -45,11 +45,15 @@ func renderRouterOSManagedDNS(model RouterOSRenderModel) []string {
 	}
 	for _, proto := range []string{"udp", "tcp"} {
 		comment := "SB-GATEWAY managed DNS " + strings.ToUpper(proto)
-		fields := fmt.Sprintf(`chain=dstnat action=dst-nat src-address-list="SB_MANAGED_CLIENTS" connection-mark="sb-managed" dst-address-type=local protocol=%s dst-port=53 to-addresses="%s" to-ports=%d disabled=%s`, proto, model.ContainerIP, ManagedDNSPort, disabled)
+		// Source identity and the shared gate select eligible DNS. Public DNS
+		// already receives sb-managed after internal/endpoint bypasses; send it
+		// to the same Go listener instead of traversing the Xray TUN frontend.
+		fields := fmt.Sprintf(`chain=dstnat action=dst-nat src-address-list="SB_MANAGED_CLIENTS" in-interface-list=!WAN connection-mark="sb-managed" protocol=%s dst-port=53 to-addresses="%s" to-ports=%d disabled=%s`, proto, model.ContainerIP, ManagedDNSPort, disabled)
 		lines = append(lines,
 			fmt.Sprintf(`:if ([:len [/ip/firewall/nat/find where comment="%s"]] = 0) do={ /ip/firewall/nat/add %s comment="%s" }`, comment, fields, comment),
 			fmt.Sprintf(`:local dnsNat [/ip/firewall/nat/find where comment="%s"]`, comment),
 			`:if ([:len $dnsNat] != 1) do={ :error "SB-GATEWAY managed DNS NAT missing or ambiguous" }`,
+			`/ip/firewall/nat/unset $dnsNat dst-address-type`,
 			`/ip/firewall/nat/set $dnsNat `+fields,
 			`:local firstDNSNat [/ip/firewall/nat/find]; :if (([:len $firstDNSNat] > 0) && ([:pick $firstDNSNat 0 1] != $dnsNat)) do={ /ip/firewall/nat/move $dnsNat destination=[:pick $firstDNSNat 0 1] }`,
 		)
