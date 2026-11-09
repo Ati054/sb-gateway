@@ -11,8 +11,8 @@ require (
 	github.com/google/nftables v0.3.0
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42
 	github.com/miekg/dns v1.1.73
-	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.60.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
+	golang.org/x/net v0.62.0
 )
 
 require (
@@ -32,9 +32,9 @@ require (
 	github.com/yandex-cloud/go-sdk/v2 v2.169.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0
+	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/grpc v1.83.2 // indirect

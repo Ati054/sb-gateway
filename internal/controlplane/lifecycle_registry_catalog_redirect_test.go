@@ -136,6 +136,7 @@ func TestRegistryCatalogBlobTransportDropsOriginClientAuthentication(t *testing.
 	}
 	defer client.CloseIdleConnections()
 	transport := client.Transport.(*http.Transport)
+	//lint:ignore SA1019 The security regression must verify that legacy TLS hooks are removed.
 	if transport.Proxy != nil || transport.DialTLSContext != nil || transport.DialTLS != nil || transport.TLSClientConfig.ServerName != "" || transport.TLSClientConfig.InsecureSkipVerify || len(transport.TLSClientConfig.Certificates) != 0 {
 		t.Fatal("origin authentication or TLS override survived CDN boundary")
 	}

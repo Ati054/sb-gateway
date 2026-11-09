@@ -716,9 +716,7 @@ func (controller *healthController) Tick(now time.Time) error {
 				// At the next wake routine quality may be due again; service any
 				// overdue active proof here without displacing quality progress.
 				if item.RuntimeConfirmed && item.Selected != "block" && item.AvailabilityFailures[item.Selected] == 0 {
-					var changed bool
-					changed, err = controller.checkActiveAvailability(now, policyID, contract, item, false)
-					dirty = dirty || changed
+					_, err = controller.checkActiveAvailability(now, policyID, contract, item, false)
 				}
 			}
 			if !errors.Is(err, errHealthYield) {

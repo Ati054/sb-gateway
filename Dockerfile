@@ -75,7 +75,7 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
 ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
-ARG SB_GATEWAY_VERSION=1.6.95
+ARG SB_GATEWAY_VERSION=1.6.96
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -92,6 +92,8 @@ RUN set -eux; \
     case "${SB_GATEWAY_GO_TAGS}" in xray_multicall|xray_multicall,sb_cpu_lab) ;; *) exit 1 ;; esac; \
     sh scripts/prepare-xray-multicall.sh /opt/xray-source /opt/xray-source/reality /src/multicall.mod; \
     test "$(go list -modfile=/src/multicall.mod -m -f '{{.Version}}' golang.org/x/crypto/x509roots/fallback)" = v0.0.0-20261020153306-9f2b28d4331a; \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go list -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" -deps ./cmd/sb-gateway >/tmp/sb-gateway-imports.txt; \
+    if grep -E '^golang.org/x/crypto/openpgp($|/)' /tmp/sb-gateway-imports.txt; then echo 'Unsupported legacy OpenPGP import in shared build' >&2; exit 1; fi; \
     for package in ./cmd/sb-gateway ./internal/agent ./internal/domainset ./internal/netpolicy ./internal/policydns ./internal/runtimeconfig; do \
       test "$(go list -modfile=/src/multicall.mod -tags="${SB_GATEWAY_GO_TAGS}" -f '{{if or .TestGoFiles .XTestGoFiles}}yes{{end}}' "$package")" = yes; \
     done; \
@@ -127,7 +129,7 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
 ARG XRAY_VERSION=26.10.31
-ARG SB_GATEWAY_VERSION=1.6.95
+ARG SB_GATEWAY_VERSION=1.6.96
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -168,7 +170,7 @@ RUN set -eux; \
 ARG XRAY_VERSION=26.10.31
 ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
 ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.95
+ARG SB_GATEWAY_VERSION=1.6.96
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 ARG SB_URLTEST_WARM_COMPARE=0

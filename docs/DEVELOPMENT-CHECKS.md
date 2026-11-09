@@ -1,5 +1,15 @@
 # Development Checks
 
+## Static analysis and compatibility
+
+Run the pinned `staticcheck -checks='SA*' ./...` before freezing a release.
+Legacy TLS hooks must still be guarded during warm probes and cleared at
+registry/CDN trust boundaries. Typed HTTP/2 GOAWAY errors remain supported for
+existing round trippers. Narrow `SA1019` annotations at these compatibility
+accesses document why removing an obsolete API access would change behavior;
+do not disable the analyzer category globally. Discard a health callback's
+change flag when that branch unconditionally marks the state dirty.
+
 ## Survey baseline coverage
 
 Cadence regressions (`health_sample_cadence_test.go` and

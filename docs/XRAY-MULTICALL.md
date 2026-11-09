@@ -40,6 +40,15 @@ root, run `scripts/prepare-xray-multicall.sh` with those two absolute source pat
 and a new, ignored output `.mod` path. Build/test with that `-modfile` and the
 `xray_multicall` build tag. The generated module files must not be committed.
 Docker performs this preparation within its build stage.
+The generated shared module sets security minimums for compression and networking:
+`github.com/klauspost/compress` 1.20.2, `github.com/andybalholm/brotli` 1.2.7,
+`golang.org/x/net` 0.62.0 and `golang.org/x/crypto`
+0.58.1-0.20261009181718-2f1f834330b2. These minimums apply to the embedded core,
+not just the standalone controller module. Review the resolved module graph and
+audit the final image executable; a controller-only source scan does not cover
+the full shared build. Legacy OpenPGP is unsupported: moving its module path or
+upgrading the parent module does not make that API safe. The ARM64 shared import
+closure is checked during the build and must exclude `golang.org/x/crypto/openpgp`.
 Go regression sources are included in the build context; the build fails if
 gateway or agent test sources are absent. The runtime stage copies only the built
 executables and explicit runtime assets, not those test sources.

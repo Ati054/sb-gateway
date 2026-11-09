@@ -511,6 +511,7 @@ func dohConnectionClosed(err error) bool {
 		}
 	}
 	var connection http2.ConnectionError
+	//lint:ignore SA1019 Existing HTTP/2 round trippers can still return this typed failure.
 	var goaway http2.GoAwayError
 	if errors.As(err, &connection) || errors.As(err, &goaway) {
 		return true

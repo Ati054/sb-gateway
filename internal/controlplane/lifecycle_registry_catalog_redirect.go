@@ -78,6 +78,7 @@ func newRegistryCatalogBlobClient(original *http.Client) (*http.Client, error) {
 	transport.Proxy = nil
 	transport.ProxyConnectHeader = nil
 	transport.GetProxyConnectHeader = nil
+	//lint:ignore SA1019 Clear inherited legacy TLS dialing so it cannot bypass target pinning.
 	transport.DialTLS = nil
 	transport.DialTLSContext = nil
 	transport.TLSNextProto = nil

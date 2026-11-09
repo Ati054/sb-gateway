@@ -28,7 +28,12 @@ test("release toolchains agree and shared-core compression is pinned", async () 
   const ci = [...workflow.matchAll(/go-version: '(\d+\.\d+\.\d+)'/g)];
   assert.equal(ci.length, 2);
   for (const pin of ci) assert.equal(pin[1], pins[0][1]);
-  assert.match(shared, /-require=github\.com\/klauspost\/compress@v1\.18\.7/);
+  for (const minimum of [
+    "github.com/klauspost/compress@v1.20.2",
+    "github.com/andybalholm/brotli@v1.2.7",
+    "golang.org/x/net@v0.62.0",
+    "golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2",
+  ]) assert.ok(shared.includes("-require=" + minimum), "missing shared-core security minimum: " + minimum);
 });
 
 test("release packaging accepts numbered RCs without accepting unsafe versions", async () => {

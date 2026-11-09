@@ -22,6 +22,7 @@ func TestDoHHTTP2FailureClassification(t *testing.T) {
 		http2.StreamError{StreamID: 1, Code: http2.ErrCodeInternal},
 		http2.StreamError{StreamID: 3, Code: http2.ErrCodeRefusedStream},
 		http2.ConnectionError(http2.ErrCodeProtocol),
+		//lint:ignore SA1019 Exercise compatibility with typed failures from existing transports.
 		http2.GoAwayError{ErrCode: http2.ErrCodeNo},
 		errors.New("http2: server sent GOAWAY and closed the connection; debug=private"),
 	} {

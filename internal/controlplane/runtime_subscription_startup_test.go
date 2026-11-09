@@ -217,7 +217,7 @@ func TestSubscriptionStaticStartupFailureRetainsRestartAndPreviousLKG(t *testing
 	previous, target := subscriptionCatalogStartupPair(t, "final", "credential")
 	for _, failure := range []string{"hook", "restart", "probe"} {
 		t.Run(failure, func(t *testing.T) {
-			native, candidate, controller := subscriptionStartupFixture(t, previous, target)
+			native, _, controller := subscriptionStartupFixture(t, previous, target)
 			oldArtifacts := map[string][]byte{"xray.json": previous["xray.json"], "urltest-pool.json": previous["urltest-pool.json"]}
 			baseline, err := native.store.Prepare(artifactRevision(oldArtifacts), oldArtifacts)
 			if err != nil {
@@ -228,7 +228,7 @@ func TestSubscriptionStaticStartupFailureRetainsRestartAndPreviousLKG(t *testing
 			}
 			lkg := filepath.Join(filepath.Dir(filepath.Dir(baseline.Directory)), "runtime-lkg", "xray.json")
 			newArtifacts := map[string][]byte{"xray.json": target["xray.json"], "urltest-pool.json": target["urltest-pool.json"]}
-			candidate, err = native.store.Prepare(artifactRevision(newArtifacts), newArtifacts)
+			candidate, err := native.store.Prepare(artifactRevision(newArtifacts), newArtifacts)
 			if err != nil {
 				t.Fatal(err)
 			}

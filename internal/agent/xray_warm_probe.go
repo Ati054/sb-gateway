@@ -117,7 +117,9 @@ func measureWarmHTTP(parent context.Context, transport *http.Transport, target, 
 			return dialTLS(ctx, network, address)
 		}
 	}
+	//lint:ignore SA1019 Legacy injected transports must also reject warm reconnects.
 	if dialTLS := transport.DialTLS; dialTLS != nil {
+		//lint:ignore SA1019 Preserve the legacy hook while adding the same reconnect guard.
 		transport.DialTLS = func(network, address string) (net.Conn, error) {
 			if warmPhase.Load() {
 				return nil, errWarmProbeReconnect

@@ -312,11 +312,10 @@ func managedDNSPublicationFixture(t *testing.T) (*nativeRuntime, runtimeconfig.R
 }
 
 func TestManagedDNSInvalidActivationIsRejectedBeforePublication(t *testing.T) {
-	native, candidate, controller, expected := managedDNSPublicationFixture(t)
+	native, _, controller, expected := managedDNSPublicationFixture(t)
 	legacyCore, _ := legacyManagedDNSFixture(t, expected)
 	artifacts := map[string][]byte{"xray.json": legacyCore, "policy-dns.json": expected["policy-dns.json"]}
-	var err error
-	candidate, err = native.store.Prepare(artifactRevision(artifacts), artifacts)
+	candidate, err := native.store.Prepare(artifactRevision(artifacts), artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
