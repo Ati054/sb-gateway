@@ -207,7 +207,7 @@ func responseWithID(response []byte, queryID []byte) []byte {
 }
 
 func responseTTL(message []byte) time.Duration {
-	if len(message) < 12 {
+	if len(message) < 12 || binary.BigEndian.Uint16(message[4:6]) == 0 {
 		return 0
 	}
 	rcode := binary.BigEndian.Uint16(message[2:4]) & 0x000f

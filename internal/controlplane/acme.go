@@ -555,10 +555,18 @@ func acmeSchedulerErrorClass(err error) string {
 	if errors.Is(err, errInvalidACMERecord) {
 		return "invalid-record"
 	}
-	for _, stage := range []error{acmejob.ErrDelegation, acmejob.ErrDNSProvider,
-		acmejob.ErrPropagation, acmejob.ErrCAValidation, acmejob.ErrWorker} {
-		if errors.Is(err, stage) {
-			return "worker"
+	for _, stage := range []struct {
+		err   error
+		class string
+	}{
+		{acmejob.ErrDelegation, "delegation"},
+		{acmejob.ErrDNSProvider, "dns-provider"},
+		{acmejob.ErrPropagation, "propagation"},
+		{acmejob.ErrCAValidation, "ca-validation"},
+		{acmejob.ErrWorker, "worker"},
+	} {
+		if errors.Is(err, stage.err) {
+			return stage.class
 		}
 	}
 	return "state-or-install"

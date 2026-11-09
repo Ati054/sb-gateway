@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/http2"
 )
 
 type upstream interface {
@@ -196,6 +197,9 @@ func (upstream *udpUpstream) exchange(ctx context.Context, query []byte) ([]byte
 		}
 		lastError = err
 		_ = connection.Close()
+		if !replayableDNSQuery(query) {
+			break
+		}
 	}
 	return nil, lastError
 }
@@ -234,7 +238,7 @@ func (upstream *udpUpstream) exchangeOnConnection(ctx context.Context, connectio
 	}
 	response := append([]byte(nil), buffer[:size]...)
 	udpResponseBuffers.Put(buffer)
-	if len(response) >= 4 && binary.BigEndian.Uint16(response[2:4])&0x0200 != 0 {
+	if replayableDNSQuery(query) && truncatedDNSReply(query, response) {
 		fallback := &tcpUpstream{address: upstream.address, timeout: upstream.timeout, idle: make(chan net.Conn, 1)}
 		defer fallback.close()
 		return fallback.exchange(ctx, query)
@@ -295,6 +299,9 @@ func (upstream *tcpUpstream) exchange(ctx context.Context, query []byte) ([]byte
 		}
 		lastError = err
 		_ = connection.Close()
+		if !replayableDNSQuery(query) {
+			break
+		}
 	}
 	return nil, lastError
 }
@@ -452,9 +459,7 @@ func (upstream *dohUpstream) exchange(ctx context.Context, query []byte) ([]byte
 		defer cancelQuery()
 		ctx = queryCtx
 	}
-	primaryCtx := ctx
-	cancel := func() {}
-	if upstream.fallback != nil {
+	if upstream.fallback != nil && replayableDNSQuery(query) {
 		budget := timeout
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
@@ -463,13 +468,13 @@ func (upstream *dohUpstream) exchange(ctx context.Context, query []byte) ([]byte
 			}
 		}
 		if budget > 0 {
-			// Keep one third of the existing query deadline for encrypted fallback.
-			primaryCtx, cancel = context.WithTimeout(ctx, budget-budget/3)
+			// Preserve the fallback threshold without canceling a slow but
+			// still working primary before the shared deadline.
+			return upstream.exchangeWithFallback(ctx, query, budget-budget/3)
 		}
 	}
-	response, err := upstream.exchangeDoH(primaryCtx, query)
-	cancel()
-	if err == nil || upstream.fallback == nil {
+	response, err := upstream.exchangeDoH(ctx, query)
+	if err == nil || upstream.fallback == nil || !replayableDNSQuery(query) {
 		return response, err
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
@@ -487,7 +492,7 @@ func (upstream *dohUpstream) exchangeDoH(ctx context.Context, query []byte) ([]b
 	if err == nil {
 		return response, err
 	}
-	if ctx.Err() != nil || !dohConnectionClosed(err) {
+	if ctx.Err() != nil || !replayableDNSQuery(query) || !dohConnectionClosed(err) {
 		return nil, err
 	}
 	// A provider can retire a keep-alive connection between requests. Retry
@@ -496,6 +501,27 @@ func (upstream *dohUpstream) exchangeDoH(ctx context.Context, query []byte) ([]b
 }
 
 func dohConnectionClosed(err error) bool {
+	var stream http2.StreamError
+	if errors.As(err, &stream) {
+		switch stream.Code {
+		case http2.ErrCodeProtocol, http2.ErrCodeInternal, http2.ErrCodeRefusedStream, http2.ErrCodeCancel:
+			return true
+		default:
+			return false
+		}
+	}
+	var connection http2.ConnectionError
+	var goaway http2.GoAwayError
+	if errors.As(err, &connection) || errors.As(err, &goaway) {
+		return true
+	}
+	// net/http's private GOAWAY type has no exported conversion. Recognize
+	// only its fixed prefix; never retain or log its optional debug contents.
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if strings.HasPrefix(cause.Error(), "http2: server sent GOAWAY and closed the connection;") {
+			return true
+		}
+	}
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
 }
@@ -511,7 +537,7 @@ func (upstream *dohUpstream) finishDoH(transport *http.Transport, err error) {
 		return
 	}
 	var networkErr net.Error
-	failed := dohConnectionClosed(err) || errors.Is(err, context.DeadlineExceeded) ||
+	failed := dohConnectionClosed(err) || errors.Is(err, errDoHFallbackWon) || errors.Is(err, context.DeadlineExceeded) ||
 		(errors.As(err, &networkErr) && networkErr.Timeout())
 	upstream.poolMu.Lock()
 	if failed && !upstream.closed && upstream.transport == transport {
@@ -536,7 +562,13 @@ func (upstream *dohUpstream) exchangeDoHOnce(ctx context.Context, query []byte) 
 	if closed {
 		return nil, context.Canceled
 	}
-	defer func() { upstream.finishDoH(transport, err) }()
+	defer func() {
+		failure := err
+		if errors.Is(context.Cause(ctx), errDoHFallbackWon) {
+			failure = errDoHFallbackWon
+		}
+		upstream.finishDoH(transport, failure)
+	}()
 	// A failed RoundTrip may still consume its body asynchronously. The
 	// listener may recycle query's datagram buffer as soon as we return.
 	request, err := http.NewRequestWithContext(
@@ -547,9 +579,11 @@ func (upstream *dohUpstream) exchangeDoHOnce(ctx context.Context, query []byte) 
 	}
 	request.Header.Set("Accept", "application/dns-message")
 	request.Header.Set("Content-Type", "application/dns-message")
-	// DNS queries are replayable. Allow Transport to retry a lost reused
+	// Ordinary DNS queries are replayable. Allow Transport to retry a lost reused
 	// connection without transmitting an idempotency header to the resolver.
-	request.Header["Idempotency-Key"] = nil
+	if replayableDNSQuery(query) {
+		request.Header["Idempotency-Key"] = nil
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
@@ -605,11 +639,22 @@ func (runtime *runtime) planQuery(laneID string, query []byte) (queryPlan, error
 	if lane == nil {
 		return queryPlan{}, fmt.Errorf("unknown policy DNS lane %q", laneID)
 	}
-	name, err := questionName(query)
-	if err != nil {
-		return queryPlan{answer: refusal(query, false), local: true}, nil
+	if dnsResponsePacket(query) {
+		return queryPlan{local: true}, nil
 	}
-	target, rejected := lane.target(name)
+	if !validDNSWire(query) || binary.BigEndian.Uint16(query[4:6]) > 1 {
+		return queryPlan{answer: dnsErrorReply(query, dns.RcodeFormatError), local: true}, nil
+	}
+	// A questionless probe has no domain on which an exception can match. It
+	// follows this client's ordinary final resolver, including a final reject.
+	target, rejected := lane.final, lane.final == "reject"
+	if binary.BigEndian.Uint16(query[4:6]) == 1 {
+		name, err := questionName(query)
+		if err != nil {
+			return queryPlan{answer: dnsErrorReply(query, dns.RcodeFormatError), local: true}, nil
+		}
+		target, rejected = lane.target(name)
+	}
 	if rejected {
 		return queryPlan{answer: refusal(query, false), local: true}, nil
 	}
@@ -681,9 +726,14 @@ func matchingQuestion(query, response []byte) bool {
 		binary.BigEndian.Uint16(query[0:2]) != binary.BigEndian.Uint16(response[0:2]) ||
 		binary.BigEndian.Uint16(query[2:4])&0x8000 != 0 ||
 		binary.BigEndian.Uint16(response[2:4])&0x8000 == 0 ||
-		binary.BigEndian.Uint16(query[4:6]) != 1 ||
-		binary.BigEndian.Uint16(response[4:6]) != 1 {
+		query[2]&0x78 != response[2]&0x78 ||
+		binary.BigEndian.Uint16(query[4:6]) > 1 ||
+		binary.BigEndian.Uint16(response[4:6]) != binary.BigEndian.Uint16(query[4:6]) ||
+		!validDNSWire(query) || !validDNSWire(response) {
 		return false
+	}
+	if binary.BigEndian.Uint16(query[4:6]) == 0 {
+		return true
 	}
 	queryName, queryType, queryClass, queryOK := questionIdentity(query)
 	responseName, responseType, responseClass, responseOK := questionIdentity(response)
@@ -707,7 +757,7 @@ func questionName(message []byte) (string, error) {
 }
 
 func parseQuestionName(message []byte) (string, int, bool) {
-	if len(message) < 12 {
+	if len(message) < 12 || binary.BigEndian.Uint16(message[4:6]) != 1 {
 		return "", 0, false
 	}
 	var name strings.Builder
@@ -738,12 +788,16 @@ func parseQuestionName(message []byte) (string, int, bool) {
 }
 
 func refusal(query []byte, serverFailure bool) []byte {
-	if len(query) < 12 {
-		return nil
-	}
 	code := dns.RcodeRefused
 	if serverFailure {
 		code = dns.RcodeServerFailure
+	}
+	return dnsErrorReply(query, code)
+}
+
+func dnsErrorReply(query []byte, code int) []byte {
+	if len(query) < 12 || dnsResponsePacket(query) {
+		return nil
 	}
 	flags := binary.BigEndian.Uint16(query[2:4])
 	response := dns.Msg{MsgHdr: dns.MsgHdr{

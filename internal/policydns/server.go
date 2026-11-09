@@ -335,6 +335,9 @@ func (service *service) serveTCPSource(laneID string, listener net.Listener, man
 				if err != nil || len(answer) > maxDNSMessage {
 					return
 				}
+				if len(answer) == 0 {
+					continue // Ignored responses must not create empty TCP frames.
+				}
 				frame := make([]byte, 2+len(answer))
 				binary.BigEndian.PutUint16(frame[:2], uint16(len(answer)))
 				copy(frame[2:], answer)

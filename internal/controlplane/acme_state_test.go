@@ -107,7 +107,12 @@ func TestACMESchedulerFailureClassesDoNotContainErrorValues(t *testing.T) {
 		class string
 	}{
 		{errInvalidACMERecord, "invalid-record"},
-		{errors.Join(acmejob.ErrCAValidation, errors.New("secret-provider-value")), "worker"},
+		{errors.Join(acmejob.ErrDelegation, errors.New("secret-delegation-value")), "delegation"},
+		{errors.Join(acmejob.ErrDNSProvider, errors.New("secret-provider-value")), "dns-provider"},
+		{errors.Join(acmejob.ErrPropagation, errors.New("secret-TXT-value")), "propagation"},
+		{errors.Join(acmejob.ErrCAValidation, errors.New("secret-CA-value")), "ca-validation"},
+		{errors.Join(acmejob.ErrWorker, errors.New("secret-worker-value")), "worker"},
+		{errors.Join(acmejob.ErrWorker, acmejob.ErrDNSProvider), "dns-provider"},
 		{errors.New("secret-state-value"), "state-or-install"},
 	} {
 		if got := acmeSchedulerErrorClass(test.err); got != test.class {

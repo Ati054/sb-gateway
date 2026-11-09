@@ -126,6 +126,25 @@ func (service *service) resolveAdmitted(a queryAdmission, laneID string, query [
 		}
 	}
 	if acquired {
+		if doh, ok := a.plan.server.(*dohUpstream); ok && doh.fallback != nil {
+			ctx = context.WithValue(ctx, dnsFallbackBudgetKey{}, dnsFallbackBorrow(func() (func(), bool) {
+				if a.route != nil && !service.tryRoute(a.route.active) {
+					return nil, false
+				}
+				if !service.acquire() {
+					if a.route != nil {
+						service.releaseRoute(a.route.active)
+					}
+					return nil, false
+				}
+				return func() {
+					service.release()
+					if a.route != nil {
+						service.releaseRoute(a.route.active)
+					}
+				}, true
+			}))
+		}
 		response, err = r.exchangePlan(ctx, a.plan, query)
 		service.release()
 		if a.route != nil {

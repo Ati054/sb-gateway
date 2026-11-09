@@ -122,6 +122,7 @@ func startFreshResolver(ctx context.Context, config FreshResolverConfig, options
 	}
 	handler := dns.HandlerFunc(forwarder.handle)
 	forwarder.udp = &dns.Server{
+		MsgAcceptFunc: acceptFreshDNS,
 		PacketConn:    packet,
 		Handler:       handler,
 		ReadTimeout:   options.Timeout,
@@ -130,12 +131,13 @@ func startFreshResolver(ctx context.Context, config FreshResolverConfig, options
 		MaxTCPQueries: 1,
 	}
 	forwarder.tcp = &dns.Server{
+		MsgAcceptFunc: acceptFreshDNS,
 		Listener:      &freshLimitedListener{Listener: listener, limit: make(chan struct{}, options.TCPSessions)},
 		Handler:       handler,
 		ReadTimeout:   options.Timeout,
 		WriteTimeout:  options.Timeout,
 		IdleTimeout:   func() time.Duration { return options.Timeout },
-		MaxTCPQueries: 1,
+		MaxTCPQueries: 64,
 	}
 	go func() { _ = forwarder.udp.ActivateAndServe() }()
 	go func() { _ = forwarder.tcp.ActivateAndServe() }()
@@ -218,10 +220,10 @@ func (resolver *FreshResolver) Close() error {
 }
 
 func (resolver *FreshResolver) handle(writer dns.ResponseWriter, request *dns.Msg) {
-	if request == nil {
+	if request == nil || request.Response {
 		return
 	}
-	if len(request.Question) != 1 || request.Response {
+	if len(request.Question) > 1 {
 		resolver.reply(writer, request, dns.RcodeFormatError)
 		return
 	}
@@ -239,6 +241,16 @@ func (resolver *FreshResolver) handle(writer dns.ResponseWriter, request *dns.Ms
 	}
 	ctx, cancel := context.WithTimeout(resolver.ctx, resolver.timeout)
 	defer cancel()
+	if doh, ok := resolver.upstream.(*dohUpstream); ok && doh.fallback != nil {
+		ctx = context.WithValue(ctx, dnsFallbackBudgetKey{}, dnsFallbackBorrow(func() (func(), bool) {
+			select {
+			case resolver.limit <- struct{}{}:
+				return func() { <-resolver.limit }, true
+			default:
+				return nil, false
+			}
+		}))
+	}
 	responseBody, err := resolver.upstream.exchange(ctx, query)
 	if err != nil || !matchingQuestion(query, responseBody) {
 		resolver.reply(writer, request, dns.RcodeServerFailure)
@@ -254,6 +266,15 @@ func (resolver *FreshResolver) handle(writer dns.ResponseWriter, request *dns.Ms
 		response.Truncate(udpResponseLimit(request))
 	}
 	_ = writer.WriteMsg(response)
+}
+
+// Retain the library's opcode/count guards and QR=1 ignore rule, but let its
+// full parser and our handler process a permitted questionless DNS probe.
+func acceptFreshDNS(header dns.Header) dns.MsgAcceptAction {
+	if header.Qdcount == 0 {
+		header.Qdcount = 1
+	}
+	return dns.DefaultMsgAcceptFunc(header)
 }
 
 func udpResponseLimit(request *dns.Msg) int {
