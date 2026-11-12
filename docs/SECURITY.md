@@ -4,28 +4,29 @@
 
 ## Current Build Baseline
 
-The current source pins Go 1.27.3 for both executable roles and release CI,
-and targets Xray v26.10.31. Upstream updates its fallback roots to remove three
+The current source pins Go 1.27.4 for both executable roles and release CI,
+and targets Xray v26.11.9. Upstream updates its fallback roots to remove three
 emSign roots; Go 1.27.3 also rejects the affected intermediate certificates.
 The multicall build asserts the selected fallback-root module version and
 the executable toolchain. These are source/build requirements, not evidence
 that a new image has completed release acceptance.
-Go 1.27.1 has newly reported standard-library vulnerabilities and is not
-an acceptable current build baseline. Older audit entries below describe
+Go 1.27.3 and earlier have reported standard-library vulnerabilities and are not
+acceptable current build baselines. Older audit entries below describe
 their stated artifacts, not the current image. Source and final-binary
 audits must both be repeated; an updated version alone does not prove a
 clean audit. OpenPGP wildcard findings and build-tool npm findings must
 not be suppressed or represented as resolved by unrelated upgrades.
 
-References: [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3),
+References: [Go 1.27.4](https://go.dev/doc/devel/release#go1.27.4),
+[HTTP/1 advisory](https://pkg.go.dev/vuln/GO-2026-6859),
 [Xray trust-store update](https://github.com/XTLS/Xray-core/pull/7212),
 [HTTP/2 advisory](https://pkg.go.dev/vuln/GO-2026-6617),
 [compress advisory](https://pkg.go.dev/vuln/GO-2026-5841).
 
 ## TCP Listener Policy
 
-Xray is pinned to [v26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31),
-commit `a4a3dff5b20c2faae567b742c172c7b95e75c083`. Its
+Xray is pinned to [v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9),
+commit `676eaf66f8f05d4d558ee7a74b4736623d3feeb9`. Its
 [default-listener fix](https://github.com/XTLS/Xray-core/commit/6ea0ab5d3ae0e9c7d252347fa9250273d54fb2e9)
 disables MPTCP unless explicitly requested. This does not change the standard Go
 listener default or cover every library listener. Gateway-owned controller,

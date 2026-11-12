@@ -1,85 +1,6 @@
-diff --git a/proxy/vless/outbound/outbound.go b/proxy/vless/outbound/outbound.go
---- a/proxy/vless/outbound/outbound.go
-+++ b/proxy/vless/outbound/outbound.go
-@@ -4,5 +4,8 @@ import (
- 	"bytes"
- 	"context"
- 	gotls "crypto/tls"
- 	"encoding/base64"
-+	"encoding/json"
-+	stdnet "net"
-+	"os"
- 	"strings"
-@@ -61,4 +64,56 @@ type Handler struct {
- 	preConns chan *ConnExpire
- }
-+
-+// A fixed-size limiter keeps a broken active server from creating a socket
-+// operation for every client connection. Hash collisions only defer hints;
-+// independent periodic HTTPS checks remain the correctness fallback.
-+type sbFailureSlot struct {
-+	sync.Mutex
-+	last time.Time
-+}
-+
-+var sbFailureSlots [64]sbFailureSlot
-+
-+// This best-effort local hint never selects an outbound. The gateway confirms
-+// the active path and its underlay with independent HTTPS probes. No target
-+// address, credentials, or user data are sent across the socket.
-+func signalSBServerFailure(ctx context.Context, tag, stage string) {
-+	if inbound := session.InboundFromContext(ctx); inbound != nil && strings.HasPrefix(inbound.Tag, "outbound-health-") {
-+		return
-+	}
-+	path := os.Getenv("SB_XRAY_FAILURE_SOCKET")
-+	if path == "" || tag == "" {
-+		return
-+	}
-+	index := uint64(1469598103934665603)
-+	for i := range len(tag) {
-+		index = (index ^ uint64(tag[i])) * 1099511628211
-+	}
-+	slot := &sbFailureSlots[index%uint64(len(sbFailureSlots))]
-+	now := time.Now()
-+	slot.Lock()
-+	if now.Sub(slot.last) < 250*time.Millisecond {
-+		slot.Unlock()
-+		return
-+	}
-+	slot.last = now
-+	slot.Unlock()
-+	message, err := json.Marshal(struct {
-+		Version int    `json:"v"`
-+		PID     int    `json:"pid"`
-+		Tag     string `json:"tag"`
-+		Stage   string `json:"stage"`
-+	}{1, os.Getpid(), tag, stage})
-+	if err != nil || len(message) > 512 {
-+		return
-+	}
-+	connection, err := stdnet.DialTimeout("unixgram", path, 10*time.Millisecond)
-+	if err != nil {
-+		return
-+	}
-+	defer connection.Close()
-+	_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
-+	_, _ = connection.Write(message)
-+}
- 
- type ConnExpire struct {
-@@ -193,4 +248,5 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer int
- 			var err error
- 			conn, err = dialer.Dial(ctx, rec.Destination)
- 			if err != nil {
-+				signalSBServerFailure(ctx, ob.Tag, "dial")
- 				return err
-@@ -210,3 +266,4 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer int
- 		var err error
- 		if conn, err = h.encryption.Handshake(conn); err != nil {
-+			signalSBServerFailure(ctx, ob.Tag, "handshake")
- 			return errors.New("ML-KEM-768 handshake failed").Base(err)
 diff --git a/proxy/vless/outbound/failure_signal_test.go b/proxy/vless/outbound/failure_signal_test.go
 new file mode 100644
+index 0000000..da2a7f8
 --- /dev/null
 +++ b/proxy/vless/outbound/failure_signal_test.go
 @@ -0,0 +1,87 @@
@@ -170,3 +91,92 @@ new file mode 100644
 +		t.Fatalf("missing listener delayed traffic by %s", elapsed)
 +	}
 +}
+diff --git a/proxy/vless/outbound/outbound.go b/proxy/vless/outbound/outbound.go
+index 3f6b4b1..4459a36 100644
+--- a/proxy/vless/outbound/outbound.go
++++ b/proxy/vless/outbound/outbound.go
+@@ -5,6 +5,9 @@ import (
+ 	"context"
+ 	gotls "crypto/tls"
+ 	"encoding/base64"
++	"encoding/json"
++	stdnet "net"
++	"os"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -59,6 +62,58 @@ type Handler struct {
+ 	preConns chan *ConnExpire
+ }
+ 
++// A fixed-size limiter keeps a broken active server from creating a socket
++// operation for every client connection. Hash collisions only defer hints;
++// independent periodic HTTPS checks remain the correctness fallback.
++type sbFailureSlot struct {
++	sync.Mutex
++	last time.Time
++}
++
++var sbFailureSlots [64]sbFailureSlot
++
++// This best-effort local hint never selects an outbound. The gateway confirms
++// the active path and its underlay with independent HTTPS probes. No target
++// address, credentials, or user data are sent across the socket.
++func signalSBServerFailure(ctx context.Context, tag, stage string) {
++	if inbound := session.InboundFromContext(ctx); inbound != nil && strings.HasPrefix(inbound.Tag, "outbound-health-") {
++		return
++	}
++	path := os.Getenv("SB_XRAY_FAILURE_SOCKET")
++	if path == "" || tag == "" {
++		return
++	}
++	index := uint64(1469598103934665603)
++	for i := range len(tag) {
++		index = (index ^ uint64(tag[i])) * 1099511628211
++	}
++	slot := &sbFailureSlots[index%uint64(len(sbFailureSlots))]
++	now := time.Now()
++	slot.Lock()
++	if now.Sub(slot.last) < 250*time.Millisecond {
++		slot.Unlock()
++		return
++	}
++	slot.last = now
++	slot.Unlock()
++	message, err := json.Marshal(struct {
++		Version int    `json:"v"`
++		PID     int    `json:"pid"`
++		Tag     string `json:"tag"`
++		Stage   string `json:"stage"`
++	}{1, os.Getpid(), tag, stage})
++	if err != nil || len(message) > 512 {
++		return
++	}
++	connection, err := stdnet.DialTimeout("unixgram", path, 10*time.Millisecond)
++	if err != nil {
++		return
++	}
++	defer connection.Close()
++	_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
++	_, _ = connection.Write(message)
++}
++
+ type ConnExpire struct {
+ 	Conn   stat.Connection
+ 	Expire time.Time
+@@ -191,6 +246,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
+ 			var err error
+ 			conn, err = dialer.Dial(ctx, rec.Destination)
+ 			if err != nil {
++				signalSBServerFailure(ctx, ob.Tag, "dial")
+ 				return err
+ 			}
+ 			return nil
+@@ -207,6 +263,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
+ 	if h.encryption != nil {
+ 		var err error
+ 		if conn, err = h.encryption.Handshake(conn); err != nil {
++			signalSBServerFailure(ctx, ob.Tag, "handshake")
+ 			return errors.New("ML-KEM-768 handshake failed").Base(err)
+ 		}
+ 	}

@@ -85,3 +85,13 @@ Activation and rollback validate the target pair before publishing any file.
 An invalid backup pair leaves the working runtime and its processes unchanged.
 Go-to-Go changes use the same safe ordering because the published target cannot
 prove the running owner's generation; this changes order, not the restart set.
+
+## DNS control messages and truncated responses
+
+Valid IQUERY requests receive a local header-only NOTIMP response after wire validation. They never reach an upstream, cache or retry path. QUERY with zero questions remains valid; response packets are still ignored and malformed sections receive FORMERR.
+
+UDP TC replies must match the transaction ID, QR/opcode and, when present, the complete question before opening TCP. Name matching folds only ASCII letters as DNS requires; distinct non-ASCII octets are never treated as the same name. A questionless TC header remains supported on the connected upstream socket; truncated resource-record sections do not invalidate a matching question.
+
+DoH GOAWAY recovery permits one replay of a safe query within its original deadline only for NO_ERROR, PROTOCOL_ERROR, INTERNAL_ERROR, REFUSED_STREAM or CANCEL. Rate-limit, security and HTTP-version rejections never authorize replay. The peer's debug text cannot select the error code. A real HTTP/2 regression sends response headers, partial DATA and GOAWAY to verify a fresh connection.
+
+Worker-release regressions wait for the DNS handler owner to finish before inspecting returned capacity; receiving a UDP reply alone does not imply its deferred cleanup has completed.

@@ -513,18 +513,40 @@ func dohConnectionClosed(err error) bool {
 	var connection http2.ConnectionError
 	//lint:ignore SA1019 Existing HTTP/2 round trippers can still return this typed failure.
 	var goaway http2.GoAwayError
-	if errors.As(err, &connection) || errors.As(err, &goaway) {
-		return true
+	if errors.As(err, &connection) {
+		return retryableHTTP2Code(http2.ErrCode(connection))
+	}
+	if errors.As(err, &goaway) {
+		return retryableHTTP2Code(goaway.ErrCode)
 	}
 	// net/http's private GOAWAY type has no exported conversion. Recognize
 	// only its fixed prefix; never retain or log its optional debug contents.
 	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
-		if strings.HasPrefix(cause.Error(), "http2: server sent GOAWAY and closed the connection;") {
-			return true
+		if message, ok := strings.CutPrefix(cause.Error(), "http2: server sent GOAWAY and closed the connection; LastStreamID="); ok {
+			// Debug text is controlled by the peer and cannot authorize replay.
+			header, _, _ := strings.Cut(message, ", debug=")
+			_, code, found := strings.Cut(header, ", ErrCode=")
+			if !found {
+				return false
+			}
+			switch code {
+			case "NO_ERROR", "PROTOCOL_ERROR", "INTERNAL_ERROR", "REFUSED_STREAM", "CANCEL":
+				return true
+			default:
+				return false
+			}
 		}
 	}
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
+func retryableHTTP2Code(code http2.ErrCode) bool {
+	switch code {
+	case http2.ErrCodeNo, http2.ErrCodeProtocol, http2.ErrCodeInternal, http2.ErrCodeRefusedStream, http2.ErrCodeCancel:
+		return true
+	}
+	return false
 }
 
 func (upstream *dohUpstream) dohSnapshot() (*http.Client, *http.Transport, bool) {
@@ -645,6 +667,14 @@ func (runtime *runtime) planQuery(laneID string, query []byte) (queryPlan, error
 	}
 	if !validDNSWire(query) || binary.BigEndian.Uint16(query[4:6]) > 1 {
 		return queryPlan{answer: dnsErrorReply(query, dns.RcodeFormatError), local: true}, nil
+	}
+	if query[2]>>3&15 == dns.OpcodeIQuery {
+		// IQUERY is obsolete (RFC 3425). Return only its header; do not
+		// expose its Answer/OPT sections or send it to a recursive resolver.
+		answer := make([]byte, 12)
+		copy(answer[:2], query[:2])
+		answer[2], answer[3] = 0x80|query[2]&0x79, dns.RcodeNotImplemented
+		return queryPlan{answer: answer, local: true}, nil
 	}
 	// A questionless probe has no domain on which an exception can match. It
 	// follows this client's ordinary final resolver, including a final reject.

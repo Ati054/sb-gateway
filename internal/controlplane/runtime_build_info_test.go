@@ -4,8 +4,8 @@ import "testing"
 
 func TestRuntimeBuildInfoCoreVersionFallbackAndOverride(t *testing.T) {
 	for _, value := range []struct{ environment, want string }{
-		{"", "26.10.31"},
-		{"26.10.31", "26.10.31"},
+		{"", "26.11.9"},
+		{"26.11.9", "26.11.9"},
 		{"custom-core", "custom-core"},
 	} {
 		t.Run(value.environment, func(t *testing.T) {

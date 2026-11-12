@@ -30,7 +30,7 @@ test("release toolchains agree and shared-core compression is pinned", async () 
   for (const pin of ci) assert.equal(pin[1], pins[0][1]);
   for (const minimum of [
     "github.com/klauspost/compress@v1.20.2",
-    "github.com/andybalholm/brotli@v1.2.7",
+    "github.com/molecule-man/go-brrr@v1.2.0",
     "golang.org/x/net@v0.62.0",
     "golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2",
   ]) assert.ok(shared.includes("-require=" + minimum), "missing shared-core security minimum: " + minimum);

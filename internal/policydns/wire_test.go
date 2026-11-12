@@ -111,6 +111,7 @@ func TestUDPTruncationMustMatchRequestBeforeTCPFallback(t *testing.T) {
 	query := dnsQuery(60, "truncated.example")
 	response := append([]byte(nil), query[:12]...)
 	response[2] |= 0x82
+	response[5] = 0 // A header-only TC response has no question.
 	if !truncatedDNSReply(query, response) {
 		t.Fatal("valid truncated header did not request TCP")
 	}

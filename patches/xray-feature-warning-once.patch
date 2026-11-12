@@ -1,4 +1,5 @@
 diff --git a/common/errors/feature_errors.go b/common/errors/feature_errors.go
+index 8c443f2..49e9c47 100644
 --- a/common/errors/feature_errors.go
 +++ b/common/errors/feature_errors.go
 @@ -2,11 +2,21 @@ package errors
@@ -25,6 +26,7 @@ diff --git a/common/errors/feature_errors.go b/common/errors/feature_errors.go
  
 diff --git a/common/errors/sb_feature_warning_test.go b/common/errors/sb_feature_warning_test.go
 new file mode 100644
+index 0000000..e4b8f44
 --- /dev/null
 +++ b/common/errors/sb_feature_warning_test.go
 @@ -0,0 +1,65 @@

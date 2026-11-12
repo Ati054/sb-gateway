@@ -184,7 +184,7 @@ The release-hygiene workflow has an independent Go quality job:
 
 Its Go version matches the gateway build toolchain pinned in `Dockerfile`;
 update both pins and the laboratory packaging image together. All three use
-Go 1.27.3; earlier Go 1.27.1 and 1.26.4 images have known standard-library
+Go 1.27.4; Go 1.27.3 and earlier images have known standard-library
 vulnerabilities that a source scan under a newer host Go cannot detect.
 Ubuntu's C compiler is required only for race
 instrumentation. Production gateway binaries remain `CGO_ENABLED=0`. Analysis
@@ -369,15 +369,15 @@ descriptive subjects. Do not rewrite existing release history just to rename it.
 
 ## Pinned Core Upgrade
 
-The server source pins upstream Xray v26.10.31 at
-`a4a3dff5b20c2faae567b742c172c7b95e75c083`, with REALITY
-`83f621788ca88b83179810b12baa7ae518aacb83` and Go 1.27.3.
+The server source pins upstream Xray v26.11.9 at
+`676eaf66f8f05d4d558ee7a74b4736623d3feeb9`, with REALITY
+`4bb46b2afd8b4f1f082fbaccae34fd3c7a3f8973` and Go 1.27.4.
 Promotion still requires renderer, Reverse and external data-plane acceptance;
 a source pin change does not certify an image. The build asserts both the
 upstream and multicall-selected `x509roots/fallback` version
 `v0.0.0-20261020153306-9f2b28d4331a` and the final executable's Go toolchain.
 See [upstream's trust-store update](https://github.com/XTLS/Xray-core/pull/7212)
-and [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.3).
+and [Go 1.27.4](https://go.dev/doc/devel/release#go1.27.4).
 Exported Reverse bridge versions remain independently pinned.
 
 The v26.10.31 update adds an explicit MPTCP-off default to Xray's system listener,
@@ -475,3 +475,7 @@ history as well as the worktree; filename/secret checks alone are insufficient.
 Run `node --test tests/release-contract.test.mjs` and verify the actual exported
 tree with `scripts/verify-public-tree.sh` before publication. Update an existing
 public checkout without importing private local history or rewriting public history.
+
+Go 1.27.4 addresses [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), an HTTP/1 MaxBytesReader/header race. Update the Docker image digest, module toolchain, CI pins and binary-version assertions together; verify the final executable with the current vulnerability database. A newer host scanner does not replace the standard library linked into an older image.
+
+The v26.11.9 rebase preserves all maintained gateway patches. Upstream changes include a default Chrome 155 TLS fingerprint, MUX worker limits and failed inbound-add cleanup. Re-run transport retirement, Reverse backpressure, protobuf/API renderer and actual TLS handshake checks. A conflict-free patch application is not acceptance. MUX maximum total sessions per worker is distinct from active concurrency or a container-wide connection limit.

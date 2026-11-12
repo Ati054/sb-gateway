@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GO_IMAGE=golang:1.27.3-alpine3.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2
-ARG XRAY_GO_IMAGE=golang:1.27.3-alpine3.23@sha256:754d5200fc3edae76d3b6598a9a3fac7e74981ee6a5413ab955025f185753ef2
+ARG GO_IMAGE=golang:1.27.4-alpine3.23@sha256:146e3b9c7c1e2ec3d3f5348c8a686151a75e1976e50efac9fc022ebe446a9a82
+ARG XRAY_GO_IMAGE=golang:1.27.4-alpine3.23@sha256:146e3b9c7c1e2ec3d3f5348c8a686151a75e1976e50efac9fc022ebe446a9a82
 ARG NODE_IMAGE=node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
 ARG RUNTIME_IMAGE=alpine:3.23
 
@@ -9,9 +9,9 @@ FROM --platform=$BUILDPLATFORM ${XRAY_GO_IMAGE} AS xray-build
 ARG TARGETARCH
 # The server can use the current validated core. Xray's simplified Reverse
 # regression is bridge-side; exported reverse clients are pinned separately.
-ARG XRAY_VERSION=26.10.31
-ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
-ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
+ARG XRAY_VERSION=26.11.9
+ARG XRAY_COMMIT=676eaf66f8f05d4d558ee7a74b4736623d3feeb9
+ARG XRAY_REALITY_COMMIT=4bb46b2afd8b4f1f082fbaccae34fd3c7a3f8973
 RUN test "${TARGETARCH}" = "arm64"
 RUN apk add --no-cache git patch
 WORKDIR /src
@@ -74,8 +74,8 @@ RUN set -eux; \
     go mod edit -replace github.com/xtls/reality=/src/reality
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS sb-gateway-build
 ARG TARGETARCH
-ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
-ARG SB_GATEWAY_VERSION=1.6.96
+ARG XRAY_COMMIT=676eaf66f8f05d4d558ee7a74b4736623d3feeb9
+ARG SB_GATEWAY_VERSION=1.6.97
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_GO_TAGS=xray_multicall
 WORKDIR /src
@@ -128,8 +128,8 @@ RUN SB_RULESET_DIR=/out/rulesets-seed go run \
 
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS multicall-check
 ARG BUILDARCH
-ARG XRAY_VERSION=26.10.31
-ARG SB_GATEWAY_VERSION=1.6.96
+ARG XRAY_VERSION=26.11.9
+ARG SB_GATEWAY_VERSION=1.6.97
 RUN if [ "${BUILDARCH}" != "arm64" ]; then apk add --no-cache qemu-aarch64; fi
 COPY --from=sb-gateway-build /out/sb-gateway /out/sb-gateway
 RUN set -eux; \
@@ -137,7 +137,7 @@ RUN set -eux; \
     ln -s sb-gateway /out/xray; \
     arm /out/sb-gateway version | grep -F "sb-gateway ${SB_GATEWAY_VERSION}"; \
     arm /out/xray version | grep -F "Xray ${XRAY_VERSION}"; \
-    arm /out/xray version | grep -F 'go1.27.3'; \
+    arm /out/xray version | grep -F 'go1.27.4'; \
     arm /out/xray help api | grep -F api; \
     printf '%s\n' \
       '{"log":{"loglevel":"warning"},"inbounds":[{"tag":"build-validation","listen":"127.0.0.1","port":19099,"protocol":"http"}],"outbounds":[{"tag":"direct","protocol":"freedom"}]}' \
@@ -167,10 +167,10 @@ RUN set -eux; \
     if ! grep -q '^www-data:' /etc/group; then addgroup -S www-data; fi; \
     if ! grep -q '^www-data:' /etc/passwd; then adduser -S -D -H -s /sbin/nologin -G www-data www-data; fi; \
     rm -f /etc/nginx/http.d/default.conf
-ARG XRAY_VERSION=26.10.31
-ARG XRAY_COMMIT=a4a3dff5b20c2faae567b742c172c7b95e75c083
-ARG XRAY_REALITY_COMMIT=83f621788ca88b83179810b12baa7ae518aacb83
-ARG SB_GATEWAY_VERSION=1.6.96
+ARG XRAY_VERSION=26.11.9
+ARG XRAY_COMMIT=676eaf66f8f05d4d558ee7a74b4736623d3feeb9
+ARG XRAY_REALITY_COMMIT=4bb46b2afd8b4f1f082fbaccae34fd3c7a3f8973
+ARG SB_GATEWAY_VERSION=1.6.97
 ARG SB_GATEWAY_REVISION=uncommitted
 ARG SB_GATEWAY_SOURCE=local
 ARG SB_URLTEST_WARM_COMPARE=0
@@ -217,6 +217,7 @@ COPY --from=multicall-check /out/sb-gateway /usr/local/bin/sb-gateway
 COPY --from=sb-gateway-build /out/sb-acme /usr/local/bin/sb-acme
 COPY --from=sb-gateway-build /out/rulesets-seed /opt/sb-gateway/rulesets-seed
 COPY --from=web-build /src/out /opt/sb-gateway/web/out
+COPY LICENSES ./licenses
 COPY rulesets ./rulesets
 COPY templates/client-profile.json.j2 templates/nginx-api-decoy.inc templates/nginx-decoy.inc templates/nginx.conf.j2 templates/xray-source-model.json.j2 ./templates/
 COPY templates/decoy ./templates/decoy

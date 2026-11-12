@@ -41,7 +41,7 @@ and a new, ignored output `.mod` path. Build/test with that `-modfile` and the
 `xray_multicall` build tag. The generated module files must not be committed.
 Docker performs this preparation within its build stage.
 The generated shared module sets security minimums for compression and networking:
-`github.com/klauspost/compress` 1.20.2, `github.com/andybalholm/brotli` 1.2.7,
+`github.com/klauspost/compress` 1.20.2, `github.com/molecule-man/go-brrr` 1.2.0,
 `golang.org/x/net` 0.62.0 and `golang.org/x/crypto`
 0.58.1-0.20261009181718-2f1f834330b2. These minimums apply to the embedded core,
 not just the standalone controller module. Review the resolved module graph and
@@ -134,3 +134,7 @@ Required checks include both CLI identities, command separation, Check/Apply and
 rollback, routing/database hot updates, selector restoration, mass outages and
 core-failure recovery. Component prototypes alone are not an image acceptance
 test or proof of reduced full-container memory usage or absence of long-term leaks.
+
+The 26.11.9 core uses the Brotli decoder selected by its current uTLS module. Verify the actual CGO-disabled ARM64 dependency closure and decoder interoperability; a module rename alone is not proof of a security fix. Keep the shared-module compression security minimums while rebasing core patches.
+
+The tagged multicall tests include a verified local TLS handshake with the default Chrome 155 fingerprint and Brotli interoperability vectors produced independently by the C reference encoder. They cover empty, text, binary and truncated streams. Run these checks against the generated module graph, not only the standalone controller module.

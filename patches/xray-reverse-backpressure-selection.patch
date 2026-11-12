@@ -58,154 +58,6 @@ index 0e59598..c1af318 100644
  	}
  
  	if minIdx != -1 {
-diff --git a/common/mux/client.go b/common/mux/client.go
-index 0463be5..6d24bd0 100644
---- a/common/mux/client.go
-+++ b/common/mux/client.go
-@@ -5,6 +5,7 @@ import (
- 	goerrors "errors"
- 	"io"
- 	"sync"
-+	"sync/atomic"
- 	"time"
- 
- 	"github.com/xtls/xray-core/common"
-@@ -169,8 +170,9 @@ func (f *DialingWorkerFactory) Create() (*ClientWorker, error) {
- }
- 
- type ClientStrategy struct {
--	MaxConcurrency uint32
--	MaxConnection  uint32
-+	MaxConcurrency              uint32
-+	MaxConnection               uint32
-+	ObserveDownlinkBackpressure bool
- }
- 
- type ClientWorker struct {
-@@ -179,6 +181,32 @@ type ClientWorker struct {
- 	done           *done.Instance
- 	timer          *time.Ticker
- 	strategy       ClientStrategy
-+	downlinkOutput *sbDownlinkWriter
-+}
-+
-+var sbDownlinkEpoch = time.Now()
-+
-+// Only Reverse portals track blocked writes; ordinary Mux is unchanged.
-+type sbDownlinkWriter struct {
-+	destination buf.Writer
-+	started     atomic.Int64
-+}
-+
-+func (w *sbDownlinkWriter) WriteMultiBuffer(data buf.MultiBuffer) error {
-+	w.started.Store(time.Since(sbDownlinkEpoch).Nanoseconds())
-+	defer w.started.Store(0)
-+	return w.destination.WriteMultiBuffer(data)
-+}
-+
-+func (m *ClientWorker) DownlinkBlockedFor() time.Duration {
-+	if m.downlinkOutput == nil {
-+		return 0
-+	}
-+	started := m.downlinkOutput.started.Load()
-+	if started == 0 {
-+		return 0
-+	}
-+	return time.Since(sbDownlinkEpoch) - time.Duration(started)
- }
- 
- var (
-@@ -196,6 +224,9 @@ func NewClientWorker(stream transport.Link, s ClientStrategy) (*ClientWorker, er
- 		strategy:       s,
- 	}
- 
-+	if s.ObserveDownlinkBackpressure {
-+		c.downlinkOutput = &sbDownlinkWriter{}
-+	}
- 	go c.fetchOutput()
- 	go c.monitor()
- 
-@@ -359,7 +390,15 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
- 	}
- 
- 	rr := s.NewReader(reader, &meta.Target)
--	err := buf.Copy(rr, s.output)
-+	output := s.output
-+	if m.downlinkOutput != nil {
-+		m.downlinkOutput.destination = output
-+		output = m.downlinkOutput
-+	}
-+	err := buf.Copy(rr, output)
-+	if m.downlinkOutput != nil {
-+		m.downlinkOutput.destination = nil
-+	}
- 	if err != nil && buf.IsWriteError(err) {
- 		errors.LogInfoInner(context.Background(), err, "failed to write to downstream. closing session ", s.ID)
- 		s.Close(false)
-diff --git a/proxy/vless/inbound/inbound.go b/proxy/vless/inbound/inbound.go
-index d6a9d8e..59be870 100644
---- a/proxy/vless/inbound/inbound.go
-+++ b/proxy/vless/inbound/inbound.go
-@@ -652,7 +652,7 @@ func (r *Reverse) Tag() string {
- }
- 
- func (r *Reverse) NewMux(ctx context.Context, link *transport.Link, observer features.Feature) error {
--	muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{})
-+	muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{ObserveDownlinkBackpressure: true})
- 	if err != nil {
- 		return errors.New("failed to create mux client worker").Base(err)
- 	}
-diff --git a/common/mux/sb_backpressure_test.go b/common/mux/sb_backpressure_test.go
-new file mode 100644
-index 0000000..7058129
---- /dev/null
-+++ b/common/mux/sb_backpressure_test.go
-@@ -0,0 +1,45 @@
-+package mux
-+
-+import (
-+	"errors"
-+	"testing"
-+
-+	"github.com/xtls/xray-core/common/buf"
-+)
-+
-+type sbFailingOutput struct{}
-+
-+func (sbFailingOutput) WriteMultiBuffer(data buf.MultiBuffer) error {
-+	buf.ReleaseMulti(data)
-+	return errors.New("test write failed")
-+}
-+
-+func TestSBReverseTrackingClearsOnWriteFailure(t *testing.T) {
-+	writer := &sbDownlinkWriter{destination: sbFailingOutput{}}
-+	client := &ClientWorker{downlinkOutput: writer}
-+	if err := writer.WriteMultiBuffer(nil); err == nil {
-+		t.Fatal("write error lost")
-+	}
-+	if client.DownlinkBlockedFor() != 0 {
-+		t.Fatal("failed write remained blocked")
-+	}
-+	if (&ClientWorker{}).DownlinkBlockedFor() != 0 {
-+		t.Fatal("ordinary Mux reported blocked")
-+	}
-+}
-+
-+func BenchmarkSBReverseDownlinkTracking(b *testing.B) {
-+	b.Run("untracked", func(b *testing.B) {
-+		b.ReportAllocs()
-+		for b.Loop() {
-+			buf.Discard.WriteMultiBuffer(nil)
-+		}
-+	})
-+	b.Run("tracked", func(b *testing.B) {
-+		b.ReportAllocs()
-+		writer := sbDownlinkWriter{destination: buf.Discard}
-+		for b.Loop() {
-+			writer.WriteMultiBuffer(nil)
-+		}
-+	})
-+}
 diff --git a/app/reverse/sb_backpressure_test.go b/app/reverse/sb_backpressure_test.go
 new file mode 100644
 index 0000000..6b34ef3
@@ -434,3 +286,151 @@ index 0000000..6b34ef3
 +		}
 +	}
 +}
+diff --git a/common/mux/client.go b/common/mux/client.go
+index ab729ef..dfd51c5 100644
+--- a/common/mux/client.go
++++ b/common/mux/client.go
+@@ -5,6 +5,7 @@ import (
+ 	goerrors "errors"
+ 	"io"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/xtls/xray-core/common"
+@@ -169,8 +170,9 @@ func (f *DialingWorkerFactory) Create() (*ClientWorker, error) {
+ }
+ 
+ type ClientStrategy struct {
+-	MaxConcurrency uint32
+-	MaxConnection  uint32
++	MaxConcurrency              uint32
++	MaxConnection               uint32
++	ObserveDownlinkBackpressure bool
+ }
+ 
+ type ClientWorker struct {
+@@ -179,6 +181,32 @@ type ClientWorker struct {
+ 	done           *done.Instance
+ 	timer          *time.Ticker
+ 	strategy       ClientStrategy
++	downlinkOutput *sbDownlinkWriter
++}
++
++var sbDownlinkEpoch = time.Now()
++
++// Only Reverse portals track blocked writes; ordinary Mux is unchanged.
++type sbDownlinkWriter struct {
++	destination buf.Writer
++	started     atomic.Int64
++}
++
++func (w *sbDownlinkWriter) WriteMultiBuffer(data buf.MultiBuffer) error {
++	w.started.Store(time.Since(sbDownlinkEpoch).Nanoseconds())
++	defer w.started.Store(0)
++	return w.destination.WriteMultiBuffer(data)
++}
++
++func (m *ClientWorker) DownlinkBlockedFor() time.Duration {
++	if m.downlinkOutput == nil {
++		return 0
++	}
++	started := m.downlinkOutput.started.Load()
++	if started == 0 {
++		return 0
++	}
++	return time.Since(sbDownlinkEpoch) - time.Duration(started)
+ }
+ 
+ var (
+@@ -197,6 +225,9 @@ func NewClientWorker(stream transport.Link, s ClientStrategy) (*ClientWorker, er
+ 		strategy:       s,
+ 	}
+ 
++	if s.ObserveDownlinkBackpressure {
++		c.downlinkOutput = &sbDownlinkWriter{}
++	}
+ 	go c.fetchOutput()
+ 	go c.monitor()
+ 
+@@ -358,7 +389,15 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
+ 	}
+ 
+ 	rr := s.NewReader(reader, &meta.Target)
+-	err := buf.Copy(rr, s.output)
++	output := s.output
++	if m.downlinkOutput != nil {
++		m.downlinkOutput.destination = output
++		output = m.downlinkOutput
++	}
++	err := buf.Copy(rr, output)
++	if m.downlinkOutput != nil {
++		m.downlinkOutput.destination = nil
++	}
+ 	if err != nil && buf.IsWriteError(err) {
+ 		errors.LogInfoInner(context.Background(), err, "failed to write to downstream. closing session ", s.ID)
+ 		s.Close(false)
+diff --git a/common/mux/sb_backpressure_test.go b/common/mux/sb_backpressure_test.go
+new file mode 100644
+index 0000000..7058129
+--- /dev/null
++++ b/common/mux/sb_backpressure_test.go
+@@ -0,0 +1,45 @@
++package mux
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/xtls/xray-core/common/buf"
++)
++
++type sbFailingOutput struct{}
++
++func (sbFailingOutput) WriteMultiBuffer(data buf.MultiBuffer) error {
++	buf.ReleaseMulti(data)
++	return errors.New("test write failed")
++}
++
++func TestSBReverseTrackingClearsOnWriteFailure(t *testing.T) {
++	writer := &sbDownlinkWriter{destination: sbFailingOutput{}}
++	client := &ClientWorker{downlinkOutput: writer}
++	if err := writer.WriteMultiBuffer(nil); err == nil {
++		t.Fatal("write error lost")
++	}
++	if client.DownlinkBlockedFor() != 0 {
++		t.Fatal("failed write remained blocked")
++	}
++	if (&ClientWorker{}).DownlinkBlockedFor() != 0 {
++		t.Fatal("ordinary Mux reported blocked")
++	}
++}
++
++func BenchmarkSBReverseDownlinkTracking(b *testing.B) {
++	b.Run("untracked", func(b *testing.B) {
++		b.ReportAllocs()
++		for b.Loop() {
++			buf.Discard.WriteMultiBuffer(nil)
++		}
++	})
++	b.Run("tracked", func(b *testing.B) {
++		b.ReportAllocs()
++		writer := sbDownlinkWriter{destination: buf.Discard}
++		for b.Loop() {
++			writer.WriteMultiBuffer(nil)
++		}
++	})
++}
+diff --git a/proxy/vless/inbound/inbound.go b/proxy/vless/inbound/inbound.go
+index 5692874..d6778bf 100644
+--- a/proxy/vless/inbound/inbound.go
++++ b/proxy/vless/inbound/inbound.go
+@@ -643,7 +643,7 @@ func (r *Reverse) Tag() string {
+ }
+ 
+ func (r *Reverse) NewMux(ctx context.Context, link *transport.Link, observer features.Feature) error {
+-	muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{})
++	muxClient, err := mux.NewClientWorker(*link, mux.ClientStrategy{ObserveDownlinkBackpressure: true})
+ 	if err != nil {
+ 		return errors.New("failed to create mux client worker").Base(err)
+ 	}

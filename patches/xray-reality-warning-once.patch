@@ -108,7 +108,7 @@ index 00e5387..2bacd2e 100644
  		}
  
 diff --git a/infra/conf/xray.go b/infra/conf/xray.go
-index 6bf6ba4..b2eb36d 100644
+index 2c94ce5..55d5417 100644
 --- a/infra/conf/xray.go
 +++ b/infra/conf/xray.go
 @@ -184,7 +184,9 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {

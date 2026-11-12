@@ -1,8 +1,11 @@
 diff --git a/proxy/proxy.go b/proxy/proxy.go
-index ab7d7ab..7fe7ade 100644
+index 6008437..928f7fd 100644
 --- a/proxy/proxy.go
 +++ b/proxy/proxy.go
-@@ -515,2 +515,16 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
+@@ -517,10 +517,23 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
+ 		}
+ 		paddingLen = int32(l.Int64())
+ 	}
 -	if paddingLen > buf.Size-21-contentLen {
 -		paddingLen = buf.Size - 21 - contentLen
 +	maxPaddingLen := int32(buf.Size-21) - contentLen
@@ -21,8 +24,11 @@ index ab7d7ab..7fe7ade 100644
 +		newbuffer = buf.NewWithSize(bufferSize)
 +	} else {
 +		newbuffer = buf.New()
-@@ -518 +531,0 @@ func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool
+ 	}
 -	newbuffer := buf.New()
+ 	if userUUID != nil {
+ 		newbuffer.Write(*userUUID)
+ 		*userUUID = nil
 diff --git a/proxy/xtls_padding_test.go b/proxy/xtls_padding_test.go
 new file mode 100644
 index 0000000..c8c4462

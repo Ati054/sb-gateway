@@ -2,7 +2,7 @@ module github.com/sb-gateway/sb-gateway
 
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 godebug multipathtcp=0
 

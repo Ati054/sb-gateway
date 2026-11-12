@@ -1,5 +1,5 @@
 diff --git a/app/proxyman/outbound/handler.go b/app/proxyman/outbound/handler.go
-index fe43c42..d2427b0 100644
+index 4c3b16a..94e9cdc 100644
 --- a/app/proxyman/outbound/handler.go
 +++ b/app/proxyman/outbound/handler.go
 @@ -329,11 +329,18 @@ func (h *Handler) Start() error {
@@ -45,6 +45,466 @@ index d865428..5de00fb 100644
  
  	return nil
  }
+diff --git a/app/proxyman/outbound/retirement_switch_test.go b/app/proxyman/outbound/retirement_switch_test.go
+new file mode 100644
+index 0000000..bd8d9e5
+--- /dev/null
++++ b/app/proxyman/outbound/retirement_switch_test.go
+@@ -0,0 +1,208 @@
++package outbound
++
++import (
++	"context"
++	"io"
++	gonet "net"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/app/proxyman"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol/tls/cert"
++	"github.com/xtls/xray-core/proxy/hysteria/account"
++	"github.com/xtls/xray-core/testing/servers/tcp"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/grpc"
++	"github.com/xtls/xray-core/transport/internet/hysteria"
++	"github.com/xtls/xray-core/transport/internet/splithttp"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	"github.com/xtls/xray-core/transport/internet/tls"
++)
++
++func TestRetirementPreservesStreamsAcrossAToBToA(t *testing.T) {
++	for _, transport := range []string{"grpc", "grpc-multi", "packet-up", "stream-up", "stream-one", "hysteria", "hysteria-udp"} {
++		for _, replace := range []bool{false, true} {
++			name := transport + "/same-handler"
++			if replace {
++				name = transport + "/new-handler-same-tag"
++			}
++			t.Run(name, func(t *testing.T) {
++				dest, settings := retirementTransport(t, transport)
++				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++				defer cancel()
++				if transport == "hysteria-udp" {
++					ctx = hysteria.ContextWithDatagram(ctx, true)
++				}
++				manager, err := New(ctx, &proxyman.OutboundConfig{})
++				if err != nil {
++					t.Fatal(err)
++				}
++				var released []*atomic.Bool
++				add := func(tag string) *Handler {
++					handler := &Handler{tag: tag, streamSettings: settings()}
++					closed := &atomic.Bool{}
++					release := handler.streamSettings.AcquireDialer()
++					handler.streamSettings.RegisterDialerCleanup("assert-drained", func() { closed.Store(true) })
++					release()
++					released = append(released, closed)
++					if err := manager.AddHandler(ctx, handler); err != nil {
++						t.Fatal(err)
++					}
++					return handler
++				}
++				dial := func(tag string) stat.Connection {
++					conn, err := manager.GetHandler(tag).(*Handler).Dial(ctx, dest)
++					if err != nil {
++						t.Fatal(err)
++					}
++					t.Cleanup(func() { conn.Close() })
++					return conn
++				}
++				remove := func(tag string) {
++					if err := manager.RemoveHandler(ctx, tag); err != nil {
++						t.Fatal(err)
++					}
++				}
++				echo := func(conns ...stat.Connection) {
++					for _, conn := range conns {
++						retirementHandlerEcho(t, conn, transport == "hysteria-udp")
++					}
++				}
++				a := add("a")
++				add("b")
++				firstA := dial("a")
++				echo(firstA)
++				// Switch new connections to B, then remove A while its original
++				// connection is still open. HandlerService must not close it.
++				liveB := dial("b")
++				remove("a")
++				echo(firstA, liveB)
++				if replace {
++					add("a")
++				} else if err := manager.AddHandler(ctx, a); err != nil {
++					t.Fatal(err)
++				}
++				secondA := dial("a")
++				remove("b")
++				echo(firstA, liveB, secondA)
++				remove("a")
++				for _, closed := range released {
++					if closed.Load() {
++						t.Fatal("cleanup ran with an original connection still alive")
++					}
++				}
++				echo(firstA, liveB, secondA)
++				secondA.Close()
++				echo(firstA, liveB)
++				liveB.Close()
++				echo(firstA)
++				firstA.Close()
++				deadline := time.Now().Add(3 * time.Second)
++				for _, closed := range released {
++					for !closed.Load() && time.Now().Before(deadline) {
++						time.Sleep(time.Millisecond)
++					}
++					if !closed.Load() {
++						t.Fatal("drained handler retained its transport resources")
++					}
++				}
++			})
++		}
++	}
++}
++
++func retirementTransport(t *testing.T, transport string) (net.Destination, func() *internet.MemoryStreamConfig) {
++	t.Helper()
++	ctx := context.Background()
++	echo := func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() }
++	port := tcp.PickPort()
++	dest := net.TCPDestination(net.LocalHostIP, port)
++	var listener internet.Listener
++	var err error
++	var settings func() *internet.MemoryStreamConfig
++	switch {
++	case strings.HasPrefix(transport, "grpc"):
++		settings = func() *internet.MemoryStreamConfig {
++			return &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &grpc.Config{MultiMode: transport == "grpc-multi"}}
++		}
++		listener, err = grpc.Listen(ctx, net.LocalHostIP, port, settings(), echo)
++	default:
++		certificate, hash := cert.MustGenerate(nil, cert.CommonName("localhost"))
++		serverCertificate := tls.ParseCertificate(certificate)
++		serverCertificate.OneTimeLoading = true
++		serverTLS := &tls.Config{Certificate: []*tls.Certificate{serverCertificate}}
++		if strings.HasPrefix(transport, "hysteria") {
++			settings = func() *internet.MemoryStreamConfig {
++				return &internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &hysteria.Config{Auth: "retirement-test"},
++					SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}},
++					QuicParams: &internet.QuicParams{DisableChromeParrot: true}}
++			}
++			listener, err = hysteria.Listen(hysteria.ContextWithValidator(ctx, account.NewValidator()), net.LocalHostIP, 0,
++				&internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &hysteria.Config{Auth: "retirement-test", UdpIdleTimeout: 60},
++					SecurityType: "tls", SecuritySettings: serverTLS}, echo)
++			if err == nil {
++				dest.Port = net.Port(listener.Addr().(*net.UDPAddr).Port)
++			}
++		} else {
++			settings = func() *internet.MemoryStreamConfig {
++				return &internet.MemoryStreamConfig{ProtocolName: "splithttp", ProtocolSettings: &splithttp.Config{Mode: transport},
++					SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}}}
++			}
++			listener, err = splithttp.ListenXH(ctx, net.LocalHostIP, port,
++				&internet.MemoryStreamConfig{ProtocolName: "splithttp", ProtocolSettings: &splithttp.Config{},
++					SecurityType: "tls", SecuritySettings: serverTLS}, echo)
++		}
++	}
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { listener.Close() })
++	if strings.HasPrefix(transport, "grpc") {
++		// The upstream gRPC listener binds asynchronously.
++		deadline := time.Now().Add(3 * time.Second)
++		for {
++			ready, err := gonet.DialTimeout("tcp", dest.NetAddr(), 100*time.Millisecond)
++			if err == nil {
++				ready.Close()
++				break
++			}
++			if time.Now().After(deadline) {
++				t.Fatal("gRPC test listener did not start: ", err)
++			}
++			time.Sleep(time.Millisecond)
++		}
++	}
++	return dest, settings
++}
++
++func retirementHandlerEcho(t *testing.T, conn stat.Connection, datagram bool) {
++	t.Helper()
++	result := make(chan error, 1)
++	go func() {
++		payload := []byte("live")
++		if datagram {
++			payload = append(make([]byte, 4), payload...)
++		}
++		_, err := conn.Write(payload)
++		if err == nil {
++			response := make([]byte, len(payload))
++			_, err = io.ReadFull(conn, response)
++			if err == nil && string(response[len(response)-4:]) != "live" {
++				err = io.ErrUnexpectedEOF
++			}
++		}
++		result <- err
++	}()
++	select {
++	case err := <-result:
++		if err != nil {
++			t.Fatalf("existing connection interrupted: %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		conn.Close()
++		t.Fatal("existing connection stopped across A -> B -> A")
++	}
++}
+diff --git a/app/proxyman/outbound/retirement_test.go b/app/proxyman/outbound/retirement_test.go
+new file mode 100644
+index 0000000..f26705a
+--- /dev/null
++++ b/app/proxyman/outbound/retirement_test.go
+@@ -0,0 +1,38 @@
++package outbound
++
++import (
++	"context"
++	"testing"
++
++	"github.com/xtls/xray-core/app/proxyman"
++	"github.com/xtls/xray-core/transport/internet"
++)
++
++func TestRemoveHandlerRetiresTransportAfterLiveStream(t *testing.T) {
++	manager, err := New(context.Background(), &proxyman.OutboundConfig{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	settings := &internet.MemoryStreamConfig{}
++	handler := &Handler{tag: "generation-a", streamSettings: settings}
++	if err := manager.AddHandler(context.Background(), handler); err != nil {
++		t.Fatal(err)
++	}
++	release := settings.AcquireDialer()
++	closed := false
++	settings.RegisterDialerCleanup("cache", func() {
++		closed = true
++		// Cleanup must not run with the outbound manager lock held.
++		_ = manager.ListHandlers(context.Background())
++	})
++	if err := manager.RemoveHandler(context.Background(), handler.Tag()); err != nil {
++		t.Fatal(err)
++	}
++	if manager.GetHandler(handler.Tag()) != nil || closed {
++		t.Fatal("removal did not detach safely")
++	}
++	release()
++	if !closed {
++		t.Fatal("removed outbound's cache was not reclaimed")
++	}
++}
+diff --git a/transport/internet/dialer_lifecycle.go b/transport/internet/dialer_lifecycle.go
+new file mode 100644
+index 0000000..c596d78
+--- /dev/null
++++ b/transport/internet/dialer_lifecycle.go
+@@ -0,0 +1,79 @@
++package internet
++
++import "sync"
++
++// A removed outbound may still have live streams or a Dispatch which already
++// obtained its handler. Retire the cache only after those streams release it.
++// The state belongs to the stream configuration, never to a global registry.
++type dialerLifetime struct {
++	mu       sync.Mutex
++	active   int
++	retired  bool
++	cleaning chan struct{}
++	cleanups map[any]func()
++}
++
++// AcquireDialer keeps transport resources alive until the returned function is
++// called. Late users of an already removed handler get their own cleanup cycle.
++func (s *MemoryStreamConfig) AcquireDialer() func() {
++	d := &s.dialers
++	d.mu.Lock()
++	for d.cleaning != nil {
++		finished := d.cleaning
++		d.mu.Unlock()
++		<-finished
++		d.mu.Lock()
++	}
++	d.active++
++	d.mu.Unlock()
++	var once sync.Once
++	return func() { once.Do(func() { d.finish(false) }) }
++}
++
++// RegisterDialerCleanup is called while holding a dialer lease and before
++// acquiring a transport cache lock. A key is registered only once per cycle.
++func (s *MemoryStreamConfig) RegisterDialerCleanup(key any, cleanup func()) {
++	d := &s.dialers
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if d.cleanups == nil {
++		d.cleanups = make(map[any]func())
++	}
++	if _, exists := d.cleanups[key]; !exists {
++		d.cleanups[key] = cleanup
++	}
++}
++
++// RetireDialers prevents idle caches from keeping an obsolete outbound alive.
++// Active streams drain normally; this is deliberately different from Close.
++func (s *MemoryStreamConfig) RetireDialers() {
++	if s != nil {
++		s.dialers.finish(true)
++	}
++}
++
++func (d *dialerLifetime) finish(retire bool) {
++	d.mu.Lock()
++	if retire {
++		d.retired = true
++	} else {
++		d.active--
++	}
++	if !d.retired || d.active != 0 || d.cleaning != nil || len(d.cleanups) == 0 {
++		d.mu.Unlock()
++		return
++	}
++	cleanups := d.cleanups
++	d.cleanups = nil
++	d.cleaning = make(chan struct{})
++	d.mu.Unlock()
++	// No user can acquire this cache while its old connections are closing.
++	// Run callbacks outside the lifetime lock to avoid transport lock inversion.
++	for _, cleanup := range cleanups {
++		cleanup()
++	}
++	d.mu.Lock()
++	close(d.cleaning)
++	d.cleaning = nil
++	d.mu.Unlock()
++}
+diff --git a/transport/internet/dialer_lifecycle_test.go b/transport/internet/dialer_lifecycle_test.go
+new file mode 100644
+index 0000000..6e824ae
+--- /dev/null
++++ b/transport/internet/dialer_lifecycle_test.go
+@@ -0,0 +1,111 @@
++package internet
++
++import (
++	"runtime"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++	"weak"
++)
++
++func TestDialerRetirementDrainsAndReclaimsLateUse(t *testing.T) {
++	settings := &MemoryStreamConfig{}
++	var closed atomic.Int32
++	first, second := settings.AcquireDialer(), settings.AcquireDialer()
++	settings.RegisterDialerCleanup("resource", func() { closed.Add(1) })
++	settings.RetireDialers()
++	first()
++	first()
++	if closed.Load() != 0 {
++		t.Fatal("retirement closed a cache with a live connection")
++	}
++	second()
++	if closed.Load() != 1 {
++		t.Fatal("last stream did not reclaim the cache")
++	}
++	for range 1000 {
++		release := settings.AcquireDialer()
++		settings.RegisterDialerCleanup("resource", func() { closed.Add(1) })
++		release()
++	}
++	if closed.Load() != 1001 || settings.dialers.active != 0 || len(settings.dialers.cleanups) != 0 {
++		t.Fatal("late streams of a retired handler leaked resources")
++	}
++}
++
++func TestDialerRetirementSerializesLateAcquireWithCleanup(t *testing.T) {
++	settings := &MemoryStreamConfig{}
++	started, finish := make(chan struct{}), make(chan struct{})
++	release := settings.AcquireDialer()
++	settings.RegisterDialerCleanup("resource", func() { close(started); <-finish })
++	settings.RetireDialers()
++	released := make(chan struct{})
++	go func() { release(); close(released) }()
++	<-started
++	acquired := make(chan struct{})
++	go func() { done := settings.AcquireDialer(); close(acquired); done() }()
++	select {
++	case <-acquired:
++		t.Fatal("late stream acquired a cache while it was closing")
++	case <-time.After(20 * time.Millisecond):
++	}
++	close(finish)
++	<-released
++	select {
++	case <-acquired:
++	case <-time.After(time.Second):
++		t.Fatal("late stream did not resume after cleanup")
++	}
++}
++
++func TestDialerRetirementConcurrentStreams(t *testing.T) {
++	settings := &MemoryStreamConfig{}
++	var live atomic.Int32
++	var wg sync.WaitGroup
++	for range 12 {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for range 100 {
++				release := settings.AcquireDialer()
++				live.Add(1)
++				settings.RegisterDialerCleanup("shared", func() {
++					if live.Load() != 0 {
++						t.Error("closed an in-use cache")
++					}
++				})
++				live.Add(-1)
++				release()
++			}
++		}()
++	}
++	settings.RetireDialers()
++	wg.Wait()
++	if settings.dialers.active != 0 || len(settings.dialers.cleanups) != 0 {
++		t.Fatal("retired cache retained stream leases")
++	}
++}
++
++func TestDialerRetirementDoesNotKeepConfigurationsAlive(t *testing.T) {
++	makeRetired := func() weak.Pointer[MemoryStreamConfig] {
++		settings := &MemoryStreamConfig{}
++		release := settings.AcquireDialer()
++		settings.RegisterDialerCleanup("self", func() { runtime.KeepAlive(settings) })
++		settings.RetireDialers()
++		release()
++		return weak.Make(settings)
++	}
++	refs := make([]weak.Pointer[MemoryStreamConfig], 1000)
++	for i := range refs {
++		refs[i] = makeRetired()
++	}
++	// Live objects, not RSS: the Go allocator may retain reusable pages after
++	// collection without leaking any configuration or transport client.
++	runtime.GC()
++	for _, ref := range refs {
++		if ref.Value() != nil {
++			t.Fatal("retirement retained an obsolete configuration")
++		}
++	}
++}
 diff --git a/transport/internet/grpc/dial.go b/transport/internet/grpc/dial.go
 index bb65041..aceaba4 100644
 --- a/transport/internet/grpc/dial.go
@@ -129,8 +589,133 @@ index bb65041..aceaba4 100644
  	return conn, err
  }
  
+diff --git a/transport/internet/grpc/retirement_test.go b/transport/internet/grpc/retirement_test.go
+new file mode 100644
+index 0000000..db27823
+--- /dev/null
++++ b/transport/internet/grpc/retirement_test.go
+@@ -0,0 +1,119 @@
++package grpc
++
++import (
++	"context"
++	"io"
++	gonet "net"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/testing/servers/tcp"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	"google.golang.org/grpc/connectivity"
++)
++
++func TestGRPCRetirementKeepsLiveStreamsAndReclaimsCache(t *testing.T) {
++	for _, multi := range []bool{false, true} {
++		t.Run(map[bool]string{false: "single", true: "multi"}[multi], func(t *testing.T) {
++			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++			defer cancel()
++			port := tcp.PickPort()
++			listener, err := Listen(ctx, net.LocalHostIP, port,
++				&internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{}},
++				func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() })
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer listener.Close()
++			dest := net.TCPDestination(net.LocalHostIP, port)
++			// Listen starts its socket in a goroutine. Wait for that fixture,
++			// otherwise a slow race build can fail on connection refused.
++			deadline := time.Now().Add(3 * time.Second)
++			for {
++				ready, err := gonet.DialTimeout("tcp", dest.NetAddr(), 100*time.Millisecond)
++				if err == nil {
++					ready.Close()
++					break
++				}
++				if time.Now().After(deadline) {
++					t.Fatal("gRPC test listener did not start: ", err)
++				}
++				time.Sleep(time.Millisecond)
++			}
++			for generation := 0; generation < 30; generation++ {
++				settings := &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{MultiMode: multi}}
++				first, err := Dial(ctx, dest, settings)
++				if err != nil {
++					t.Fatal(err)
++				}
++				second, err := Dial(ctx, dest, settings)
++				if err != nil {
++					first.Close()
++					t.Fatal(err)
++				}
++				globalDialerAccess.Lock()
++				client := globalDialerMap[dialerConf{dest, settings}]
++				globalDialerAccess.Unlock()
++				settings.RetireDialers()
++				grpcRetirementEcho(t, first)
++				first.Close()
++				if client.GetState() == connectivity.Shutdown {
++					t.Fatal("first close killed sibling stream")
++				}
++				grpcRetirementEcho(t, second)
++				second.Close()
++				second.Close()
++				assertGRPCCacheRetired(t, dest, settings)
++				if client.GetState() != connectivity.Shutdown {
++					t.Fatal("obsolete gRPC client remained running")
++				}
++				// A dispatcher which had obtained the old handler before removal
++				// can still start late; its new cache must also be reclaimed.
++				late, err := Dial(ctx, dest, settings)
++				if err != nil {
++					t.Fatal(err)
++				}
++				grpcRetirementEcho(t, late)
++				late.Close()
++				assertGRPCCacheRetired(t, dest, settings)
++			}
++		})
++	}
++}
++
++func grpcRetirementEcho(t *testing.T, conn stat.Connection) {
++	t.Helper()
++	if _, err := conn.Write([]byte("live")); err != nil {
++		t.Fatal(err)
++	}
++	var response [4]byte
++	if _, err := io.ReadFull(conn, response[:]); err != nil || string(response[:]) != "live" {
++		t.Fatalf("live stream was interrupted: %q %v", response, err)
++	}
++}
++
++func assertGRPCCacheRetired(t *testing.T, dest net.Destination, settings *internet.MemoryStreamConfig) {
++	t.Helper()
++	globalDialerAccess.Lock()
++	defer globalDialerAccess.Unlock()
++	if _, remains := globalDialerMap[dialerConf{dest, settings}]; remains {
++		t.Fatal("retired generation remains cached")
++	}
++}
++
++func TestGRPCRetirementReclaimsCanceledDial(t *testing.T) {
++	settings := &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{}}
++	settings.RetireDialers()
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	dest := net.TCPDestination(net.LocalHostIP, 1)
++	conn, err := Dial(ctx, dest, settings)
++	if err == nil {
++		// Stream creation is asynchronous; either the call or the returned
++		// stream may observe cancellation. Both paths must release the cache.
++		conn.Close()
++	}
++	assertGRPCCacheRetired(t, dest, settings)
++}
 diff --git a/transport/internet/hysteria/conn.go b/transport/internet/hysteria/conn.go
-index 07b8f6d..6077f96 100644
+index 5e801ee..8685968 100644
 --- a/transport/internet/hysteria/conn.go
 +++ b/transport/internet/hysteria/conn.go
 @@ -5,6 +5,7 @@ import (
@@ -141,7 +726,7 @@ index 07b8f6d..6077f96 100644
  	"time"
  
  	"github.com/apernet/quic-go"
-@@ -20,10 +21,11 @@ type interConn struct {
+@@ -20,8 +21,9 @@ type interConn struct {
  	local  net.Addr
  	remote net.Addr
  
@@ -153,16 +738,17 @@ index 07b8f6d..6077f96 100644
  	lock   chan struct{}
  	mu     sync.Mutex
  }
+@@ -53,6 +55,9 @@ func (c *interConn) Write(b []byte) (int, error) {
+ }
  
- func (c *interConn) unlock() {
-@@ -51,3 +53,6 @@
  func (c *interConn) Close() error {
 +	if c.onClose != nil {
 +		defer c.onClose()
 +	}
  	c.mu.Lock()
  	defer c.mu.Unlock()
-@@ -77,11 +82,12 @@ type InterConn struct {
+ 	select {
+@@ -95,11 +100,12 @@ type InterConn struct {
  	ch     chan []byte
  	time   time.Time
  	mutex  sync.Mutex
@@ -179,7 +765,7 @@ index 07b8f6d..6077f96 100644
  }
  
  func (i *InterConn) User() *protocol.MemoryUser {
-@@ -111,7 +117,7 @@ func (c *InterConn) Read(p []byte) (int, error) {
+@@ -129,7 +135,7 @@ func (c *InterConn) Read(p []byte) (int, error) {
  }
  
  func (c *InterConn) Write(p []byte) (int, error) {
@@ -188,7 +774,7 @@ index 07b8f6d..6077f96 100644
  		return 0, io.ErrClosedPipe
  	}
  	binary.BigEndian.PutUint32(p, c.id)
-@@ -123,6 +129,9 @@ func (c *InterConn) Write(p []byte) (int, error) {
+@@ -141,6 +147,9 @@ func (c *InterConn) Write(p []byte) (int, error) {
  }
  
  func (c *InterConn) Close() error {
@@ -198,7 +784,7 @@ index 07b8f6d..6077f96 100644
  	c.close()
  	return nil
  }
-@@ -161,8 +170,7 @@ type udpSessionManager struct {
+@@ -179,8 +188,7 @@ type udpSessionManager struct {
  }
  
  func (m *udpSessionManager) close(udpConn *InterConn) {
@@ -208,7 +794,7 @@ index 07b8f6d..6077f96 100644
  		close(udpConn.ch)
  		delete(m.m, udpConn.id)
  	}
-@@ -172,12 +180,17 @@ func (m *udpSessionManager) clean() {
+@@ -190,12 +198,17 @@ func (m *udpSessionManager) clean() {
  	ticker := time.NewTicker(idleCleanupInterval)
  	defer ticker.Stop()
  
@@ -229,7 +815,7 @@ index 07b8f6d..6077f96 100644
  		now := time.Now()
  		timeoutConn := make([]*InterConn, 0, len(m.m))
  		for _, udpConn := range m.m {
-@@ -220,7 +233,7 @@ func (m *udpSessionManager) run() {
+@@ -238,7 +251,7 @@ func (m *udpSessionManager) run() {
  	}
  }
  
@@ -238,7 +824,7 @@ index 07b8f6d..6077f96 100644
  	m.Lock()
  	defer m.Unlock()
  
-@@ -232,8 +245,9 @@ func (m *udpSessionManager) udp() (*InterConn, error) {
+@@ -250,8 +263,9 @@ func (m *udpSessionManager) udp() (*InterConn, error) {
  		local:  m.conn.LocalAddr(),
  		remote: m.conn.RemoteAddr(),
  
@@ -251,7 +837,7 @@ index 07b8f6d..6077f96 100644
  	udpConn.write = m.conn.SendDatagram
  	udpConn.close = func() {
 diff --git a/transport/internet/hysteria/dialer.go b/transport/internet/hysteria/dialer.go
-index 1d7b8a9..38517b4 100644
+index a6eed34..d9399b5 100644
 --- a/transport/internet/hysteria/dialer.go
 +++ b/transport/internet/hysteria/dialer.go
 @@ -233,7 +233,7 @@ func (c *client) unlock() {
@@ -279,7 +865,7 @@ index 1d7b8a9..38517b4 100644
  	select {
  	case <-ctx.Done():
  		return nil, ctx.Err()
-@@ -273,7 +274,7 @@ func (c *client) udp(ctx context.Context) (stat.Connection, error) {
+@@ -274,7 +275,7 @@ func (c *client) udp(ctx context.Context) (stat.Connection, error) {
  		return nil, err
  	}
  
@@ -288,7 +874,7 @@ index 1d7b8a9..38517b4 100644
  }
  
  func (c *client) clean(force bool) {
-@@ -328,6 +329,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -329,6 +330,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  	if tlsConfig == nil {
  		return nil, errors.New("tls config is nil")
  	}
@@ -296,7 +882,7 @@ index 1d7b8a9..38517b4 100644
  
  	datagram := DatagramFromContext(ctx)
  	dest.Network = net.Network_UDP
-@@ -338,6 +340,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -339,6 +341,20 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		}
  		go manager.clean()
  	})
@@ -317,7 +903,7 @@ index 1d7b8a9..38517b4 100644
  
  	dialerConfKey := dialerConf{dest, streamSettings}
  
-@@ -364,10 +380,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
+@@ -365,10 +381,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
  		manager.Unlock()
  	}
  
@@ -337,6 +923,142 @@ index 1d7b8a9..38517b4 100644
  }
  
  func init() {
+diff --git a/transport/internet/hysteria/retirement_test.go b/transport/internet/hysteria/retirement_test.go
+new file mode 100644
+index 0000000..898737b
+--- /dev/null
++++ b/transport/internet/hysteria/retirement_test.go
+@@ -0,0 +1,130 @@
++package hysteria
++
++import (
++	"context"
++	"io"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol/tls/cert"
++	"github.com/xtls/xray-core/proxy/hysteria/account"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	"github.com/xtls/xray-core/transport/internet/tls"
++)
++
++func TestHysteriaRetirementKeepsTCPAndUDPAndReclaimsCache(t *testing.T) {
++	certificate, hash := cert.MustGenerate(nil, cert.CommonName("localhost"))
++	serverCertificate := tls.ParseCertificate(certificate)
++	serverCertificate.OneTimeLoading = true
++	listener, err := Listen(ContextWithValidator(context.Background(), account.NewValidator()), net.LocalHostIP, 0,
++		&internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &Config{Auth: "retirement-test", UdpIdleTimeout: 60},
++			SecurityType: "tls", SecuritySettings: &tls.Config{Certificate: []*tls.Certificate{serverCertificate}}},
++		func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() })
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	dest := net.UDPDestination(net.LocalHostIP, net.Port(listener.Addr().(*net.UDPAddr).Port))
++	for generation := 0; generation < 24; generation++ {
++		settings := &internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &Config{Auth: "retirement-test"},
++			SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}},
++			QuicParams: &internet.QuicParams{DisableChromeParrot: true}}
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		first, err := Dial(ctx, dest, settings)
++		if err != nil {
++			cancel()
++			t.Fatal(err)
++		}
++		second, err := Dial(ContextWithDatagram(ctx, true), dest, settings)
++		if err != nil {
++			first.Close()
++			cancel()
++			t.Fatal(err)
++		}
++		manager.RLock()
++		cached := manager.m[dialerConf{dest, settings}]
++		manager.RUnlock()
++		settings.RetireDialers()
++		hysteriaRetirementEcho(t, first, []byte("live"), false)
++		first.Close()
++		hysteriaRetirementEcho(t, second, []byte{0, 0, 0, 0, 'l', 'i', 'v', 'e'}, true)
++		second.Close()
++		second.Close()
++		manager.RLock()
++		_, remains := manager.m[dialerConf{dest, settings}]
++		manager.RUnlock()
++		if remains {
++			t.Fatal("retired Hysteria generation remains cached")
++		}
++		cached.lock <- struct{}{}
++		open := cached.conn != nil || cached.tr != nil || cached.pktConn != nil || cached.udpSM != nil
++		forced := cached.forced
++		cached.unlock()
++		if open {
++			t.Fatal("retired QUIC resources remain open")
++		}
++		if !forced {
++			t.Fatal("retired client can reconnect after cleanup")
++		}
++		late, err := Dial(ctx, dest, settings)
++		if err != nil {
++			cancel()
++			t.Fatal(err)
++		}
++		hysteriaRetirementEcho(t, late, []byte("live"), false)
++		late.Close()
++		cancel()
++		manager.RLock()
++		_, remains = manager.m[dialerConf{dest, settings}]
++		manager.RUnlock()
++		if remains {
++			t.Fatal("late Hysteria stream left a cache entry")
++		}
++	}
++	settings := &internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &Config{Auth: "wrong-auth"},
++		SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}},
++		QuicParams: &internet.QuicParams{DisableChromeParrot: true}}
++	settings.RetireDialers()
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	if conn, err := Dial(ctx, dest, settings); err == nil {
++		conn.Close()
++		t.Fatal("invalid authentication unexpectedly succeeded")
++	}
++	manager.RLock()
++	_, remains := manager.m[dialerConf{dest, settings}]
++	manager.RUnlock()
++	if remains {
++		t.Fatal("failed Hysteria dial left a cache entry")
++	}
++}
++
++func hysteriaRetirementEcho(t *testing.T, conn stat.Connection, payload []byte, datagram bool) {
++	t.Helper()
++	result := make(chan error, 1)
++	go func() {
++		_, err := conn.Write(payload)
++		if err == nil {
++			response := make([]byte, 4)
++			if datagram {
++				response = make([]byte, 8)
++			}
++			_, err = io.ReadFull(conn, response)
++			if err == nil && string(response[len(response)-4:]) != "live" {
++				err = io.ErrUnexpectedEOF
++			}
++		}
++		result <- err
++	}()
++	select {
++	case err := <-result:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(5 * time.Second):
++		conn.Close()
++		t.Fatal("live Hysteria stream stopped after retirement")
++	}
++}
 diff --git a/transport/internet/memory_settings.go b/transport/internet/memory_settings.go
 index 6277151..bc81a27 100644
 --- a/transport/internet/memory_settings.go
@@ -807,727 +1529,6 @@ index 1945224..6f5b54a 100644
  func (m *XmuxManager) newXmuxClient() *XmuxClient {
  	xmuxClient := &XmuxClient{
  		XmuxConn:  m.newConnFunc(),
-diff --git a/app/proxyman/outbound/retirement_test.go b/app/proxyman/outbound/retirement_test.go
-new file mode 100644
-index 0000000..f26705a
---- /dev/null
-+++ b/app/proxyman/outbound/retirement_test.go
-@@ -0,0 +1,38 @@
-+package outbound
-+
-+import (
-+	"context"
-+	"testing"
-+
-+	"github.com/xtls/xray-core/app/proxyman"
-+	"github.com/xtls/xray-core/transport/internet"
-+)
-+
-+func TestRemoveHandlerRetiresTransportAfterLiveStream(t *testing.T) {
-+	manager, err := New(context.Background(), &proxyman.OutboundConfig{})
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	settings := &internet.MemoryStreamConfig{}
-+	handler := &Handler{tag: "generation-a", streamSettings: settings}
-+	if err := manager.AddHandler(context.Background(), handler); err != nil {
-+		t.Fatal(err)
-+	}
-+	release := settings.AcquireDialer()
-+	closed := false
-+	settings.RegisterDialerCleanup("cache", func() {
-+		closed = true
-+		// Cleanup must not run with the outbound manager lock held.
-+		_ = manager.ListHandlers(context.Background())
-+	})
-+	if err := manager.RemoveHandler(context.Background(), handler.Tag()); err != nil {
-+		t.Fatal(err)
-+	}
-+	if manager.GetHandler(handler.Tag()) != nil || closed {
-+		t.Fatal("removal did not detach safely")
-+	}
-+	release()
-+	if !closed {
-+		t.Fatal("removed outbound's cache was not reclaimed")
-+	}
-+}
-diff --git a/app/proxyman/outbound/retirement_switch_test.go b/app/proxyman/outbound/retirement_switch_test.go
-new file mode 100644
-index 0000000..bd8d9e5
---- /dev/null
-+++ b/app/proxyman/outbound/retirement_switch_test.go
-@@ -0,0 +1,208 @@
-+package outbound
-+
-+import (
-+	"context"
-+	"io"
-+	gonet "net"
-+	"strings"
-+	"sync/atomic"
-+	"testing"
-+	"time"
-+
-+	"github.com/xtls/xray-core/app/proxyman"
-+	"github.com/xtls/xray-core/common/net"
-+	"github.com/xtls/xray-core/common/protocol/tls/cert"
-+	"github.com/xtls/xray-core/proxy/hysteria/account"
-+	"github.com/xtls/xray-core/testing/servers/tcp"
-+	"github.com/xtls/xray-core/transport/internet"
-+	"github.com/xtls/xray-core/transport/internet/grpc"
-+	"github.com/xtls/xray-core/transport/internet/hysteria"
-+	"github.com/xtls/xray-core/transport/internet/splithttp"
-+	"github.com/xtls/xray-core/transport/internet/stat"
-+	"github.com/xtls/xray-core/transport/internet/tls"
-+)
-+
-+func TestRetirementPreservesStreamsAcrossAToBToA(t *testing.T) {
-+	for _, transport := range []string{"grpc", "grpc-multi", "packet-up", "stream-up", "stream-one", "hysteria", "hysteria-udp"} {
-+		for _, replace := range []bool{false, true} {
-+			name := transport + "/same-handler"
-+			if replace {
-+				name = transport + "/new-handler-same-tag"
-+			}
-+			t.Run(name, func(t *testing.T) {
-+				dest, settings := retirementTransport(t, transport)
-+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-+				defer cancel()
-+				if transport == "hysteria-udp" {
-+					ctx = hysteria.ContextWithDatagram(ctx, true)
-+				}
-+				manager, err := New(ctx, &proxyman.OutboundConfig{})
-+				if err != nil {
-+					t.Fatal(err)
-+				}
-+				var released []*atomic.Bool
-+				add := func(tag string) *Handler {
-+					handler := &Handler{tag: tag, streamSettings: settings()}
-+					closed := &atomic.Bool{}
-+					release := handler.streamSettings.AcquireDialer()
-+					handler.streamSettings.RegisterDialerCleanup("assert-drained", func() { closed.Store(true) })
-+					release()
-+					released = append(released, closed)
-+					if err := manager.AddHandler(ctx, handler); err != nil {
-+						t.Fatal(err)
-+					}
-+					return handler
-+				}
-+				dial := func(tag string) stat.Connection {
-+					conn, err := manager.GetHandler(tag).(*Handler).Dial(ctx, dest)
-+					if err != nil {
-+						t.Fatal(err)
-+					}
-+					t.Cleanup(func() { conn.Close() })
-+					return conn
-+				}
-+				remove := func(tag string) {
-+					if err := manager.RemoveHandler(ctx, tag); err != nil {
-+						t.Fatal(err)
-+					}
-+				}
-+				echo := func(conns ...stat.Connection) {
-+					for _, conn := range conns {
-+						retirementHandlerEcho(t, conn, transport == "hysteria-udp")
-+					}
-+				}
-+				a := add("a")
-+				add("b")
-+				firstA := dial("a")
-+				echo(firstA)
-+				// Switch new connections to B, then remove A while its original
-+				// connection is still open. HandlerService must not close it.
-+				liveB := dial("b")
-+				remove("a")
-+				echo(firstA, liveB)
-+				if replace {
-+					add("a")
-+				} else if err := manager.AddHandler(ctx, a); err != nil {
-+					t.Fatal(err)
-+				}
-+				secondA := dial("a")
-+				remove("b")
-+				echo(firstA, liveB, secondA)
-+				remove("a")
-+				for _, closed := range released {
-+					if closed.Load() {
-+						t.Fatal("cleanup ran with an original connection still alive")
-+					}
-+				}
-+				echo(firstA, liveB, secondA)
-+				secondA.Close()
-+				echo(firstA, liveB)
-+				liveB.Close()
-+				echo(firstA)
-+				firstA.Close()
-+				deadline := time.Now().Add(3 * time.Second)
-+				for _, closed := range released {
-+					for !closed.Load() && time.Now().Before(deadline) {
-+						time.Sleep(time.Millisecond)
-+					}
-+					if !closed.Load() {
-+						t.Fatal("drained handler retained its transport resources")
-+					}
-+				}
-+			})
-+		}
-+	}
-+}
-+
-+func retirementTransport(t *testing.T, transport string) (net.Destination, func() *internet.MemoryStreamConfig) {
-+	t.Helper()
-+	ctx := context.Background()
-+	echo := func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() }
-+	port := tcp.PickPort()
-+	dest := net.TCPDestination(net.LocalHostIP, port)
-+	var listener internet.Listener
-+	var err error
-+	var settings func() *internet.MemoryStreamConfig
-+	switch {
-+	case strings.HasPrefix(transport, "grpc"):
-+		settings = func() *internet.MemoryStreamConfig {
-+			return &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &grpc.Config{MultiMode: transport == "grpc-multi"}}
-+		}
-+		listener, err = grpc.Listen(ctx, net.LocalHostIP, port, settings(), echo)
-+	default:
-+		certificate, hash := cert.MustGenerate(nil, cert.CommonName("localhost"))
-+		serverCertificate := tls.ParseCertificate(certificate)
-+		serverCertificate.OneTimeLoading = true
-+		serverTLS := &tls.Config{Certificate: []*tls.Certificate{serverCertificate}}
-+		if strings.HasPrefix(transport, "hysteria") {
-+			settings = func() *internet.MemoryStreamConfig {
-+				return &internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &hysteria.Config{Auth: "retirement-test"},
-+					SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}},
-+					QuicParams: &internet.QuicParams{DisableChromeParrot: true}}
-+			}
-+			listener, err = hysteria.Listen(hysteria.ContextWithValidator(ctx, account.NewValidator()), net.LocalHostIP, 0,
-+				&internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &hysteria.Config{Auth: "retirement-test", UdpIdleTimeout: 60},
-+					SecurityType: "tls", SecuritySettings: serverTLS}, echo)
-+			if err == nil {
-+				dest.Port = net.Port(listener.Addr().(*net.UDPAddr).Port)
-+			}
-+		} else {
-+			settings = func() *internet.MemoryStreamConfig {
-+				return &internet.MemoryStreamConfig{ProtocolName: "splithttp", ProtocolSettings: &splithttp.Config{Mode: transport},
-+					SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}}}
-+			}
-+			listener, err = splithttp.ListenXH(ctx, net.LocalHostIP, port,
-+				&internet.MemoryStreamConfig{ProtocolName: "splithttp", ProtocolSettings: &splithttp.Config{},
-+					SecurityType: "tls", SecuritySettings: serverTLS}, echo)
-+		}
-+	}
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	t.Cleanup(func() { listener.Close() })
-+	if strings.HasPrefix(transport, "grpc") {
-+		// The upstream gRPC listener binds asynchronously.
-+		deadline := time.Now().Add(3 * time.Second)
-+		for {
-+			ready, err := gonet.DialTimeout("tcp", dest.NetAddr(), 100*time.Millisecond)
-+			if err == nil {
-+				ready.Close()
-+				break
-+			}
-+			if time.Now().After(deadline) {
-+				t.Fatal("gRPC test listener did not start: ", err)
-+			}
-+			time.Sleep(time.Millisecond)
-+		}
-+	}
-+	return dest, settings
-+}
-+
-+func retirementHandlerEcho(t *testing.T, conn stat.Connection, datagram bool) {
-+	t.Helper()
-+	result := make(chan error, 1)
-+	go func() {
-+		payload := []byte("live")
-+		if datagram {
-+			payload = append(make([]byte, 4), payload...)
-+		}
-+		_, err := conn.Write(payload)
-+		if err == nil {
-+			response := make([]byte, len(payload))
-+			_, err = io.ReadFull(conn, response)
-+			if err == nil && string(response[len(response)-4:]) != "live" {
-+				err = io.ErrUnexpectedEOF
-+			}
-+		}
-+		result <- err
-+	}()
-+	select {
-+	case err := <-result:
-+		if err != nil {
-+			t.Fatalf("existing connection interrupted: %v", err)
-+		}
-+	case <-time.After(5 * time.Second):
-+		conn.Close()
-+		t.Fatal("existing connection stopped across A -> B -> A")
-+	}
-+}
-diff --git a/transport/internet/dialer_lifecycle.go b/transport/internet/dialer_lifecycle.go
-new file mode 100644
-index 0000000..c596d78
---- /dev/null
-+++ b/transport/internet/dialer_lifecycle.go
-@@ -0,0 +1,79 @@
-+package internet
-+
-+import "sync"
-+
-+// A removed outbound may still have live streams or a Dispatch which already
-+// obtained its handler. Retire the cache only after those streams release it.
-+// The state belongs to the stream configuration, never to a global registry.
-+type dialerLifetime struct {
-+	mu       sync.Mutex
-+	active   int
-+	retired  bool
-+	cleaning chan struct{}
-+	cleanups map[any]func()
-+}
-+
-+// AcquireDialer keeps transport resources alive until the returned function is
-+// called. Late users of an already removed handler get their own cleanup cycle.
-+func (s *MemoryStreamConfig) AcquireDialer() func() {
-+	d := &s.dialers
-+	d.mu.Lock()
-+	for d.cleaning != nil {
-+		finished := d.cleaning
-+		d.mu.Unlock()
-+		<-finished
-+		d.mu.Lock()
-+	}
-+	d.active++
-+	d.mu.Unlock()
-+	var once sync.Once
-+	return func() { once.Do(func() { d.finish(false) }) }
-+}
-+
-+// RegisterDialerCleanup is called while holding a dialer lease and before
-+// acquiring a transport cache lock. A key is registered only once per cycle.
-+func (s *MemoryStreamConfig) RegisterDialerCleanup(key any, cleanup func()) {
-+	d := &s.dialers
-+	d.mu.Lock()
-+	defer d.mu.Unlock()
-+	if d.cleanups == nil {
-+		d.cleanups = make(map[any]func())
-+	}
-+	if _, exists := d.cleanups[key]; !exists {
-+		d.cleanups[key] = cleanup
-+	}
-+}
-+
-+// RetireDialers prevents idle caches from keeping an obsolete outbound alive.
-+// Active streams drain normally; this is deliberately different from Close.
-+func (s *MemoryStreamConfig) RetireDialers() {
-+	if s != nil {
-+		s.dialers.finish(true)
-+	}
-+}
-+
-+func (d *dialerLifetime) finish(retire bool) {
-+	d.mu.Lock()
-+	if retire {
-+		d.retired = true
-+	} else {
-+		d.active--
-+	}
-+	if !d.retired || d.active != 0 || d.cleaning != nil || len(d.cleanups) == 0 {
-+		d.mu.Unlock()
-+		return
-+	}
-+	cleanups := d.cleanups
-+	d.cleanups = nil
-+	d.cleaning = make(chan struct{})
-+	d.mu.Unlock()
-+	// No user can acquire this cache while its old connections are closing.
-+	// Run callbacks outside the lifetime lock to avoid transport lock inversion.
-+	for _, cleanup := range cleanups {
-+		cleanup()
-+	}
-+	d.mu.Lock()
-+	close(d.cleaning)
-+	d.cleaning = nil
-+	d.mu.Unlock()
-+}
-diff --git a/transport/internet/dialer_lifecycle_test.go b/transport/internet/dialer_lifecycle_test.go
-new file mode 100644
-index 0000000..6e824ae
---- /dev/null
-+++ b/transport/internet/dialer_lifecycle_test.go
-@@ -0,0 +1,111 @@
-+package internet
-+
-+import (
-+	"runtime"
-+	"sync"
-+	"sync/atomic"
-+	"testing"
-+	"time"
-+	"weak"
-+)
-+
-+func TestDialerRetirementDrainsAndReclaimsLateUse(t *testing.T) {
-+	settings := &MemoryStreamConfig{}
-+	var closed atomic.Int32
-+	first, second := settings.AcquireDialer(), settings.AcquireDialer()
-+	settings.RegisterDialerCleanup("resource", func() { closed.Add(1) })
-+	settings.RetireDialers()
-+	first()
-+	first()
-+	if closed.Load() != 0 {
-+		t.Fatal("retirement closed a cache with a live connection")
-+	}
-+	second()
-+	if closed.Load() != 1 {
-+		t.Fatal("last stream did not reclaim the cache")
-+	}
-+	for range 1000 {
-+		release := settings.AcquireDialer()
-+		settings.RegisterDialerCleanup("resource", func() { closed.Add(1) })
-+		release()
-+	}
-+	if closed.Load() != 1001 || settings.dialers.active != 0 || len(settings.dialers.cleanups) != 0 {
-+		t.Fatal("late streams of a retired handler leaked resources")
-+	}
-+}
-+
-+func TestDialerRetirementSerializesLateAcquireWithCleanup(t *testing.T) {
-+	settings := &MemoryStreamConfig{}
-+	started, finish := make(chan struct{}), make(chan struct{})
-+	release := settings.AcquireDialer()
-+	settings.RegisterDialerCleanup("resource", func() { close(started); <-finish })
-+	settings.RetireDialers()
-+	released := make(chan struct{})
-+	go func() { release(); close(released) }()
-+	<-started
-+	acquired := make(chan struct{})
-+	go func() { done := settings.AcquireDialer(); close(acquired); done() }()
-+	select {
-+	case <-acquired:
-+		t.Fatal("late stream acquired a cache while it was closing")
-+	case <-time.After(20 * time.Millisecond):
-+	}
-+	close(finish)
-+	<-released
-+	select {
-+	case <-acquired:
-+	case <-time.After(time.Second):
-+		t.Fatal("late stream did not resume after cleanup")
-+	}
-+}
-+
-+func TestDialerRetirementConcurrentStreams(t *testing.T) {
-+	settings := &MemoryStreamConfig{}
-+	var live atomic.Int32
-+	var wg sync.WaitGroup
-+	for range 12 {
-+		wg.Add(1)
-+		go func() {
-+			defer wg.Done()
-+			for range 100 {
-+				release := settings.AcquireDialer()
-+				live.Add(1)
-+				settings.RegisterDialerCleanup("shared", func() {
-+					if live.Load() != 0 {
-+						t.Error("closed an in-use cache")
-+					}
-+				})
-+				live.Add(-1)
-+				release()
-+			}
-+		}()
-+	}
-+	settings.RetireDialers()
-+	wg.Wait()
-+	if settings.dialers.active != 0 || len(settings.dialers.cleanups) != 0 {
-+		t.Fatal("retired cache retained stream leases")
-+	}
-+}
-+
-+func TestDialerRetirementDoesNotKeepConfigurationsAlive(t *testing.T) {
-+	makeRetired := func() weak.Pointer[MemoryStreamConfig] {
-+		settings := &MemoryStreamConfig{}
-+		release := settings.AcquireDialer()
-+		settings.RegisterDialerCleanup("self", func() { runtime.KeepAlive(settings) })
-+		settings.RetireDialers()
-+		release()
-+		return weak.Make(settings)
-+	}
-+	refs := make([]weak.Pointer[MemoryStreamConfig], 1000)
-+	for i := range refs {
-+		refs[i] = makeRetired()
-+	}
-+	// Live objects, not RSS: the Go allocator may retain reusable pages after
-+	// collection without leaking any configuration or transport client.
-+	runtime.GC()
-+	for _, ref := range refs {
-+		if ref.Value() != nil {
-+			t.Fatal("retirement retained an obsolete configuration")
-+		}
-+	}
-+}
-diff --git a/transport/internet/grpc/retirement_test.go b/transport/internet/grpc/retirement_test.go
-new file mode 100644
-index 0000000..db27823
---- /dev/null
-+++ b/transport/internet/grpc/retirement_test.go
-@@ -0,0 +1,119 @@
-+package grpc
-+
-+import (
-+	"context"
-+	"io"
-+	gonet "net"
-+	"testing"
-+	"time"
-+
-+	"github.com/xtls/xray-core/common/net"
-+	"github.com/xtls/xray-core/testing/servers/tcp"
-+	"github.com/xtls/xray-core/transport/internet"
-+	"github.com/xtls/xray-core/transport/internet/stat"
-+	"google.golang.org/grpc/connectivity"
-+)
-+
-+func TestGRPCRetirementKeepsLiveStreamsAndReclaimsCache(t *testing.T) {
-+	for _, multi := range []bool{false, true} {
-+		t.Run(map[bool]string{false: "single", true: "multi"}[multi], func(t *testing.T) {
-+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-+			defer cancel()
-+			port := tcp.PickPort()
-+			listener, err := Listen(ctx, net.LocalHostIP, port,
-+				&internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{}},
-+				func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() })
-+			if err != nil {
-+				t.Fatal(err)
-+			}
-+			defer listener.Close()
-+			dest := net.TCPDestination(net.LocalHostIP, port)
-+			// Listen starts its socket in a goroutine. Wait for that fixture,
-+			// otherwise a slow race build can fail on connection refused.
-+			deadline := time.Now().Add(3 * time.Second)
-+			for {
-+				ready, err := gonet.DialTimeout("tcp", dest.NetAddr(), 100*time.Millisecond)
-+				if err == nil {
-+					ready.Close()
-+					break
-+				}
-+				if time.Now().After(deadline) {
-+					t.Fatal("gRPC test listener did not start: ", err)
-+				}
-+				time.Sleep(time.Millisecond)
-+			}
-+			for generation := 0; generation < 30; generation++ {
-+				settings := &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{MultiMode: multi}}
-+				first, err := Dial(ctx, dest, settings)
-+				if err != nil {
-+					t.Fatal(err)
-+				}
-+				second, err := Dial(ctx, dest, settings)
-+				if err != nil {
-+					first.Close()
-+					t.Fatal(err)
-+				}
-+				globalDialerAccess.Lock()
-+				client := globalDialerMap[dialerConf{dest, settings}]
-+				globalDialerAccess.Unlock()
-+				settings.RetireDialers()
-+				grpcRetirementEcho(t, first)
-+				first.Close()
-+				if client.GetState() == connectivity.Shutdown {
-+					t.Fatal("first close killed sibling stream")
-+				}
-+				grpcRetirementEcho(t, second)
-+				second.Close()
-+				second.Close()
-+				assertGRPCCacheRetired(t, dest, settings)
-+				if client.GetState() != connectivity.Shutdown {
-+					t.Fatal("obsolete gRPC client remained running")
-+				}
-+				// A dispatcher which had obtained the old handler before removal
-+				// can still start late; its new cache must also be reclaimed.
-+				late, err := Dial(ctx, dest, settings)
-+				if err != nil {
-+					t.Fatal(err)
-+				}
-+				grpcRetirementEcho(t, late)
-+				late.Close()
-+				assertGRPCCacheRetired(t, dest, settings)
-+			}
-+		})
-+	}
-+}
-+
-+func grpcRetirementEcho(t *testing.T, conn stat.Connection) {
-+	t.Helper()
-+	if _, err := conn.Write([]byte("live")); err != nil {
-+		t.Fatal(err)
-+	}
-+	var response [4]byte
-+	if _, err := io.ReadFull(conn, response[:]); err != nil || string(response[:]) != "live" {
-+		t.Fatalf("live stream was interrupted: %q %v", response, err)
-+	}
-+}
-+
-+func assertGRPCCacheRetired(t *testing.T, dest net.Destination, settings *internet.MemoryStreamConfig) {
-+	t.Helper()
-+	globalDialerAccess.Lock()
-+	defer globalDialerAccess.Unlock()
-+	if _, remains := globalDialerMap[dialerConf{dest, settings}]; remains {
-+		t.Fatal("retired generation remains cached")
-+	}
-+}
-+
-+func TestGRPCRetirementReclaimsCanceledDial(t *testing.T) {
-+	settings := &internet.MemoryStreamConfig{ProtocolName: "grpc", ProtocolSettings: &Config{}}
-+	settings.RetireDialers()
-+	ctx, cancel := context.WithCancel(context.Background())
-+	cancel()
-+	dest := net.TCPDestination(net.LocalHostIP, 1)
-+	conn, err := Dial(ctx, dest, settings)
-+	if err == nil {
-+		// Stream creation is asynchronous; either the call or the returned
-+		// stream may observe cancellation. Both paths must release the cache.
-+		conn.Close()
-+	}
-+	assertGRPCCacheRetired(t, dest, settings)
-+}
-diff --git a/transport/internet/hysteria/retirement_test.go b/transport/internet/hysteria/retirement_test.go
-new file mode 100644
-index 0000000..898737b
---- /dev/null
-+++ b/transport/internet/hysteria/retirement_test.go
-@@ -0,0 +1,130 @@
-+package hysteria
-+
-+import (
-+	"context"
-+	"io"
-+	"testing"
-+	"time"
-+
-+	"github.com/xtls/xray-core/common/net"
-+	"github.com/xtls/xray-core/common/protocol/tls/cert"
-+	"github.com/xtls/xray-core/proxy/hysteria/account"
-+	"github.com/xtls/xray-core/transport/internet"
-+	"github.com/xtls/xray-core/transport/internet/stat"
-+	"github.com/xtls/xray-core/transport/internet/tls"
-+)
-+
-+func TestHysteriaRetirementKeepsTCPAndUDPAndReclaimsCache(t *testing.T) {
-+	certificate, hash := cert.MustGenerate(nil, cert.CommonName("localhost"))
-+	serverCertificate := tls.ParseCertificate(certificate)
-+	serverCertificate.OneTimeLoading = true
-+	listener, err := Listen(ContextWithValidator(context.Background(), account.NewValidator()), net.LocalHostIP, 0,
-+		&internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &Config{Auth: "retirement-test", UdpIdleTimeout: 60},
-+			SecurityType: "tls", SecuritySettings: &tls.Config{Certificate: []*tls.Certificate{serverCertificate}}},
-+		func(conn stat.Connection) { go func() { defer conn.Close(); io.Copy(conn, conn) }() })
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	defer listener.Close()
-+	dest := net.UDPDestination(net.LocalHostIP, net.Port(listener.Addr().(*net.UDPAddr).Port))
-+	for generation := 0; generation < 24; generation++ {
-+		settings := &internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &Config{Auth: "retirement-test"},
-+			SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}},
-+			QuicParams: &internet.QuicParams{DisableChromeParrot: true}}
-+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-+		first, err := Dial(ctx, dest, settings)
-+		if err != nil {
-+			cancel()
-+			t.Fatal(err)
-+		}
-+		second, err := Dial(ContextWithDatagram(ctx, true), dest, settings)
-+		if err != nil {
-+			first.Close()
-+			cancel()
-+			t.Fatal(err)
-+		}
-+		manager.RLock()
-+		cached := manager.m[dialerConf{dest, settings}]
-+		manager.RUnlock()
-+		settings.RetireDialers()
-+		hysteriaRetirementEcho(t, first, []byte("live"), false)
-+		first.Close()
-+		hysteriaRetirementEcho(t, second, []byte{0, 0, 0, 0, 'l', 'i', 'v', 'e'}, true)
-+		second.Close()
-+		second.Close()
-+		manager.RLock()
-+		_, remains := manager.m[dialerConf{dest, settings}]
-+		manager.RUnlock()
-+		if remains {
-+			t.Fatal("retired Hysteria generation remains cached")
-+		}
-+		cached.lock <- struct{}{}
-+		open := cached.conn != nil || cached.tr != nil || cached.pktConn != nil || cached.udpSM != nil
-+		forced := cached.forced
-+		cached.unlock()
-+		if open {
-+			t.Fatal("retired QUIC resources remain open")
-+		}
-+		if !forced {
-+			t.Fatal("retired client can reconnect after cleanup")
-+		}
-+		late, err := Dial(ctx, dest, settings)
-+		if err != nil {
-+			cancel()
-+			t.Fatal(err)
-+		}
-+		hysteriaRetirementEcho(t, late, []byte("live"), false)
-+		late.Close()
-+		cancel()
-+		manager.RLock()
-+		_, remains = manager.m[dialerConf{dest, settings}]
-+		manager.RUnlock()
-+		if remains {
-+			t.Fatal("late Hysteria stream left a cache entry")
-+		}
-+	}
-+	settings := &internet.MemoryStreamConfig{ProtocolName: "hysteria", ProtocolSettings: &Config{Auth: "wrong-auth"},
-+		SecurityType: "tls", SecuritySettings: &tls.Config{PinnedPeerCertSha256: [][]byte{hash[:]}},
-+		QuicParams: &internet.QuicParams{DisableChromeParrot: true}}
-+	settings.RetireDialers()
-+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-+	defer cancel()
-+	if conn, err := Dial(ctx, dest, settings); err == nil {
-+		conn.Close()
-+		t.Fatal("invalid authentication unexpectedly succeeded")
-+	}
-+	manager.RLock()
-+	_, remains := manager.m[dialerConf{dest, settings}]
-+	manager.RUnlock()
-+	if remains {
-+		t.Fatal("failed Hysteria dial left a cache entry")
-+	}
-+}
-+
-+func hysteriaRetirementEcho(t *testing.T, conn stat.Connection, payload []byte, datagram bool) {
-+	t.Helper()
-+	result := make(chan error, 1)
-+	go func() {
-+		_, err := conn.Write(payload)
-+		if err == nil {
-+			response := make([]byte, 4)
-+			if datagram {
-+				response = make([]byte, 8)
-+			}
-+			_, err = io.ReadFull(conn, response)
-+			if err == nil && string(response[len(response)-4:]) != "live" {
-+				err = io.ErrUnexpectedEOF
-+			}
-+		}
-+		result <- err
-+	}()
-+	select {
-+	case err := <-result:
-+		if err != nil {
-+			t.Fatal(err)
-+		}
-+	case <-time.After(5 * time.Second):
-+		conn.Close()
-+		t.Fatal("live Hysteria stream stopped after retirement")
-+	}
-+}
 diff --git a/transport/internet/splithttp/retirement_test.go b/transport/internet/splithttp/retirement_test.go
 new file mode 100644
 index 0000000..cf8ce8e

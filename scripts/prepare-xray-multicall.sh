@@ -21,7 +21,7 @@ cp go.sum "$sum"
 go mod edit -modfile="$output" \
  -require=github.com/xtls/xray-core@v0.0.0 \
  -require=github.com/klauspost/compress@v1.20.2 \
- -require=github.com/andybalholm/brotli@v1.2.7 \
+ -require=github.com/molecule-man/go-brrr@v1.2.0 \
  -require=golang.org/x/net@v0.62.0 \
  -require=golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 \
  -replace="github.com/xtls/xray-core=$xray_root" \

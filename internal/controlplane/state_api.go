@@ -975,7 +975,7 @@ func runtimeBuildInfo() map[string]any {
 			break
 		}
 	}
-	version := envOr("SB_XRAY_VERSION", "26.10.31")
+	version := envOr("SB_XRAY_VERSION", "26.11.9")
 	runtimeCore := "starting"
 	if running {
 		runtimeCore = "xray"

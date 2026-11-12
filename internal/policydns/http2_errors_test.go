@@ -24,7 +24,7 @@ func TestDoHHTTP2FailureClassification(t *testing.T) {
 		http2.ConnectionError(http2.ErrCodeProtocol),
 		//lint:ignore SA1019 Exercise compatibility with typed failures from existing transports.
 		http2.GoAwayError{ErrCode: http2.ErrCodeNo},
-		errors.New("http2: server sent GOAWAY and closed the connection; debug=private"),
+		errors.New("http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=private"),
 	} {
 		if !dohConnectionClosed(errors.Join(fault, io.EOF)) || !dohConnectionClosed(fault) {
 			t.Fatalf("HTTP/2 failure was not retired: %T", fault)

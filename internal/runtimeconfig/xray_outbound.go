@@ -153,6 +153,27 @@ func ConvertXrayOutbounds(
 			if obfs := objectValue(value["obfs"]); textValue(obfs["type"]) == "salamander" {
 				stream["finalmask"] = salamanderMask(textValue(obfs["password"]))
 			}
+			quic := map[string]any{}
+			for source, target := range map[string]string{"up_mbps": "brutalUp", "down_mbps": "brutalDown"} {
+				if raw, exists := value[source]; exists {
+					mbps, err := integerDefault(raw, 0)
+					// Preserve decimal Mbps exactly through Xray's float64 bandwidth parser.
+					if err != nil || mbps < 0 || uint64(mbps) > (1<<53-1)/1_000_000 {
+						return XrayOutboundSet{}, fmt.Errorf("selected Hysteria 2 outbound %q has invalid %s", tag, source)
+					}
+					if mbps > 0 {
+						quic[target] = fmt.Sprintf("%dbps", uint64(mbps)*1_000_000)
+					}
+				}
+			}
+			if len(quic) != 0 {
+				mask := objectValue(stream["finalmask"])
+				if mask == nil {
+					mask = map[string]any{}
+				}
+				mask["quicParams"] = quic
+				stream["finalmask"] = mask
+			}
 			result.Outbounds = append(result.Outbounds, map[string]any{
 				"tag": tag, "protocol": "hysteria",
 				"settings": map[string]any{

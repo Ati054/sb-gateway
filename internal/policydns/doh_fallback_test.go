@@ -175,6 +175,11 @@ func TestFreshEncryptedFallbackRespectsItsWorkerLimit(t *testing.T) {
 	}
 	defer resolver.Close()
 	answer := freshQuery(t, resolver, "udp", "fresh-budget.example", 1232)
+	// Receiving the UDP answer does not mean the handler defer has run.
+	// Shutdown waits for that owner before inspecting returned capacity.
+	if err := resolver.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if answer.Rcode != dns.RcodeSuccess || calls.Load() != 0 || len(resolver.limit) != 0 {
 		t.Fatal("fresh resolver bypassed its work limit or canceled its primary")
 	}

@@ -2,6 +2,7 @@ package policydns
 
 import (
 	"bytes"
+	"encoding/binary"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -45,6 +46,52 @@ func replayableDNSQuery(query []byte) bool {
 }
 
 func truncatedDNSReply(query, response []byte) bool {
-	return len(query) >= 12 && len(response) >= 12 && response[2]&0x82 == 0x82 &&
-		query[2]&0x78 == response[2]&0x78 && bytes.Equal(query[:2], response[:2])
+	if !validDNSWire(query) || dnsResponsePacket(query) || len(response) < 12 || len(response) > maxDNSMessage ||
+		response[2]&0x82 != 0x82 || query[2]&0x78 != response[2]&0x78 || !bytes.Equal(query[:2], response[:2]) {
+		return false
+	}
+	questions := binary.BigEndian.Uint16(response[4:6])
+	// A header-only TC response has no question. The connected upstream
+	// socket, ID and opcode still bind it to this exchange.
+	if questions == 0 {
+		return true
+	}
+	if questions != 1 || binary.BigEndian.Uint16(query[4:6]) != 1 {
+		return false
+	}
+	var q, a dnsmessage.Parser
+	if _, err := q.Start(query); err != nil {
+		return false
+	}
+	if _, err := a.Start(response); err != nil {
+		return false
+	}
+	want, err := q.Question()
+	if err != nil {
+		return false
+	}
+	got, err := a.Question()
+	// RR sections may be incomplete when TC is set; the question may not.
+	return err == nil && equalDNSName(&want.Name, &got.Name) &&
+		want.Type == got.Type && want.Class == got.Class
+}
+
+// RFC 4343 case-insensitivity applies to ASCII letters, not Unicode folding.
+func equalDNSName(a, b *dnsmessage.Name) bool {
+	if a.Length != b.Length {
+		return false
+	}
+	for i := 0; i < int(a.Length); i++ {
+		x, y := a.Data[i], b.Data[i]
+		if x >= 'A' && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if y >= 'A' && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }

@@ -21,10 +21,10 @@ index 5b7ef60..5a067cd 100644
  		return b.override.Get(), nil
  	}
 diff --git a/app/router/router.go b/app/router/router.go
-index 406f932..8fa77cf 100644
+index cd695d8..720ffbf 100644
 --- a/app/router/router.go
 +++ b/app/router/router.go
-@@ -27,6 +27,7 @@ type Router struct {
+@@ -28,6 +28,7 @@ type Router struct {
  	ohm        outbound.Manager
  	dispatcher routing.Dispatcher
  	mu         sync.Mutex
@@ -32,7 +32,7 @@ index 406f932..8fa77cf 100644
  }
  
  // Route is an implementation of routing.Route.
-@@ -140,8 +141,18 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
+@@ -153,8 +154,18 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
  		newRules = append(newRules, rr)
  	}
  

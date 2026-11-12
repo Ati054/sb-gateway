@@ -1,6 +1,7 @@
 package runtimeconfig
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -110,5 +111,51 @@ func TestDirectPrivateAllowCIDRsUsesOnlyAuthenticatedDirectRules(t *testing.T) {
 		"action": "route", "outbound": "direct-wan", "auth_user": []any{"alice"}, "ip_cidr": []any{"not-a-cidr"},
 	}}); err == nil {
 		t.Fatal("invalid private CIDR was accepted")
+	}
+}
+
+func TestHysteriaOutboundPreservesBandwidthAndObfuscation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		up, down int
+		obfs     bool
+	}{
+		{"both", 25, 100, false}, {"upload", 17, 0, false}, {"download-obfs", 0, 333, true}, {"automatic", 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := map[string]any{"type": "hysteria2", "tag": "hy-test", "server": "hy.example", "server_port": 443, "password": "local-control", "up_mbps": tc.up, "down_mbps": tc.down}
+			if tc.obfs {
+				input["obfs"] = map[string]any{"type": "salamander", "password": "local-mask"}
+			}
+			set, err := ConvertXrayOutbounds([]map[string]any{input}, "", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mask := objectValue(objectValue(set.Outbounds[0]["streamSettings"])["finalmask"])
+			quic := objectValue(mask["quicParams"])
+			for field, rate := range map[string]int{"brutalUp": tc.up, "brutalDown": tc.down} {
+				if rate > 0 && quic[field] != fmt.Sprintf("%dbps", rate*1_000_000) {
+					t.Fatalf("lost %s: %#v", field, quic)
+				}
+				if rate == 0 && quic[field] != nil {
+					t.Fatalf("forced automatic %s", field)
+				}
+			}
+			if quic["congestion"] != nil || quic["initStreamReceiveWindow"] != nil {
+				t.Fatal("bandwidth changed other QUIC options")
+			}
+			if tc.obfs && mask["udp"] == nil {
+				t.Fatal("bandwidth replaced obfuscation")
+			}
+			if tc.up == 0 && tc.down == 0 && len(quic) != 0 {
+				t.Fatal("automatic mode gained bandwidth")
+			}
+		})
+	}
+	for _, raw := range []any{-1, 1.5, 9_007_199_255.0} {
+		_, err := ConvertXrayOutbounds([]map[string]any{{"type": "hysteria2", "tag": "hy-invalid", "server_port": 443, "password": "PRIVATE-CANARY", "up_mbps": raw}}, "", nil, nil)
+		if err == nil || strings.Contains(err.Error(), "PRIVATE-CANARY") {
+			t.Fatal("invalid bandwidth accepted or exposed credentials")
+		}
 	}
 }

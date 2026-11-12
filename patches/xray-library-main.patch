@@ -1,78 +1,6 @@
-diff --git a/main/main.go b/main/main.go
---- a/main/main.go
-+++ b/main/main.go
-@@ -1,4 +1,4 @@
--package main
-+package maincmd
- 
- import (
- 	"flag"
-@@ -10,7 +10,9 @@ import (
- 	_ "github.com/xtls/xray-core/main/distro/all"
- )
- 
--func main() {
-+// Main runs the upstream CLI in its own process. Its flags, signals and exit
-+// handling must not be shared with another command running concurrently.
-+func Main() {
- 	os.Args = getArgsV4Compatible()
- 
- 	base.RootCommand.Long = "Xray is a platform for building proxies."
-diff --git a/main/run.go b/main/run.go
---- a/main/run.go
-+++ b/main/run.go
-@@ -1,4 +1,4 @@
--package main
-+package maincmd
- 
- import (
- 	"fmt"
-diff --git a/main/version.go b/main/version.go
---- a/main/version.go
-+++ b/main/version.go
-@@ -1,4 +1,4 @@
--package main
-+package maincmd
- 
- import (
- 	"fmt"
-diff --git a/main/run_test.go b/main/run_test.go
---- a/main/run_test.go
-+++ b/main/run_test.go
-@@ -1,4 +1,4 @@
--package main
-+package maincmd
- 
- import (
- 	"context"
-@@ -16,5 +16,5 @@ func TestRunConfigCommands(t *testing.T) {
- 	if os.Getenv("XRAY_TEST_CONFIG_COMMAND") == "1" {
- 		os.Args = append([]string{os.Args[0]}, flag.Args()...)
--		main()
-+		Main()
- 		return
- 	}
-diff --git a/main/main_test.go b/main/main_test.go
---- a/main/main_test.go
-+++ b/main/main_test.go
-@@ -1,7 +1,7 @@
- //go:build coveragemain
- // +build coveragemain
- 
--package main
-+package maincmd
- 
- import (
- 	"testing"
-@@ -9,5 +9,5 @@ import (
- )
- 
- func TestRunMainForCoverage(t *testing.T) {
--	main()
-+	Main()
- }
 diff --git a/cmd/xray/main.go b/cmd/xray/main.go
 new file mode 100644
+index 0000000..905583c
 --- /dev/null
 +++ b/cmd/xray/main.go
 @@ -0,0 +1,7 @@
@@ -83,3 +11,82 @@ new file mode 100644
 +func main() {
 +	maincmd.Main()
 +}
+diff --git a/main/main.go b/main/main.go
+index e8824e6..cd2e380 100644
+--- a/main/main.go
++++ b/main/main.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"flag"
+@@ -8,7 +8,9 @@ import (
+ 	_ "github.com/xtls/xray-core/main/distro/all"
+ )
+ 
+-func main() {
++// Main runs the upstream CLI in its own process. Its flags, signals and exit
++// handling must not be shared with another command running concurrently.
++func Main() {
+ 	os.Args = getArgsV4Compatible()
+ 
+ 	base.RootCommand.Long = "Xray is a platform for building proxies."
+diff --git a/main/main_test.go b/main/main_test.go
+index e873c7b..8b6c1d9 100644
+--- a/main/main_test.go
++++ b/main/main_test.go
+@@ -1,12 +1,12 @@
+ //go:build coveragemain
+ // +build coveragemain
+ 
+-package main
++package maincmd
+ 
+ import (
+ 	"testing"
+ )
+ 
+ func TestRunMainForCoverage(t *testing.T) {
+-	main()
++	Main()
+ }
+diff --git a/main/run.go b/main/run.go
+index 6ca9afb..40605cc 100644
+--- a/main/run.go
++++ b/main/run.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"fmt"
+diff --git a/main/run_test.go b/main/run_test.go
+index d442bb0..76989b2 100644
+--- a/main/run_test.go
++++ b/main/run_test.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"context"
+@@ -15,7 +15,7 @@ import (
+ func TestRunConfigCommands(t *testing.T) {
+ 	if os.Getenv("XRAY_TEST_CONFIG_COMMAND") == "1" {
+ 		os.Args = append([]string{os.Args[0]}, flag.Args()...)
+-		main()
++		Main()
+ 		return
+ 	}
+ 	dir := t.TempDir()
+diff --git a/main/version.go b/main/version.go
+index 9c1fa73..ba127c9 100644
+--- a/main/version.go
++++ b/main/version.go
+@@ -1,4 +1,4 @@
+-package main
++package maincmd
+ 
+ import (
+ 	"fmt"
